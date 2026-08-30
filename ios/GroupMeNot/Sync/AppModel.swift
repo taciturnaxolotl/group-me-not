@@ -209,7 +209,7 @@ final class AppModel {
             // permanently disable paging for the rest of the session, so the
             // window is put back and the next scroll tries again.
             window -= Self.transcriptPage
-            log.notice("could not page back in \(conversation.storageKey, privacy: .public): \(error.shortFailureText, privacy: .public)")
+            log.notice("could not page back in \(conversation.storageKey, privacy: .public): \(failureText(error), privacy: .public)")
             return
         }
 

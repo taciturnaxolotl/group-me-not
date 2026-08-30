@@ -33,23 +33,34 @@ struct SignInView: View {
                         .listRowSeparator(.hidden)
                 }
 
-                if OAuth.isConfigured {
-                    Section {
-                        Button(action: signInWithGroupMe) {
-                            HStack {
-                                Spacer()
-                                if isAuthorising {
-                                    ProgressView()
-                                } else {
-                                    Label("Continue with GroupMe", systemImage: "person.crop.circle")
-                                        .fontWeight(.semibold)
-                                }
-                                Spacer()
+                Section {
+                    Button(action: signInWithGroupMe) {
+                        HStack {
+                            Spacer()
+                            if isAuthorising {
+                                ProgressView()
+                            } else {
+                                Label("Continue with GroupMe", systemImage: "person.crop.circle")
+                                    .fontWeight(.semibold)
                             }
+                            Spacer()
                         }
-                        .disabled(isBusy)
-                    } footer: {
+                    }
+                    .disabled(isBusy || !OAuth.isConfigured)
+                } footer: {
+                    if OAuth.isConfigured {
                         Text("Opens GroupMe's own sign-in page. Your password is never seen by this app.")
+                    } else {
+                        // Shown rather than hidden: a missing build constant is a
+                        // setup step, and hiding the control makes the feature
+                        // look absent instead of unfinished.
+                        Label {
+                            Text("Needs a client ID. Register an app at dev.groupme.com with the callback "
+                                 + "`groupmenot://oauth`, then set `OAuth.clientID` in Auth/OAuth.swift.")
+                        } icon: {
+                            Image(systemName: "wrench.and.screwdriver")
+                        }
+                        .font(.footnote)
                     }
                 }
 

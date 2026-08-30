@@ -226,7 +226,7 @@ actor Outbox {
 
     private func fail(_ entry: OutboxEntry, _ error: Error) async {
         let attempts = entry.attempts + 1  // `claim` already bumped the stored count
-        let description = error.shortFailureText
+        let description = failureText(error)
 
         switch Self.disposition(for: error) {
         case .retry:

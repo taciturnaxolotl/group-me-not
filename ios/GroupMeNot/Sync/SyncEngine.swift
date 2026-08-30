@@ -199,7 +199,7 @@ actor SyncEngine {
             state.lastSyncedAt = Date()
             log.info("sync finished in \(Date().timeIntervalSince(started), format: .fixed(precision: 2))s, \(plans.count) conversations moved")
         } catch {
-            let message = error.shortFailureText
+            let message = failureText(error)
             state.phase = .failed
             state.lastError = message
             log.error("sync failed: \(message, privacy: .public)")
@@ -221,7 +221,7 @@ actor SyncEngine {
             let anchor = try await healableAnchor(conversation)
             try await fetchHistory(conversation, after: anchor, retry: .interactive)
         } catch {
-            log.error("catch-up for \(conversation.storageKey, privacy: .public) failed: \(error.shortFailureText, privacy: .public)")
+            log.error("catch-up for \(conversation.storageKey, privacy: .public) failed: \(failureText(error), privacy: .public)")
         }
         await roster
     }
@@ -244,7 +244,7 @@ actor SyncEngine {
             try await store.conversations.replaceMembers(roster, in: conversation)
             continuation.yield(.conversations)
         } catch {
-            log.notice("roster for \(groupID, privacy: .public) unavailable: \(error.shortFailureText, privacy: .public)")
+            log.notice("roster for \(groupID, privacy: .public) unavailable: \(failureText(error), privacy: .public)")
         }
     }
 
@@ -418,7 +418,7 @@ actor SyncEngine {
         } catch {
             // One conversation failing is not the sync failing. The others still
             // land, and this one is picked up by the next loop.
-            log.error("catch-up for \(plan.conversation.storageKey, privacy: .public) failed: \(error.shortFailureText, privacy: .public)")
+            log.error("catch-up for \(plan.conversation.storageKey, privacy: .public) failed: \(failureText(error), privacy: .public)")
         }
     }
 
@@ -491,7 +491,7 @@ actor SyncEngine {
             }
             continuation.yield(.conversations)
         } catch {
-            log.notice("read receipts unavailable: \(error.shortFailureText, privacy: .public)")
+            log.notice("read receipts unavailable: \(failureText(error), privacy: .public)")
         }
     }
 
@@ -536,7 +536,7 @@ actor SyncEngine {
                 continuation.yield(.messages(conversation))
                 continuation.yield(.conversations)
             } catch {
-                log.error("could not store pushed message: \(error.shortFailureText, privacy: .public)")
+                log.error("could not store pushed message: \(failureText(error), privacy: .public)")
             }
 
         case .liked(let like), .unliked(let like):

@@ -54,3 +54,22 @@ nonisolated enum APIError: Error, Sendable {
         return nil
     }
 }
+
+/// A short phrase for a failed request, fit for a banner or a log line.
+///
+/// A free function rather than a member on `Error`: this is only ever applied to
+/// an `any Error` existential, and it has no business appearing on every error
+/// type in the app just so three call sites can read a little tidier.
+///
+/// Deliberately vague about what the server said. `meta.errors` is not stable
+/// enough to branch on, only to repeat, and a decoding failure's detail belongs
+/// in a log rather than in front of somebody who just wanted to read a message.
+nonisolated func failureText(_ error: Error) -> String {
+    guard let api = error as? APIError else { return "\(error)" }
+    switch api {
+    case .transport: return "offline"
+    case .http(let status, _, _): return api.serverMessage ?? "HTTP \(status)"
+    case .decoding: return "unreadable response"
+    case .unauthenticated: return "signed out"
+    }
+}
