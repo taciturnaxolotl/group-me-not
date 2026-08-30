@@ -62,7 +62,9 @@ nonisolated enum OAuth {
         components.queryItems = [URLQueryItem(name: "client_id", value: clientID)]
         let url = components.url!
 
-        let anchor = PresentationAnchor()
+        guard let anchor = PresentationAnchor.resolve() else {
+            throw Failure.session("There is no window to present sign-in in.")
+        }
         return try await withCheckedThrowingContinuation { continuation in
             let session = ASWebAuthenticationSession(
                 url: url,
@@ -109,14 +111,28 @@ nonisolated enum OAuth {
 /// no direct handle, so find the active foreground scene's key window.
 @MainActor
 private final class PresentationAnchor: NSObject, ASWebAuthenticationPresentationContextProviding {
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+    private let window: ASPresentationAnchor
+
+    /// Resolves the window up front, so "there is nowhere to present this" is a
+    /// thrown error rather than a crash.
+    ///
+    /// `presentationAnchor(for:)` has to return a non-optional window, and as of
+    /// iOS 26 there is no scene-less `UIWindow` initialiser left to invent one
+    /// with. Rather than trap in the callback, find the window while we can
+    /// still fail gracefully and refuse to start the session without one.
+    static func resolve() -> PresentationAnchor? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
-        if let window = scene?.keyWindow ?? scene?.windows.first { return window }
-        // Nothing on screen to hang the sheet on, which in practice cannot
-        // happen from a view that is being tapped. A window still has to be
-        // returned, so build an empty one against whatever scene exists; the
-        // no-argument initialiser that used to do this is gone in iOS 26.
-        return scene.map { ASPresentationAnchor(windowScene: $0) } ?? ASPresentationAnchor(frame: .zero)
+        guard let window = scene?.keyWindow ?? scene?.windows.first else { return nil }
+        return PresentationAnchor(window: window)
+    }
+
+    private init(window: ASPresentationAnchor) {
+        self.window = window
+        super.init()
+    }
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        window
     }
 }
