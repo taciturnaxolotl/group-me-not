@@ -63,12 +63,10 @@ nonisolated struct Row {
 
     func int64(_ index: Int32) -> Int64 { sqlite3_column_int64(statement, index) }
     func int(_ index: Int32) -> Int { Int(sqlite3_column_int64(statement, index)) }
-    func double(_ index: Int32) -> Double { sqlite3_column_double(statement, index) }
     func bool(_ index: Int32) -> Bool { sqlite3_column_int64(statement, index) != 0 }
 
     func int64OrNil(_ index: Int32) -> Int64? { isNull(index) ? nil : int64(index) }
     func intOrNil(_ index: Int32) -> Int? { isNull(index) ? nil : int(index) }
-    func boolOrNil(_ index: Int32) -> Bool? { isNull(index) ? nil : bool(index) }
 
     func string(_ index: Int32) -> String { stringOrNil(index) ?? "" }
 
@@ -123,15 +121,6 @@ nonisolated struct DatabaseFile: Hashable, Sendable {
     /// `:memory:` does not give. For tests.
     static func inMemory(named name: String = "groupmenot") -> DatabaseFile {
         DatabaseFile(path: "file:\(name)?mode=memory&cache=shared", isURI: true)
-    }
-
-    /// A fresh file in a unique temporary directory. For tests that want real
-    /// WAL behaviour rather than the shared-cache approximation.
-    static func temporary() throws -> DatabaseFile {
-        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("GroupMeNot-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return DatabaseFile(path: directory.appendingPathComponent("store.sqlite").path)
     }
 
     /// Opens a connection and brings it up to the current schema version.
@@ -321,15 +310,6 @@ nonisolated final class Database {
             }
             throw error
         }
-    }
-
-    // MARK: Maintenance
-
-    /// Truncates the WAL and reclaims free pages. Worth doing when the app
-    /// backgrounds, never on a path the UI is waiting on.
-    func compact() throws {
-        try execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        try execute("PRAGMA incremental_vacuum")
     }
 
     // MARK: Internals

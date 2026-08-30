@@ -39,8 +39,6 @@ final class AppModel {
     /// Network and socket state, for the offline banner.
     let realtime = RealtimeMonitor()
 
-    var isOffline: Bool { realtime.reachability == .offline }
-
     // MARK: - The machinery
 
     let store: Store
@@ -64,6 +62,7 @@ final class AppModel {
     /// True once paging back has run out of history, so the transcript stops
     /// asking for more.
     @ObservationIgnored private var reachedBeginning = false
+    @ObservationIgnored private var typingSweep: Task<Void, Never>?
 
     /// Where the signed-in user is remembered between launches. Small enough for
     /// defaults, and needed before the first request: DM routes are addressed
@@ -152,6 +151,7 @@ final class AppModel {
     func openConversation(_ conversation: ConversationID) async {
         openConversationID = conversation
         window = Self.transcriptPage
+        typingSweep?.cancel()
         typingUserIDs = [:]
 
         messages = (try? await store.messages.recent(conversation, limit: window)) ?? []
@@ -167,6 +167,8 @@ final class AppModel {
     /// Leave the open conversation. Synchronous, because it runs from
     /// `onDisappear` and a view teardown should not have to await anything.
     func closeConversation() {
+        typingSweep?.cancel()
+        typingSweep = nil
         openConversationID = nil
         messages = []
         outbox = []
@@ -320,6 +322,8 @@ final class AppModel {
     func signOut() async {
         await bayeux.stop()
         await tokens.clear()
+        typingSweep?.cancel()
+        typingSweep = nil
 
         let rows = (try? await store.conversations.list(limit: 5000)) ?? []
         for row in rows {
@@ -334,6 +338,7 @@ final class AppModel {
         messages = []
         outbox = []
         members = []
+        typingUserIDs = [:]
         openConversationID = nil
         totalUnread = 0
         syncState = SyncState(isOnline: realtime.reachability != .offline)
@@ -435,10 +440,45 @@ final class AppModel {
     private func handleLocally(_ event: RealtimeEvent) {
         guard case .push(let push) = event, case .typing(let typing) = push.kind else { return }
         guard push.channel == openConversationChannel, typing.userID != currentUser?.id else { return }
-        let now = Date()
-        typingUserIDs[typing.userID] = typing.startedAt
-        typingUserIDs = typingUserIDs.filter { now.timeIntervalSince($0.value) < PushEvent.Typing.expiry }
+        // Stamped with our clock rather than the sender's. `started` comes off
+        // somebody else's phone, and a device a couple of seconds out would
+        // otherwise show an indicator that either never appears or never leaves.
+        typingUserIDs[typing.userID] = Date()
+        scheduleTypingSweep()
     }
+
+    /// Indicators die by timeout: there is no "stopped typing" frame on the
+    /// wire. Nothing else will wake us once the last event lands, so each event
+    /// schedules its own expiry.
+    private func scheduleTypingSweep() {
+        typingSweep?.cancel()
+        typingSweep = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(PushEvent.Typing.expiry))
+            guard !Task.isCancelled else { return }
+            self?.sweepTyping()
+        }
+    }
+
+    private func sweepTyping() {
+        let now = Date()
+        typingUserIDs = typingUserIDs.filter { now.timeIntervalSince($0.value) < PushEvent.Typing.expiry }
+        if !typingUserIDs.isEmpty { scheduleTypingSweep() }
+    }
+
+    /// Who is typing, by the name this conversation knows them by.
+    ///
+    /// Empty when nobody is, and also when we hold no roster for them, which is
+    /// the normal case in a DM. The view says "Typing…" rather than guessing.
+    var typingNames: [String] {
+        guard !typingUserIDs.isEmpty else { return [] }
+        var names: [String: String] = [:]
+        for member in members {
+            if let name = member.nickname ?? member.name { names[member.identity] = name }
+        }
+        return typingUserIDs.keys.compactMap { names[$0] }.sorted()
+    }
+
+    var isAnyoneTyping: Bool { !typingUserIDs.isEmpty }
 
     private var openConversationChannel: String? {
         guard let openConversationID, let me = currentUser?.id else { return nil }

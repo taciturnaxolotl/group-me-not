@@ -1,5 +1,4 @@
 import Foundation
-import OSLog
 
 /// Message history on disk.
 ///
@@ -8,7 +7,6 @@ import OSLog
 /// speed whether or not there is a radio.
 actor MessageStore {
     private let db: Database
-    private let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "messages")
 
     init(_ file: DatabaseFile) throws {
         self.db = try file.open()
@@ -69,137 +67,26 @@ actor MessageStore {
         try upsert([message], in: conversation)
     }
 
-    /// Marks a message deleted, keeping the row so the transcript still shows
-    /// the gap. GroupMe's own delete does the same: the message keeps arriving,
-    /// with its text cleared.
-    func tombstone(
-        id: String,
-        in conversation: ConversationID,
-        deletedAt: Date = Date(),
-        actor deletionActor: String? = nil
-    ) throws {
-        try db.transaction {
-            guard var message = try loadMessage(id: id, in: conversation) else { return }
-            message.text = nil
-            message.attachments = nil
-            message.deletedAt = Int(deletedAt.timeIntervalSince1970)
-            message.deletionActor = deletionActor ?? message.deletionActor
-            // Force the update through even if updated_at did not move.
-            message.updatedAt = max(message.updatedAt ?? 0, message.deletedAt ?? 0)
-            try upsertRow(message, in: conversation)
-        }
-    }
-
-    /// Removes a message outright. Use for a local send that failed permanently;
-    /// prefer `tombstone` for anything the server deleted.
-    func delete(id: String, in conversation: ConversationID) throws {
-        try db.run(
-            "DELETE FROM messages WHERE conversation_key = ? AND id = ?",
-            [SQLValue(conversation.storageKey), SQLValue(id)]
-        )
-    }
-
-    /// Drops a conversation's whole history. The conversation row survives.
-    func deleteAll(in conversation: ConversationID) throws {
-        try db.run(
-            "DELETE FROM messages WHERE conversation_key = ?",
-            [SQLValue(conversation.storageKey)]
-        )
-    }
-
-    /// Trims a conversation to its newest `keeping` messages. History we can
-    /// always refetch is not worth carrying forever.
-    func trim(_ conversation: ConversationID, keeping limit: Int) throws {
-        try db.run(
-            """
-            DELETE FROM messages
-             WHERE conversation_key = ?1
-               AND (sort_key, id) < (
-                    SELECT sort_key, id FROM messages
-                     WHERE conversation_key = ?1
-                     ORDER BY sort_key DESC, id DESC
-                     LIMIT 1 OFFSET ?2
-               )
-            """,
-            [SQLValue(conversation.storageKey), SQLValue(max(0, limit - 1))]
-        )
-    }
-
     // MARK: - Reading
 
-    /// The newest `limit` messages, oldest first so the caller can append them
+    /// The newest `limit` messages, oldest first so the caller can render them
     /// straight into a transcript.
     ///
-    /// Pass `before` to page backwards: it is the id of the oldest message you
-    /// already have.
-    func recent(
-        _ conversation: ConversationID,
-        limit: Int = 50,
-        before: String? = nil
-    ) throws -> [Message] {
-        let key = SQLValue(conversation.storageKey)
-        let rows: [Message]
-        if let before {
-            rows = try db.query(
-                """
-                SELECT payload FROM messages
-                 WHERE conversation_key = ? AND (sort_key, id) < (?, ?)
-                 ORDER BY sort_key DESC, id DESC
-                 LIMIT ?
-                """,
-                [key, SQLValue(MessageSortKey.value(for: before)), SQLValue(before), SQLValue(limit)],
-                decodeMessage
-            )
-        } else {
-            rows = try db.query(
-                """
-                SELECT payload FROM messages
-                 WHERE conversation_key = ?
-                 ORDER BY sort_key DESC, id DESC
-                 LIMIT ?
-                """,
-                [key, SQLValue(limit)],
-                decodeMessage
-            )
-        }
-        return rows.reversed()
-    }
-
-    /// Everything stored after `id`, ascending. Mirrors the server's `after_id`
-    /// paging so a catch-up and a local read agree on what "after" means.
-    func messages(
-        _ conversation: ConversationID,
-        after id: String,
-        limit: Int = 200
-    ) throws -> [Message] {
-        try db.query(
+    /// Paging back is done by asking for a larger `limit`, not by passing an
+    /// anchor: the transcript holds one array of everything it draws, so a page
+    /// of history is a longer read rather than a second one to splice on.
+    func recent(_ conversation: ConversationID, limit: Int = 50) throws -> [Message] {
+        let rows = try db.query(
             """
             SELECT payload FROM messages
-             WHERE conversation_key = ? AND (sort_key, id) > (?, ?)
-             ORDER BY sort_key ASC, id ASC
-             LIMIT ?
-            """,
-            [
-                SQLValue(conversation.storageKey),
-                SQLValue(MessageSortKey.value(for: id)),
-                SQLValue(id),
-                SQLValue(limit),
-            ],
-            decodeMessage
-        )
-    }
-
-    /// The newest stored message id: the anchor a catch-up passes as `after_id`.
-    func syncHead(_ conversation: ConversationID) throws -> String? {
-        try db.queryOne(
-            """
-            SELECT id FROM messages
              WHERE conversation_key = ?
              ORDER BY sort_key DESC, id DESC
-             LIMIT 1
+             LIMIT ?
             """,
-            [SQLValue(conversation.storageKey)]
-        ) { $0.string(0) }
+            [SQLValue(conversation.storageKey), SQLValue(limit)],
+            decodeMessage
+        )
+        return rows.reversed()
     }
 
     /// Sync heads for every conversation at once, so the list-and-diff step is
@@ -238,26 +125,6 @@ actor MessageStore {
         )
     }
 
-    func count(in conversation: ConversationID) throws -> Int {
-        try db.queryOne(
-            "SELECT COUNT(*) FROM messages WHERE conversation_key = ?",
-            [SQLValue(conversation.storageKey)]
-        ) { $0.int(0) } ?? 0
-    }
-
-    /// Messages replying into a thread, oldest first.
-    func replies(to parentID: String, in conversation: ConversationID) throws -> [Message] {
-        try db.query(
-            """
-            SELECT payload FROM messages
-             WHERE conversation_key = ? AND parent_id = ?
-             ORDER BY sort_key ASC, id ASC
-            """,
-            [SQLValue(conversation.storageKey), SQLValue(parentID)],
-            decodeMessage
-        )
-    }
-
     // MARK: - Internals
 
     private func loadMessage(id: String, in conversation: ConversationID) throws -> Message? {
@@ -266,10 +133,6 @@ actor MessageStore {
             [SQLValue(conversation.storageKey), SQLValue(id)],
             decodeMessage
         )
-    }
-
-    private func upsertRow(_ message: Message, in conversation: ConversationID) throws {
-        _ = try upsert([message], in: conversation)
     }
 
     private func decodeMessage(_ row: Row) throws -> Message {

@@ -24,7 +24,6 @@ nonisolated struct SyncState: Sendable, Hashable {
     var lastSyncedAt: Date?
 
     var isRefreshing: Bool { phase == .syncing }
-    var isIdle: Bool { phase == .idle }
 }
 
 /// Why a sync ran. Only used for logging, but a sync you cannot attribute is a
@@ -237,7 +236,12 @@ actor SyncEngine {
         guard case .group(let groupID) = conversation else { return }
         do {
             let group = try await api.group(id: groupID)
-            try await store.conversations.upsert(groups: [group])
+            // Only the roster. Writing the whole row here would also write the
+            // server's `unread_count`, which is stale by definition at this
+            // point: we cleared the badge locally a moment ago and the read
+            // receipt has not landed yet, so the badge would come straight back.
+            guard let roster = group.members else { return }
+            try await store.conversations.replaceMembers(roster, in: conversation)
             continuation.yield(.conversations)
         } catch {
             log.notice("roster for \(groupID, privacy: .public) unavailable: \(error.shortFailureText, privacy: .public)")

@@ -152,12 +152,18 @@ struct ChatView: View {
                         }
                     }
 
+                    if model.isAnyoneTyping {
+                        TypingIndicator(names: model.typingNames)
+                            .transition(.opacity)
+                    }
+
                     Color.clear
                         .frame(height: 1)
                         .id(bottomAnchor)
                 }
                 .padding(.horizontal, 10)
                 .padding(.bottom, 6)
+                .animation(.easeOut(duration: 0.2), value: model.isAnyoneTyping)
             }
             // Open at the newest message, and stay pinned to it as content
             // changes size. Prepending a page of history therefore leaves the
@@ -227,6 +233,12 @@ struct ChatView: View {
                 .background(.quaternary, in: .capsule)
                 .focused($composerFocused)
                 .accessibilityLabel("Message")
+                .onChange(of: draft) { _, text in
+                    // Throttled inside the socket client, so every keystroke
+                    // calling this is the intended usage.
+                    guard !text.isEmpty else { return }
+                    Task { await model.userIsTyping() }
+                }
 
             Button(action: send) {
                 Image(systemName: "arrow.up.circle.fill")
@@ -368,5 +380,40 @@ private struct EmptyState: View {
         .frame(maxWidth: .infinity)
         .padding(.top, 80)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// "Alice is typing…", at the foot of the transcript.
+///
+/// Nobody sends a "stopped typing" frame, so this appears on an event and
+/// leaves on a timeout. Names come from the group roster when we hold one; a DM
+/// gets the anonymous form, which reads fine when there is only one other
+/// person it could be.
+private struct TypingIndicator: View {
+    let names: [String]
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "ellipsis.bubble")
+                .imageScale(.small)
+            Text(sentence)
+                .lineLimit(1)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(sentence)
+    }
+
+    private var sentence: String {
+        switch names.count {
+        case 0: "Typing…"
+        case 1: "\(names[0]) is typing…"
+        case 2: "\(names[0]) and \(names[1]) are typing…"
+        default: "Several people are typing…"
+        }
     }
 }

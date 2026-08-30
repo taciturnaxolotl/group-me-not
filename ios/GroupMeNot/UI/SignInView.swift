@@ -16,6 +16,9 @@ struct SignInView: View {
     @State private var token = ""
     @State private var isRevealed = false
     @State private var isSigningIn = false
+    @State private var isAuthorising = false
+    @State private var isShowingTokenEntry = false
+    @State private var oauthError: String?
     @FocusState private var tokenFieldFocused: Bool
 
     private static let developerURL = URL(string: "https://dev.groupme.com/applications")!
@@ -30,30 +33,58 @@ struct SignInView: View {
                         .listRowSeparator(.hidden)
                 }
 
+                if OAuth.isConfigured {
+                    Section {
+                        Button(action: signInWithGroupMe) {
+                            HStack {
+                                Spacer()
+                                if isAuthorising {
+                                    ProgressView()
+                                } else {
+                                    Label("Continue with GroupMe", systemImage: "person.crop.circle")
+                                        .fontWeight(.semibold)
+                                }
+                                Spacer()
+                            }
+                        }
+                        .disabled(isBusy)
+                    } footer: {
+                        Text("Opens GroupMe's own sign-in page. Your password is never seen by this app.")
+                    }
+                }
+
                 Section {
-                    tokenField
+                    if OAuth.isConfigured {
+                        DisclosureGroup("Use a token instead", isExpanded: $isShowingTokenEntry) {
+                            tokenField
+                        }
+                    } else {
+                        tokenField
+                    }
                 } header: {
-                    Text("Access Token")
+                    Text(OAuth.isConfigured ? "Advanced" : "Access Token")
                 } footer: {
                     Text("Stored in the keychain on this device. It is never sent anywhere except GroupMe.")
                 }
 
-                Section {
-                    Button(action: signIn) {
-                        HStack {
-                            Spacer()
-                            if isSigningIn {
-                                ProgressView()
-                            } else {
-                                Text("Sign In").fontWeight(.semibold)
+                if isTokenEntryVisible {
+                    Section {
+                        Button(action: signIn) {
+                            HStack {
+                                Spacer()
+                                if isSigningIn {
+                                    ProgressView()
+                                } else {
+                                    Text("Sign In").fontWeight(.semibold)
+                                }
+                                Spacer()
                             }
-                            Spacer()
                         }
+                        .disabled(!canSubmit)
                     }
-                    .disabled(!canSubmit)
                 }
 
-                if let error = model.syncState.lastError {
+                if let error = oauthError ?? model.syncState.lastError {
                     Section {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
@@ -61,7 +92,7 @@ struct SignInView: View {
                     }
                 }
 
-                Section("Where to find it") {
+                Section(OAuth.isConfigured ? "Where to find a token" : "Where to find it") {
                     instructions
                     Button("Open dev.groupme.com", systemImage: "safari") {
                         openURL(Self.developerURL)
@@ -82,7 +113,7 @@ struct SignInView: View {
                 .font(.system(size: 46))
                 .foregroundStyle(.tint)
                 .accessibilityHidden(true)
-            Text("GroupMe, Not")
+            Text("GroupMeNot")
                 .font(.title2.weight(.semibold))
             Text("A faster GroupMe that works without a signal.")
                 .font(.subheadline)
@@ -162,7 +193,32 @@ struct SignInView: View {
         token.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var canSubmit: Bool { !trimmedToken.isEmpty && !isSigningIn }
+    private var canSubmit: Bool { !trimmedToken.isEmpty && !isBusy }
+    private var isBusy: Bool { isSigningIn || isAuthorising }
+
+    /// The token field is always reachable, but it is only the primary path when
+    /// this build has no client id to run OAuth with.
+    private var isTokenEntryVisible: Bool { !OAuth.isConfigured || isShowingTokenEntry }
+
+    /// Hand off to GroupMe's own page. The token comes back through the custom
+    /// scheme; we never see a password.
+    private func signInWithGroupMe() {
+        guard !isBusy else { return }
+        tokenFieldFocused = false
+        isAuthorising = true
+        oauthError = nil
+        Task {
+            do {
+                let token = try await OAuth.signIn()
+                await model.signIn(token: token)
+            } catch OAuth.Failure.cancelled {
+                // They closed the sheet. Say nothing.
+            } catch {
+                oauthError = error.localizedDescription
+            }
+            isAuthorising = false
+        }
+    }
 
     private func signIn() {
         guard canSubmit else { return }

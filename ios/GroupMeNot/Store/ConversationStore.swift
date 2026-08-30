@@ -1,5 +1,4 @@
 import Foundation
-import OSLog
 
 /// One row of the conversation list, already in the shape the UI renders.
 ///
@@ -39,7 +38,6 @@ nonisolated struct ConversationRow: Identifiable, Hashable, Sendable {
 /// it is a single indexed scan and never a join against messages.
 actor ConversationStore {
     private let db: Database
-    private let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "conversations")
 
     init(_ file: DatabaseFile) throws {
         self.db = try file.open()
@@ -103,22 +101,6 @@ actor ConversationStore {
     /// or an outgoing send names a conversation we have never listed.
     func ensureExists(_ conversation: ConversationID) throws {
         try ConversationWrites.ensureExists(conversation, in: db)
-    }
-
-    /// Moves the list entry to reflect `message`, if it is newer than what the
-    /// row already points at.
-    func applyLatestMessage(_ message: Message, in conversation: ConversationID) throws {
-        try db.transaction {
-            try ConversationWrites.ensureExists(conversation, in: db)
-            try ConversationWrites.applyLatest(message, conversation, in: db)
-        }
-    }
-
-    func setUnreadCount(_ count: Int, for conversation: ConversationID) throws {
-        try db.run(
-            "UPDATE conversations SET unread_count = ? WHERE key = ?",
-            [SQLValue(max(0, count)), SQLValue(conversation.storageKey)]
-        )
     }
 
     /// Marks read locally. Clears the badge immediately; the read receipt POST
@@ -251,15 +233,6 @@ actor ConversationStore {
                     .flatMap { StoreCoding.decodeIfPossible([String].self, from: $0) }
             )
         }
-    }
-
-    /// The display name for a sender inside a conversation, which is the
-    /// nickname when there is one. Cheap enough to call per message row.
-    func displayName(for userID: String, in conversation: ConversationID) throws -> String? {
-        try db.queryOne(
-            "SELECT COALESCE(nickname, name) FROM members WHERE conversation_key = ? AND user_id = ?",
-            [SQLValue(conversation.storageKey), SQLValue(userID)]
-        ) { $0.stringOrNil(0) } ?? nil
     }
 
     // MARK: - Internals

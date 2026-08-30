@@ -143,20 +143,6 @@ actor OutboxStore {
 
     // MARK: - Draining
 
-    /// Everything still waiting to go out, oldest first.
-    func pending(limit: Int = 200) throws -> [OutboxEntry] {
-        try db.query(
-            """
-            SELECT \(Self.columns) FROM outbox
-             WHERE state = ?
-             ORDER BY created_at ASC
-             LIMIT ?
-            """,
-            [SQLValue(OutboxState.pending.rawValue), SQLValue(limit)],
-            Self.decode
-        )
-    }
-
     /// Everything a drain should attempt right now: fresh sends plus failures
     /// whose backoff has elapsed.
     func ready(at now: Date = Date(), limit: Int = 200) throws -> [OutboxEntry] {
@@ -311,13 +297,6 @@ actor OutboxStore {
             [SQLValue(sourceGuid)],
             Self.decode
         )
-    }
-
-    func count(state: OutboxState) throws -> Int {
-        try db.queryOne(
-            "SELECT COUNT(*) FROM outbox WHERE state = ?",
-            [SQLValue(state.rawValue)]
-        ) { $0.int(0) } ?? 0
     }
 
     // MARK: - Removing

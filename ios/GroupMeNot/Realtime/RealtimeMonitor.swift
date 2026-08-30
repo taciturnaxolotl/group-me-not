@@ -40,8 +40,6 @@ final class RealtimeMonitor {
     private(set) var lastGap: TimeInterval?
 
     var isOnline: Bool { reachability.isOnline }
-    /// True when the user can expect messages to arrive by themselves.
-    var isLive: Bool { reachability.isOnline && connection.isConnected }
 
     /// Reachability transitions for consumers that are not SwiftUI. The sync layer
     /// can await this instead of polling the observable.
