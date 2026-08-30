@@ -1,17 +1,24 @@
-//
-//  GroupMeNotApp.swift
-//  GroupMeNot
-//
-//  Created by Kieran Klukas on 8/30/26.
-//
-
 import SwiftUI
 
 @main
 struct GroupMeNotApp: App {
+    /// One model for the process. It owns the store, the API, sync and realtime,
+    /// and it opens the database on init so the first frame can render from disk
+    /// without waiting for anything.
+    @State private var model = AppModel()
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
+                .environment(model)
+                .task { await model.bootstrap() }
+                .onChange(of: scenePhase) { _, phase in
+                    // Faye replays nothing it missed, so coming back from the
+                    // background means running the whole catch-up loop again.
+                    guard phase == .active else { return }
+                    Task { await model.foregrounded() }
+                }
         }
     }
 }

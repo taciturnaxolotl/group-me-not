@@ -1,0 +1,404 @@
+import SwiftUI
+
+// MARK: - Display model
+
+/// One message, already resolved into everything the row needs to draw itself.
+///
+/// The row does no lookups: whether the message is mine, what the sender is
+/// called, whether it opens or closes a run, and how far along delivery is are
+/// all decided once when the transcript is built. A view that has to ask
+/// questions during layout is a view that scrolls badly.
+nonisolated struct MessageDisplay: Identifiable, Hashable, Sendable {
+
+    /// How far a message has got towards the server.
+    enum Delivery: Hashable, Sendable {
+        /// GroupMe has it.
+        case sent
+        /// Queued locally, on its way or waiting for a network.
+        case pending
+        /// The last attempt failed. The string is what to tell the user.
+        case failed(String?)
+    }
+
+    /// Stable across reloads: the server id once there is one, the outbox guid
+    /// before that.
+    var id: String
+    var message: Message
+    var isOwn: Bool
+    /// The sender's nickname in this conversation, already resolved.
+    var senderName: String
+    var senderAvatarURL: String?
+    /// True on the first message of a run, which is the only one that shows a
+    /// name and a face.
+    var showsSender: Bool
+    /// True on the last message of a run, which carries the timestamp and the
+    /// squared-off corner.
+    var isRunTail: Bool
+    var delivery: Delivery
+
+    var isPending: Bool { delivery == .pending }
+
+    var isFailed: Bool {
+        if case .failed = delivery { return true }
+        return false
+    }
+
+    /// What went wrong, when the sync layer had something worth repeating.
+    var failureReason: String? {
+        if case .failed(let reason) = delivery { return reason }
+        return nil
+    }
+}
+
+// MARK: - Row
+
+/// A single line of the transcript.
+///
+/// Three shapes live here rather than in three views, because which one you get
+/// is a property of the message and callers should not have to switch on it:
+/// system notices are centred grey text, deleted messages are a tombstone, and
+/// everything else is a bubble.
+struct MessageRow: View {
+    let item: MessageDisplay
+    /// Called when the user asks to send a failed message again.
+    var onRetry: () -> Void = {}
+    /// Called when the user gives up on a failed message.
+    var onDiscard: () -> Void = {}
+
+    var body: some View {
+        if item.message.isSystem {
+            SystemNotice(text: item.message.text ?? "")
+        } else {
+            BubbleRow(item: item, onRetry: onRetry, onDiscard: onDiscard)
+        }
+    }
+}
+
+/// Joins, leaves, renames, and the rest: centred, quiet, and not attributed to
+/// anyone.
+private struct SystemNotice: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 32)
+            .padding(.vertical, 6)
+            .accessibilityAddTraits(.isStaticText)
+    }
+}
+
+// MARK: - Bubble
+
+private struct BubbleRow: View {
+    let item: MessageDisplay
+    let onRetry: () -> Void
+    let onDiscard: () -> Void
+
+    @ScaledMetric(relativeTo: .body) private var avatarSize: CGFloat = 28
+    @ScaledMetric(relativeTo: .body) private var gutter: CGFloat = 56
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            if item.isOwn {
+                // Keeps my bubbles from running the full width, which is what
+                // makes the two sides readable at a glance.
+                Spacer(minLength: gutter)
+            } else {
+                avatarSlot
+            }
+
+            VStack(alignment: item.isOwn ? .trailing : .leading, spacing: 2) {
+                if item.showsSender && !item.isOwn {
+                    Text(item.senderName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 4)
+                }
+
+                bubble
+
+                footer
+            }
+
+            if !item.isOwn { Spacer(minLength: gutter) }
+        }
+        .padding(.vertical, item.isRunTail ? 3 : 1)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel)
+        .contextMenu { contextMenu }
+    }
+
+    /// Reserved even when empty, so a run of messages stays in one column.
+    @ViewBuilder private var avatarSlot: some View {
+        if item.showsSender {
+            Avatar(url: item.senderAvatarURL, name: item.senderName, size: avatarSize)
+        } else {
+            Color.clear.frame(width: avatarSize, height: 1)
+        }
+    }
+
+    @ViewBuilder private var bubble: some View {
+        SwiftUI.Group {
+            if item.message.isDeleted {
+                Tombstone()
+            } else {
+                VStack(alignment: item.isOwn ? .trailing : .leading, spacing: 6) {
+                    AttachmentStack(attachments: displayableAttachments, isOwn: item.isOwn)
+                    if let text = item.message.text, !text.isEmpty {
+                        Text(text)
+                            .font(.body)
+                            .textSelection(.enabled)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .foregroundStyle(item.isOwn ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+                .background(bubbleTint, in: bubbleShape)
+            }
+        }
+        // The whole point of the optimistic send: the bubble is there instantly
+        // and merely looks provisional until the server agrees.
+        .opacity(item.isPending ? 0.55 : 1)
+        .animation(.easeOut(duration: 0.2), value: item.isPending)
+    }
+
+    private var bubbleTint: AnyShapeStyle {
+        item.isOwn ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color(.secondarySystemFill))
+    }
+
+    /// Rounded on three corners, and squared off on the one nearest the sender
+    /// when the run ends. Same idea as Messages: the tail points at whoever
+    /// said it.
+    private var bubbleShape: UnevenRoundedRectangle {
+        let big: CGFloat = 18
+        let tail: CGFloat = item.isRunTail ? 5 : 18
+        return UnevenRoundedRectangle(
+            topLeadingRadius: big,
+            bottomLeadingRadius: item.isOwn ? big : tail,
+            bottomTrailingRadius: item.isOwn ? tail : big,
+            topTrailingRadius: big,
+            style: .continuous
+        )
+    }
+
+    /// Timestamp, likes, and the failure affordance. Only on the tail of a run,
+    /// so a burst of five messages does not carry five clocks.
+    @ViewBuilder private var footer: some View {
+        if item.isFailed {
+            let reason = item.failureReason ?? "Not delivered"
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.circle.fill")
+                Text(reason)
+                    .lineLimit(1)
+                Button("Try Again", action: onRetry)
+                    .buttonStyle(.plain)
+                    .fontWeight(.semibold)
+            }
+            .font(.caption)
+            .foregroundStyle(.red)
+            .padding(.horizontal, 4)
+            .padding(.top, 1)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(reason)
+            .accessibilityHint("Double tap Try Again to send it again")
+        } else if item.isRunTail {
+            HStack(spacing: 5) {
+                if item.message.likeCount > 0 {
+                    Label("\(item.message.likeCount)", systemImage: "heart.fill")
+                        .labelStyle(.titleAndIcon)
+                        .imageScale(.small)
+                        .accessibilityLabel("\(item.message.likeCount) like\(item.message.likeCount == 1 ? "" : "s")")
+                }
+                Text(Formatters.messageTime(item.message.date))
+                    .accessibilityHidden(true)
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.top, 1)
+        }
+    }
+
+    @ViewBuilder private var contextMenu: some View {
+        if let text = item.message.text, !text.isEmpty, !item.message.isDeleted {
+            Button {
+                UIPasteboard.general.string = text
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+        }
+        if item.isFailed {
+            Button(action: onRetry) { Label("Try Again", systemImage: "arrow.clockwise") }
+            Button(role: .destructive, action: onDiscard) { Label("Delete", systemImage: "trash") }
+        }
+    }
+
+    /// Replies and mentions are structure, not content: they have nothing to
+    /// draw on their own, so they never reach the attachment stack.
+    private var displayableAttachments: [Message.Attachment] {
+        (item.message.attachments ?? []).filter { $0.type != "mentions" && $0.type != "reply" }
+    }
+
+    private var accessibilityLabel: String {
+        var parts: [String] = []
+        parts.append(item.isOwn ? "You said" : "\(item.senderName) said")
+        if item.message.isDeleted {
+            parts.append("this message was deleted")
+        } else if let text = item.message.text, !text.isEmpty {
+            parts.append(text)
+        }
+        if !displayableAttachments.isEmpty {
+            parts.append(displayableAttachments.map { AttachmentStack.noun(for: $0.type) }.joined(separator: ", "))
+        }
+        switch item.delivery {
+        case .sent: parts.append(Formatters.spokenTimestamp(item.message.date))
+        case .pending: parts.append("sending")
+        case .failed(let reason): parts.append(reason ?? "not delivered")
+        }
+        if item.message.likeCount > 0 {
+            parts.append("\(item.message.likeCount) like\(item.message.likeCount == 1 ? "" : "s")")
+        }
+        return parts.joined(separator: ", ")
+    }
+}
+
+/// A deleted message. GroupMe keeps delivering the row with its text stripped,
+/// so the gap is real and worth showing rather than hiding.
+private struct Tombstone: View {
+    var body: some View {
+        Text("Message deleted")
+            .font(.body.italic())
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(Color(.separator), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            )
+    }
+}
+
+// MARK: - Attachments
+
+/// Everything hanging off a message, drawn in a fixed frame.
+///
+/// The frame is fixed on purpose. We do not learn a photo's aspect ratio until
+/// it downloads, and letting the row resize on arrival is exactly the thing
+/// that throws a transcript's scroll position across the screen.
+private struct AttachmentStack: View {
+    let attachments: [Message.Attachment]
+    let isOwn: Bool
+
+    var body: some View {
+        if !attachments.isEmpty {
+            VStack(alignment: isOwn ? .trailing : .leading, spacing: 6) {
+                ForEach(Array(attachments.enumerated()), id: \.offset) { _, attachment in
+                    view(for: attachment)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func view(for attachment: Message.Attachment) -> some View {
+        switch attachment.type {
+        case "image", "video", "linked_image":
+            MediaThumbnail(attachment: attachment)
+        case "location":
+            AttachmentChip(
+                symbol: "mappin.and.ellipse",
+                title: attachment.name ?? "Location",
+                isOwn: isOwn
+            )
+        case "file":
+            AttachmentChip(symbol: "doc.fill", title: attachment.name ?? "File", isOwn: isOwn)
+        case "audio":
+            AttachmentChip(symbol: "waveform", title: "Voice message", isOwn: isOwn)
+        case "poll":
+            AttachmentChip(symbol: "chart.bar.fill", title: "Poll", isOwn: isOwn)
+        case "event":
+            AttachmentChip(symbol: "calendar", title: "Event", isOwn: isOwn)
+        case "emoji":
+            EmptyView()
+        default:
+            AttachmentChip(symbol: "paperclip", title: Self.noun(for: attachment.type), isOwn: isOwn)
+        }
+    }
+
+    /// A word for an attachment the transcript cannot render, used in previews
+    /// and read aloud by VoiceOver.
+    static func noun(for type: String?) -> String {
+        switch type {
+        case "image", "linked_image": "Photo"
+        case "video": "Video"
+        case "audio": "Voice message"
+        case "file": "File"
+        case "location": "Location"
+        case "emoji": "Sticker"
+        case "poll": "Poll"
+        case "event": "Event"
+        default: "Attachment"
+        }
+    }
+}
+
+/// A photo or video still in a box of known size.
+private struct MediaThumbnail: View {
+    let attachment: Message.Attachment
+
+    /// Roughly the 4:3 a phone camera produces, capped so a bubble never runs
+    /// off the side of a small screen.
+    private let width: CGFloat = 232
+    private let height: CGFloat = 174
+
+    var body: some View {
+        RemoteImage(url: url, maxPixelSize: width * 3) {
+            ZStack {
+                Rectangle().fill(.quaternary)
+                Image(systemName: attachment.type == "video" ? "play.rectangle.fill" : "photo")
+                    .font(.title)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        // The frame is set before anything loads, so the row's height is known
+        // from the first layout pass and never changes.
+        .frame(width: width, height: height)
+        .clipShape(.rect(cornerRadius: 12, style: .continuous))
+        .overlay {
+            if attachment.type == "video" {
+                Image(systemName: "play.circle.fill")
+                    .font(.largeTitle)
+                    .foregroundStyle(.white, .black.opacity(0.35))
+            }
+        }
+        .accessibilityLabel(attachment.type == "video" ? "Video" : "Photo")
+    }
+
+    private var url: URL? {
+        let candidate = attachment.previewUrl ?? attachment.url ?? attachment.sourceUrl
+        return candidate.flatMap(URL.init(string:))
+    }
+}
+
+/// A one-line stand-in for an attachment we do not render inline.
+private struct AttachmentChip: View {
+    let symbol: String
+    let title: String
+    let isOwn: Bool
+
+    var body: some View {
+        Label(title, systemImage: symbol)
+            .font(.subheadline)
+            .lineLimit(1)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(isOwn ? AnyShapeStyle(.white.opacity(0.18)) : AnyShapeStyle(.quaternary),
+                        in: .rect(cornerRadius: 10, style: .continuous))
+    }
+}
