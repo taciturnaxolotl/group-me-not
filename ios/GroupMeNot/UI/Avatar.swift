@@ -97,6 +97,10 @@ private struct InitialsFill: View {
 struct RemoteImage<Placeholder: View>: View {
     let url: URL?
     var maxPixelSize: CGFloat?
+    /// The pixel size of whatever arrived, for callers that reserved space from
+    /// a guess and want to correct it. Ignored by everything drawing into a
+    /// fixed box, which is most of them.
+    var onLoad: ((CGSize) -> Void)?
     @ViewBuilder var placeholder: () -> Placeholder
 
     @State private var image: UIImage?
@@ -130,12 +134,14 @@ struct RemoteImage<Placeholder: View>: View {
         // row never flashes its placeholder.
         if let hit = ImageLoader.shared.cached(request) {
             image = hit
+            onLoad?(hit.size)
             return
         }
         image = nil
         let loaded = await ImageLoader.shared.image(for: request)
         guard !Task.isCancelled else { return }
         withAnimation(.easeOut(duration: 0.15)) { image = loaded }
+        if let loaded { onLoad?(loaded.size) }
     }
 }
 

@@ -581,7 +581,7 @@ private struct AttachmentStack: View {
     /// anything loads.
     private var heightCap: CGFloat {
         let pictures = attachments.filter { $0.type == "image" || $0.type == "video" || $0.type == "linked_image" }
-        return pictures.count > 1 ? 200 : 320
+        return pictures.count > 1 ? 240 : 360
     }
 
     /// A word for an attachment the transcript cannot render, used in previews
@@ -632,8 +632,12 @@ private struct MediaThumbnail: View {
     /// fallback.
     private static let fallback = CGSize(width: 232, height: 174)
 
+    /// What the pixels turned out to be, for the URLs that declare nothing.
+    /// Nil for the ones that do, because then there is nothing to correct.
+    @State private var measured: CGSize?
+
     var body: some View {
-        RemoteImage(url: url, maxPixelSize: box.width * 3) {
+        RemoteImage(url: url, maxPixelSize: box.width * 3, onLoad: adopt) {
             ZStack {
                 Rectangle().fill(.quaternary)
                 Image(systemName: attachment.type == "video" ? "play.rectangle.fill" : "photo")
@@ -659,19 +663,36 @@ private struct MediaThumbnail: View {
 
     /// The space this photo occupies, in points.
     ///
-    /// Width first, then height from the true ratio. Doing it in that order is
-    /// what keeps a very tall picture usable: a full-page screenshot fitted on
-    /// both axes would come out a forty-point sliver, so the width is held and
-    /// the height is capped instead. A picture clamped that way is cropped
-    /// rather than squashed, because `RemoteImage` fills its frame and the
-    /// thumbnail clips.
+    /// The largest box of the picture's own shape that fits the limits, so
+    /// nothing is cropped. Shrinking only: a small picture is drawn at life size
+    /// rather than blown up to fill the width.
+    ///
+    /// The one exception is the picture too narrow to tap once it has been made
+    /// to fit, which means an aspect ratio no camera produces and in practice
+    /// means a full-page screenshot. That one is widened to `minWidth` and
+    /// allowed to run past the height cap, where it is cropped: a 50-point
+    /// ribbon of a screenshot is not a picture anybody can see.
+    private func box(for size: CGSize) -> CGSize {
+        guard size.width > 0, size.height > 0 else { return Self.fallback }
+        let shrink = min(Self.maxWidth / size.width, heightCap / size.height, 1)
+        let width = max(size.width * shrink, Self.minWidth)
+        let height = min(size.height * width / size.width, heightCap)
+        return CGSize(width: width.rounded(), height: height.rounded())
+    }
+
+    /// The URL's own account of its shape, or the pixels' if the URL kept quiet,
+    /// or the fallback until either turns up.
     private var box: CGSize {
-        guard let declared = MediaDimensions.declared(in: url),
-              declared.width > 0, declared.height > 0
-        else { return Self.fallback }
-        let width = min(max(declared.width, Self.minWidth), Self.maxWidth)
-        let height = width * declared.height / declared.width
-        return CGSize(width: width.rounded(), height: min(height, heightCap).rounded())
+        guard let size = MediaDimensions.declared(in: url) ?? measured else { return Self.fallback }
+        return box(for: size)
+    }
+
+    /// Correct the reservation, but only where there was nothing to reserve it
+    /// from. A URL that declared its size was right the first time, and letting
+    /// the pixels re-decide would move a row that had settled.
+    private func adopt(_ size: CGSize) {
+        guard MediaDimensions.declared(in: url) == nil, measured != size else { return }
+        measured = size
     }
 
     /// The still to draw.
