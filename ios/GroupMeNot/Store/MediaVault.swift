@@ -13,7 +13,7 @@ import OSLog
 /// eventually points at nothing; the directory is resolved fresh each time and
 /// the name is the only durable half.
 ///
-/// `uploadedURL` is written back as soon as the upload service returns one, so a
+/// `uploadedUrl` is written back as soon as the upload service returns one, so a
 /// send that fails after the bytes are up does not push them a second time. That
 /// is the difference between a retry costing a request and a retry costing the
 /// user's data plan.
@@ -35,11 +35,11 @@ nonisolated struct PendingMedia: Codable, Hashable, Sendable, Identifiable {
     var width: Int?
     var height: Int?
     /// The media-service URL, once there is one.
-    var uploadedURL: String?
+    var uploadedUrl: String?
     /// The transcoder's thumbnail, for video.
-    var uploadedPreviewURL: String?
+    var uploadedPreviewUrl: String?
 
-    var isUploaded: Bool { uploadedURL != nil }
+    var isUploaded: Bool { uploadedUrl != nil }
 
     var localURL: URL { MediaVault.directory.appendingPathComponent(filename) }
 
@@ -61,12 +61,12 @@ nonisolated struct PendingMedia: Codable, Hashable, Sendable, Identifiable {
         case .image:
             Message.Attachment(
                 type: "image",
-                url: uploadedURL ?? localURL.absoluteString)
+                url: uploadedUrl ?? localURL.absoluteString)
         case .video:
             Message.Attachment(
                 type: "video",
-                url: uploadedURL ?? localURL.absoluteString,
-                previewUrl: uploadedPreviewURL ?? localPreviewURL?.absoluteString)
+                url: uploadedUrl ?? localURL.absoluteString,
+                previewUrl: uploadedPreviewUrl ?? localPreviewURL?.absoluteString)
         }
     }
 }

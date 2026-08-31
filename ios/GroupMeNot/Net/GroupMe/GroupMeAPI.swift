@@ -54,6 +54,20 @@ actor GroupMeAPI {
 
     // MARK: - Conversation lists
 
+    /// What the two list routes ask to have included.
+    ///
+    /// Not optional. Both index endpoints leave `unread_count` out unless it is
+    /// asked for, so without this every badge in the conversation list reads
+    /// zero. The single-group read includes it either way, which is what makes
+    /// the omission easy to miss.
+    ///
+    /// It goes through `repeating:` rather than the plain query dictionary
+    /// because `include` is a key this API repeats: the group index sends
+    /// `&include=visibility&include=locations`. Only one value is needed today,
+    /// and spelling it in the shape that can hold several means adding the
+    /// second one later is not a refactor.
+    private static let listInclude = ["include": ["unread_count"]]
+
     /// `GET /v3/groups`, always with `omit=memberships`.
     ///
     /// A group's member list runs to hundreds of entries and is useless in a
@@ -66,12 +80,7 @@ actor GroupMeAPI {
             "page": String(page),
             "per_page": String(perPage),
             "omit": "memberships",
-            // Not optional. The list endpoints leave `unread_count` out unless
-            // it is asked for, and without it every badge in the conversation
-            // list reads zero. The single-group read includes it either way,
-            // which is what makes the omission easy to miss.
-            "include": "unread_count",
-        ])
+        ], repeating: Self.listInclude)
     }
 
     /// `GET /v3/chats`. Offset-paged, same as ``groups(page:perPage:)``.
@@ -79,8 +88,7 @@ actor GroupMeAPI {
         try await client.get(.v3, "/chats", query: [
             "page": String(page),
             "per_page": String(perPage),
-            "include": "unread_count",
-        ])
+        ], repeating: Self.listInclude)
     }
 
     /// `GET /v3/groups/{id}`.

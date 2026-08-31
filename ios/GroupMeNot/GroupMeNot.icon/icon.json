@@ -1,0 +1,39 @@
+{
+  "fill" : {
+    "solid" : "display-p3:0.13359,0.16596,0.32230,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill" : {
+            "solid" : "display-p3:0.41345,0.49760,0.96783,1.00000"
+          },
+          "image-name" : "groupmenot-uptail.svg",
+          "name" : "groupmenot-uptail",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0,
+              117.25
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

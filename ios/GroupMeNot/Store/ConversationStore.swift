@@ -296,9 +296,32 @@ actor ConversationStore {
         )
     }
 
+    /// True when our read cursor is further along than the one this fetch
+    /// carries, which means the server has not heard about a read yet.
+    ///
+    /// This is what stops a badge the user just cleared from coming back.
+    /// `markRead` zeroes `unread_count` locally and moves the cursor the moment
+    /// the transcript opens; the receipt POST follows whenever the network
+    /// allows, and a list fetch that lands in between still reports the count
+    /// from before the read. Writing that count back would relight the badge for
+    /// a conversation the user is looking at.
+    ///
+    /// The cursor is the arbiter rather than a timestamp, because it is the same
+    /// value both sides are talking about. Ids are decimal strings of a counter,
+    /// so `CAST(… AS INTEGER)` compares them the way ``MessageSortKey`` does and
+    /// the way a lexical comparison would not: "9" is not newer than "10".
+    ///
+    /// Strictly greater on purpose. When the two agree, the server has our read
+    /// and its count is the authority; only when we are *ahead* is ours.
+    nonisolated private static let localCursorIsAhead = """
+    CAST(COALESCE(conversations.last_read_message_id, '0') AS INTEGER)
+        > CAST(COALESCE(excluded.last_read_message_id, '0') AS INTEGER)
+    """
+
     /// `COALESCE(excluded.x, conversations.x)` throughout, so a partial update
     /// adds knowledge and never removes it. The last-message columns carry the
-    /// extra guard that they only move forwards.
+    /// extra guard that they only move forwards, and so, via
+    /// ``localCursorIsAhead``, do the read cursor and the badge.
     nonisolated private static let upsertSQL = """
     INSERT INTO conversations
         (key, kind, remote_id, name, avatar_url, last_message_id, last_message_sort,
@@ -320,8 +343,12 @@ actor ConversationStore {
         last_message_sender = CASE WHEN excluded.last_message_sort >= conversations.last_message_sort
                                    THEN COALESCE(excluded.last_message_sender, conversations.last_message_sender)
                                    ELSE conversations.last_message_sender END,
-        unread_count = excluded.unread_count,
-        last_read_message_id = COALESCE(excluded.last_read_message_id, conversations.last_read_message_id),
+        unread_count = CASE WHEN \(ConversationStore.localCursorIsAhead)
+                            THEN conversations.unread_count
+                            ELSE excluded.unread_count END,
+        last_read_message_id = CASE WHEN \(ConversationStore.localCursorIsAhead)
+                                    THEN conversations.last_read_message_id
+                                    ELSE COALESCE(excluded.last_read_message_id, conversations.last_read_message_id) END,
         muted_until = CASE WHEN excluded.kind = 0
                            THEN excluded.muted_until
                            ELSE COALESCE(NULLIF(excluded.muted_until, 0), conversations.muted_until) END,

@@ -41,12 +41,19 @@ actor APIClient {
 
     // MARK: - Requests
 
+    /// - Parameter repeating: query keys that appear more than once, which a
+    ///   dictionary cannot spell. GroupMe's `include` is the one that needs it:
+    ///   the group index sends `&include=visibility&include=locations`, and a
+    ///   builder that silently kept only the last value would drop half of it.
     func get<T: Decodable & Sendable>(
         _ host: Host, _ path: String,
         query: [String: String?] = [:],
+        repeating: [String: [String]] = [:],
         retry: RetryPolicy = .interactive
     ) async throws -> T {
-        try await send(host, path, method: "GET", query: query, body: Optional<Empty>.none, retry: retry)
+        try await send(
+            host, path, method: "GET", query: query, repeating: repeating,
+            body: Optional<Empty>.none, retry: retry)
     }
 
     @discardableResult
@@ -92,6 +99,7 @@ actor APIClient {
         _ host: Host, _ path: String,
         method: String,
         query: [String: String?],
+        repeating: [String: [String]] = [:],
         body: B?,
         retry: RetryPolicy,
         unwrap: Bool = true
@@ -99,7 +107,9 @@ actor APIClient {
         var attempt = 0
         while true {
             do {
-                return try await perform(host, path, method: method, query: query, body: body, unwrap: unwrap)
+                return try await perform(
+                    host, path, method: method, query: query, repeating: repeating,
+                    body: body, unwrap: unwrap)
             } catch let error as APIError {
                 guard retry.shouldRetry(error, attempt: attempt) else { throw error }
                 let wait = retry.wait(after: error, attempt: attempt)
@@ -114,13 +124,21 @@ actor APIClient {
         _ host: Host, _ path: String,
         method: String,
         query: [String: String?],
+        repeating: [String: [String]] = [:],
         body: B?,
         unwrap: Bool
     ) async throws -> T {
         guard let token = await tokenProvider() else { throw APIError.unauthenticated }
 
         var components = URLComponents(string: host.rawValue + path)!
-        let items = query.compactMap { key, value in value.map { URLQueryItem(name: key, value: $0) } }
+        var items = query.compactMap { key, value in value.map { URLQueryItem(name: key, value: $0) } }
+        // Appended rather than merged: `queryItems` is an array and happily
+        // carries the same name twice, which is the whole point of this
+        // parameter. Sorted so a URL is the same string every time, which
+        // matters to `URLCache` and to anyone reading a log.
+        for key in repeating.keys.sorted() {
+            items += repeating[key, default: []].map { URLQueryItem(name: key, value: $0) }
+        }
         if !items.isEmpty { components.queryItems = items }
 
         var request = URLRequest(url: components.url!)

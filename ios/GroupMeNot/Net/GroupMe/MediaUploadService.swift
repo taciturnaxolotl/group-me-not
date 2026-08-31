@@ -307,7 +307,7 @@ actor MediaUploadService {
     /// either fires the job is handed back to the outbox as retryable: the
     /// transcode is still running on GroupMe's side, and a later attempt costs
     /// one more POST rather than a lost video.
-    func pollTranscode(_ statusURL: URL, token: String) async throws -> UploadedMedia {
+    private func pollTranscode(_ statusURL: URL, token: String) async throws -> UploadedMedia {
         let deadline = Date().addingTimeInterval(Self.transcodeDeadline)
         var polls = 0
 

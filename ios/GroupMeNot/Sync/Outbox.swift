@@ -289,9 +289,9 @@ actor Outbox {
                 senderID: senderID,
                 groupID: groupID,
                 conversationID: conversationID)
-            entry.media[index].uploadedURL = uploaded.url
-            entry.media[index].uploadedPreviewURL =
-                uploaded.previewURL ?? entry.media[index].uploadedPreviewURL
+            entry.media[index].uploadedUrl = uploaded.url
+            entry.media[index].uploadedPreviewUrl =
+                uploaded.previewURL ?? entry.media[index].uploadedPreviewUrl
             try? await store.outbox.setMedia(entry.media, for: entry.id)
             // The bubble picks up the real URL as soon as the row does, which
             // is what makes a slow send show its photo arriving rather than
