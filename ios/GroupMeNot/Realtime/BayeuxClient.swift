@@ -47,7 +47,7 @@ actor BayeuxClient {
     /// of it, re-applied after each handshake.
     private var desiredChannels: Set<String> = []
     /// The one conversation channel `focus(on:)` manages, so it can be swapped.
-    private var focusChannel: String?
+    private var focusChannels: Set<String> = []
 
     private var adviceTimeout: TimeInterval = 600
     private var lastDisconnectAt: Date?
@@ -147,19 +147,25 @@ actor BayeuxClient {
         try? await send(frame)
     }
 
-    /// Follow the conversation currently on screen, dropping the previous one.
+    /// Follow the conversations currently on screen, dropping the previous ones.
     ///
-    /// `/user/{me}` already carries everything addressed to us; this extra
-    /// subscription is the app's own policy, and it is what makes typing
+    /// `/user/{me}` already carries everything addressed to us; these extra
+    /// subscriptions are the app's own policy, and they are what makes typing
     /// indicators and other people's likes show up promptly in an open thread.
-    /// Pass `nil` when leaving the conversation.
-    func focus(on conversation: ConversationID?) async {
+    /// Pass an empty list when leaving the conversation.
+    ///
+    /// A list rather than one channel, because a topic has two plausible
+    /// addresses. Its own `/group/{topicID}` accepts a subscription, and so does
+    /// its parent's, and nothing short of watching a real message arrive says
+    /// which one GroupMe publishes on. Subscribing to both costs one frame and
+    /// settles it; guessing costs a conversation that never updates.
+    func focus(on conversations: [ConversationID]) async {
         guard let userID else { return }
-        let channel = conversation?.pushChannel(myUserID: userID)
-        guard channel != focusChannel else { return }
-        if let old = focusChannel { await unsubscribe(from: old) }
-        focusChannel = channel
-        if let channel { await subscribe(to: channel) }
+        let wanted = Set(conversations.map { $0.pushChannel(myUserID: userID) })
+        guard wanted != focusChannels else { return }
+        for old in focusChannels.subtracting(wanted) { await unsubscribe(from: old) }
+        for new in wanted.subtracting(focusChannels) { await subscribe(to: new) }
+        focusChannels = wanted
     }
 
     // MARK: - Publishing

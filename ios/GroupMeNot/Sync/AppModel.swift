@@ -255,7 +255,7 @@ final class AppModel {
         reachedBeginning = false
         olderPageFailed = false
         await markRead(conversation)
-        await bayeux.focus(on: conversation)
+        await bayeux.focus(on: focusChannels(for: conversation))
         Task { await self.sync.catchUp(conversation) }
     }
 
@@ -275,7 +275,7 @@ final class AppModel {
         attemptedQuotes = []
         quotedParents = [:]
         unresolvedQuotes = []
-        Task { [bayeux] in await bayeux.focus(on: nil) }
+        Task { [bayeux] in await bayeux.focus(on: []) }
     }
 
     /// Whether scrolling up can turn up anything more. Goes false once a request
@@ -411,6 +411,18 @@ final class AppModel {
         else { return true }
         guard let me = currentUser?.id, !members.isEmpty else { return true }
         return members.first { $0.identity == me }?.canPostInAnnouncements ?? true
+    }
+
+    /// The conversations to follow while this one is open.
+    ///
+    /// A topic and the group it belongs to, because a topic's messages could
+    /// plausibly be published on either channel and both accept a subscription.
+    /// One extra frame per conversation opened is a cheap way to stop caring
+    /// which.
+    private func focusChannels(for conversation: ConversationID) -> [ConversationID] {
+        guard let parent = conversations.first(where: { $0.id == conversation })?.parentID
+        else { return [conversation] }
+        return [conversation, .group(parent)]
     }
 
     /// Publish a typing notice. Throttled inside the socket client, so calling
