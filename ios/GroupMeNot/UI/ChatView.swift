@@ -965,11 +965,11 @@ struct ChatView: View {
         // under it. Safe in a way `.offset` would not be: spacing is layout, so
         // the stack reports the shorter height it actually occupies, and the bar
         // sizes itself to what is drawn.
-        VStack(spacing: -9) {
+        VStack(spacing: -6) {
             Avatar(
                 url: conversation.avatarURL,
                 name: conversation.name,
-                size: 42,
+                size: 50,
                 isGroup: conversation.isGroup
             )
             // A stack draws in order, so the pill would otherwise cover the
