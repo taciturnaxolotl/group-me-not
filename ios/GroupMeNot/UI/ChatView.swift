@@ -259,6 +259,8 @@ struct ChatView: View {
     /// scroll view has already laid out once, which is what switching topics
     /// does. See ``apply(_:)``.
     @State private var needsOpeningScroll = false
+    /// The reaction whose people are being looked at.
+    @State private var reactionDetail: Message.ReactionSummary?
     @FocusState private var composerFocused: Bool
 
     // MARK: Scroll state
@@ -422,6 +424,10 @@ struct ChatView: View {
                 activeID = start.id
                 await model.openConversation(start.id)
             }
+            .sheet(item: $reactionDetail) { summary in
+                ReactionRoster(
+                    summary: summary, members: model.members, meID: model.currentUser?.id)
+            }
             .sheet(isPresented: $isTopicPickerPresented) {
                 TopicPicker(
                     group: conversation,
@@ -547,7 +553,8 @@ struct ChatView: View {
                 pressed = MessagePress(
                     item: item, frame: frame, canEdit: model.canEdit(item.message))
             },
-            onOpenReply: { id in openingTarget = id }
+            onOpenReply: { id in openingTarget = id },
+            onInspectReaction: { summary in reactionDetail = summary }
         )
     }
 
@@ -1642,5 +1649,79 @@ private struct TopicPicker: View {
             }
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Who reacted with one glyph.
+///
+/// A sheet raised by holding a chip. The chip can only ever show a number, and a
+/// number is the least interesting thing about a reaction in a group of forty
+/// people: the question is always *who*.
+private struct ReactionRoster: View {
+    let summary: Message.ReactionSummary
+    let members: [Member]
+    /// So the reader can find themselves in a long list without reading it.
+    let meID: String?
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(Array(people.enumerated()), id: \.offset) { _, person in
+                    HStack(spacing: 12) {
+                        Avatar(url: person.imageURL, name: person.name, size: 34)
+                        Text(person.name)
+                        if person.isYou {
+                            Text("You")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            // Empty, because the principal item below carries the title along
+            // with the glyph it is about. Setting both draws one over the other.
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    HStack(spacing: 6) {
+                        ReactionGlyph(glyph: summary.glyph, size: 18)
+                        Text(title).font(.headline)
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private var title: String {
+        summary.count == 1 ? "1 reaction" : "\(summary.count) reactions"
+    }
+
+    /// The roster is the group's, so anybody who has since left it is an id with
+    /// no name. They are still listed: dropping them would make the sheet
+    /// disagree with the count on the chip it came from.
+    private var people: [Person] {
+        let byID = Dictionary(
+            members.map { ($0.identity, $0) }, uniquingKeysWith: { first, _ in first })
+        return summary.userIDs.map { id in
+            let member = byID[id]
+            return Person(
+                name: member?.nickname ?? member?.name ?? "Someone",
+                imageURL: member?.imageUrl,
+                isYou: id == meID)
+        }
+    }
+
+    private struct Person {
+        let name: String
+        let imageURL: String?
+        let isYou: Bool
     }
 }

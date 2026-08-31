@@ -13,6 +13,8 @@ struct ReactionChips: View {
     /// Set by the row, which also uses it to reserve the overhang.
     var height: CGFloat = 26
     var onTap: (String) -> Void = { _ in }
+    /// A long press, asking who is behind this glyph.
+    var onInspect: (Message.ReactionSummary) -> Void = { _ in }
 
     /// More distinct glyphs than this and the row is wider than the bubble it
     /// hangs off, so the tail collapses into a count.
@@ -24,11 +26,19 @@ struct ReactionChips: View {
     var body: some View {
         HStack(spacing: 3) {
             ForEach(shown) { summary in
-                Button { onTap(summary.glyph) } label: { chip(summary) }
-                    .buttonStyle(.plain)
+                // Gestures rather than a `Button`, because this needs two of
+                // them and a button's tap does not share well with a long press
+                // on the same view. The button traits are put back below so
+                // VoiceOver is unaffected by the change.
+                chip(summary)
+                    .onTapGesture { onTap(summary.glyph) }
+                    .onLongPressGesture(minimumDuration: 0.32) { onInspect(summary) }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.isButton)
                     .accessibilityLabel(Self.label(for: summary))
                     .accessibilityHint(summary.reactedByMe
                         ? "Removes your reaction" : "Reacts with this")
+                    .accessibilityAction(named: "Who reacted") { onInspect(summary) }
             }
             if overflow > 0 { overflowChip }
         }

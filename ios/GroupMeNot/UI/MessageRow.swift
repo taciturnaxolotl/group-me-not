@@ -132,6 +132,8 @@ struct MessageRow: View {
     var onPress: (CGRect) -> Void = { _ in }
     /// Called with the id of a quoted message when the reader taps the quote.
     var onOpenReply: (String) -> Void = { _ in }
+    /// Called when the reader holds a reaction chip, asking who reacted.
+    var onInspectReaction: (Message.ReactionSummary) -> Void = { _ in }
 
     var body: some View {
         if item.message.isSystem {
@@ -147,7 +149,8 @@ struct MessageRow: View {
                 canEdit: canEdit,
                 onEdit: onEdit,
                 onPress: onPress,
-                onOpenReply: onOpenReply)
+                onOpenReply: onOpenReply,
+                onInspectReaction: onInspectReaction)
         }
     }
 }
@@ -197,6 +200,7 @@ private struct BubbleRow: View {
     let onEdit: (String) -> Void
     let onPress: (CGRect) -> Void
     let onOpenReply: (String) -> Void
+    let onInspectReaction: (Message.ReactionSummary) -> Void
 
     @Environment(AppSettings.self) private var settings
 
@@ -335,7 +339,8 @@ private struct BubbleRow: View {
                 summaries: item.reactions,
                 isOwn: isTrailing,
                 height: chipHeight,
-                onTap: onReact
+                onTap: onReact,
+                onInspect: onInspectReaction
             )
             .offset(x: isTrailing ? -10 : 10, y: chipHeight - chipOverlap)
             .transition(.scale(scale: 0.8).combined(with: .opacity))
