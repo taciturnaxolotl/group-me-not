@@ -42,6 +42,10 @@ final class AppModel {
     /// Ids already asked for, successfully or not, so a quote whose original was
     /// deleted is not re-requested on every rebuild.
     @ObservationIgnored private var attemptedQuotes: Set<String> = []
+    /// Ids we asked for and did not get. Distinct from "not asked yet", and the
+    /// distinction is the whole point: without it a quote that can never be
+    /// resolved says "Loading…" for as long as the conversation is open.
+    private(set) var unresolvedQuotes: Set<String> = []
     private(set) var openConversationID: ConversationID?
     private(set) var members: [Member] = []
 
@@ -270,6 +274,7 @@ final class AppModel {
         attemptedHeals = []
         attemptedQuotes = []
         quotedParents = [:]
+        unresolvedQuotes = []
         Task { [bayeux] in await bayeux.focus(on: nil) }
     }
 
@@ -1041,11 +1046,21 @@ final class AppModel {
 
         let batch = Array(wanted.prefix(Self.maxQuoteFetches))
         attemptedQuotes.formUnion(batch)
+        // A topic's own id does not resolve at the per-message route, so the
+        // parent group is offered as a second address to try.
+        let parentGroup = conversations.first { $0.id == conversation }?.parentID
+
         Task { [api] in
             for id in batch {
-                guard let parent = try? await api.message(id: id, in: conversation) else { continue }
+                let parent = try? await api.message(
+                    id: id, in: conversation, fallbackGroupID: parentGroup)
                 guard conversation == self.openConversationID else { return }
-                self.quotedParents[id] = parent
+                if let parent {
+                    self.quotedParents[id] = parent
+                } else {
+                    // Say so rather than leaving the quote spinning.
+                    self.unresolvedQuotes.insert(id)
+                }
             }
         }
     }

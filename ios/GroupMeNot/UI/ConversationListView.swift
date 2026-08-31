@@ -92,7 +92,10 @@ struct ConversationListView: View {
     /// hundreds, so filtering it in memory is a fraction of a millisecond and
     /// spares us a round trip to an actor on every keystroke.
     private var visibleRows: [ConversationRow] {
-        nested(matching)
+        // Topics are reached from inside their group, not from here. Six rows
+        // named "RULES" and "GRAVEYARD" scattered through a list sorted by
+        // recency is a list that has stopped being a list of conversations.
+        matching.filter { !$0.isTopic }
     }
 
     private var matching: [ConversationRow] {
@@ -103,38 +106,6 @@ struct ConversationListView: View {
                 || (row.lastMessagePreview?.localizedStandardContains(term) ?? false)
                 || (row.lastMessageSender?.localizedStandardContains(term) ?? false)
         }
-    }
-
-    /// Topics gathered under the group they belong to.
-    ///
-    /// Sorting the whole list by recency would scatter a group's six topics
-    /// through it, each one a row named "RULES" or "GRAVEYARD" with nothing to
-    /// say which conversation it is part of. Keeping them with their parent is
-    /// what makes the name enough.
-    ///
-    /// A topic whose parent is not in the list keeps its place in the ordinary
-    /// order rather than disappearing. That happens while searching, when the
-    /// term matches the topic and not the group, and losing the row would be a
-    /// search that hides its own results.
-    private func nested(_ rows: [ConversationRow]) -> [ConversationRow] {
-        let topics = rows.filter(\.isTopic)
-        guard !topics.isEmpty else { return rows }
-
-        let byParent = Dictionary(grouping: topics) { $0.parentID ?? "" }
-        var placed: Set<ConversationID> = []
-        var ordered: [ConversationRow] = []
-
-        for row in rows where !row.isTopic {
-            ordered.append(row)
-            guard case .group(let id) = row.id else { continue }
-            for topic in byParent[id, default: []] {
-                ordered.append(topic)
-                placed.insert(topic.id)
-            }
-        }
-        // Whatever had no parent above it, in the order it already had.
-        ordered.append(contentsOf: topics.filter { !placed.contains($0.id) })
-        return ordered
     }
 
     /// Shown before the first sync finishes, and for the rare account with
@@ -244,25 +215,13 @@ struct ConversationCell: View {
     let row: ConversationRow
 
     @ScaledMetric(relativeTo: .body) private var avatarSize: CGFloat = 50
-    @ScaledMetric(relativeTo: .body) private var topicAvatarSize: CGFloat = 34
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            // Indented and smaller, so a run of topics reads as belonging to the
-            // group above rather than as six more conversations.
-            if row.isTopic {
-                Rectangle()
-                    .fill(.quaternary)
-                    .frame(width: 2)
-                    .padding(.leading, 10)
-                    .padding(.vertical, 2)
-                    .accessibilityHidden(true)
-            }
-
             Avatar(
                 url: row.avatarURL,
                 name: row.name,
-                size: row.isTopic ? topicAvatarSize : avatarSize,
+                size: avatarSize,
                 isGroup: row.isGroup
             )
 
@@ -342,7 +301,9 @@ struct ConversationCell: View {
 
 /// The unread count. Muted conversations get a grey badge rather than no badge:
 /// muting says "do not interrupt me", not "hide this from me".
-private struct UnreadBadge: View {
+/// Shared with the topic picker, which needs the same badge for the same
+/// reason: a count is how a list says which rows are worth opening.
+struct UnreadBadge: View {
     let count: Int
     let isMuted: Bool
 

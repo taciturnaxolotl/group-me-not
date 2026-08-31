@@ -50,6 +50,30 @@ final class AppSettings {
 
     private enum Key {
         static let ownMessageAlignment = "sh.dunkirk.GroupMeNot.settings.ownMessageAlignment"
+        static let lastTopic = "sh.dunkirk.GroupMeNot.settings.lastTopic"
+    }
+
+    /// Which topic was last open in each group, by group id.
+    ///
+    /// Not a preference in the sense the rest of this file is, but it belongs
+    /// here for the same reason: it is small, it is the user's, and it should
+    /// survive a relaunch. Opening a group and landing back in the topic you
+    /// were reading is the difference between topics being a place and topics
+    /// being a menu you have to visit every time.
+    private var lastTopics: [String: String] {
+        didSet { defaults.set(lastTopics, forKey: Key.lastTopic) }
+    }
+
+    func lastTopic(inGroup groupID: String) -> String? { lastTopics[groupID] }
+
+    /// Passing the group's own id forgets the topic, which is what choosing the
+    /// main conversation means.
+    func rememberTopic(_ topicID: String, inGroup groupID: String) {
+        if topicID == groupID {
+            lastTopics.removeValue(forKey: groupID)
+        } else {
+            lastTopics[groupID] = topicID
+        }
     }
 
     var ownMessageAlignment: OwnMessageAlignment {
@@ -67,5 +91,6 @@ final class AppSettings {
         // failing, which is what makes it safe to add cases later.
         self.ownMessageAlignment = defaults.string(forKey: Key.ownMessageAlignment)
             .flatMap(OwnMessageAlignment.init(rawValue:)) ?? .sided
+        self.lastTopics = defaults.dictionary(forKey: Key.lastTopic) as? [String: String] ?? [:]
     }
 }

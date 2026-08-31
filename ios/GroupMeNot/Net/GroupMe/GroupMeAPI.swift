@@ -186,7 +186,13 @@ actor GroupMeAPI {
     /// query parameter. Returns nil rather than throwing when the server has
     /// nothing, because the only caller is decorating a quote and a missing
     /// original is a normal thing, not a failure.
-    func message(id: String, in conversation: ConversationID) async throws -> Message? {
+    /// - Parameter fallbackGroupID: a parent group to try if the conversation's
+    ///   own id does not resolve. A topic's messages live at its own message
+    ///   routes but the topic itself is not a group, so a per-message read
+    ///   addressed to it can 404 where the same read against the parent works.
+    func message(
+        id: String, in conversation: ConversationID, fallbackGroupID: String? = nil
+    ) async throws -> Message? {
         do {
             switch conversation {
             case .group(let groupID):
@@ -204,7 +210,13 @@ actor GroupMeAPI {
         } catch APIError.noContent {
             return nil
         } catch let error as APIError where error.status == 404 {
-            return nil
+            guard let fallbackGroupID, case .group(let asked) = conversation,
+                  asked != fallbackGroupID
+            else { return nil }
+            let response: SingleMessage? = try? await client.get(
+                .v4, "/groups/\(fallbackGroupID)/messages/\(id)",
+                query: ["acceptFiles": "true"], retry: .background)
+            return response?.message
         }
     }
 

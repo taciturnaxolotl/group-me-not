@@ -72,6 +72,7 @@ nonisolated enum Transcript {
         outbox: [OutboxEntry],
         currentUser: CurrentUser?,
         quoted: [String: Message] = [:],
+        unresolved: Set<String> = [],
         members: [Member] = [],
         unread: UnreadMark? = nil,
         calendar: Calendar = .current
@@ -146,7 +147,8 @@ nonisolated enum Transcript {
                 text: text,
                 styledText: MessageStyling.style(text, isOwn: own),
                 reactions: message.reactionSummaries(currentUserID: myID),
-                reply: replyPreview(for: message, in: byID, names: names),
+                reply: replyPreview(
+                    for: message, in: byID, unresolved: unresolved, names: names),
                 uploadGuid: message.sourceGuid
             )))
         }
@@ -173,7 +175,8 @@ nonisolated enum Transcript {
     /// quote, with the little that is known. The alternative is drawing the
     /// message as though it answered nothing, which is a different message.
     private static func replyPreview(
-        for message: Message, in byID: [String: Message], names: [String: String]
+        for message: Message, in byID: [String: Message],
+        unresolved: Set<String>, names: [String: String]
     ) -> ReplyPreview? {
         guard let targetID = message.replyTargetID else { return nil }
         guard let parent = byID[targetID] else {
@@ -181,8 +184,12 @@ nonisolated enum Transcript {
             // original still in flight the quote can name the right person.
             // Naming them is most of what a quote is for.
             let who = message.replyTargetUserID.flatMap { names[$0] }
-            return ReplyPreview(
-                messageID: nil, senderName: who ?? "Message", text: "Loading…")
+            // "Loading…" is a promise, and it has to be one this can keep. Once
+            // the fetch has come back empty the original is not coming, and
+            // saying otherwise leaves a quote spinning for as long as the
+            // conversation is open.
+            let detail = unresolved.contains(targetID) ? "Original unavailable" : "Loading…"
+            return ReplyPreview(messageID: nil, senderName: who ?? "Message", text: detail)
         }
         return ReplyPreview(
             messageID: parent.id,
@@ -237,12 +244,17 @@ struct ChatView: View {
     let conversation: ConversationRow
 
     @Environment(AppModel.self) private var model
+    @Environment(AppSettings.self) private var settings
 
     @State private var rows: [TranscriptRow] = []
     @State private var rebuildTask: Task<Void, Never>?
     @State private var draft = ""
     @State private var isLoadingOlder = false
     @State private var isInfoPresented = false
+    /// Which of the group's conversations is on screen: the group itself, or one
+    /// of its topics. Nil until `.task` resolves the remembered one.
+    @State private var activeID: ConversationID?
+    @State private var isTopicPickerPresented = false
     @FocusState private var composerFocused: Bool
 
     // MARK: Scroll state
@@ -355,7 +367,7 @@ struct ChatView: View {
                     readOnlyNotice
                 }
             }
-            .navigationTitle(conversation.name)
+            .navigationTitle(current.name)
             .navigationBarTitleDisplayMode(.inline)
             // The header belongs to the same sheet of paper as the transcript.
             // Hiding the bar's own material is what stops the seam appearing
@@ -391,7 +403,7 @@ struct ChatView: View {
                 }
             }
             .sheet(isPresented: $isInfoPresented) {
-                ConversationInfoView(conversation: conversation, members: model.members)
+                ConversationInfoView(conversation: current, members: model.members)
             }
     }
 
@@ -401,12 +413,25 @@ struct ChatView: View {
     /// dishonest to pretend otherwise.
     private var lifecycle: some View {
         chrome
-            .task { await model.openConversation(conversation.id) }
+            .task {
+                let start = rememberedRow
+                activeID = start.id
+                await model.openConversation(start.id)
+            }
+            .sheet(isPresented: $isTopicPickerPresented) {
+                TopicPicker(
+                    group: conversation,
+                    topics: topics,
+                    current: current.id,
+                    onPick: switchTo)
+            }
             .onDisappear(perform: teardown)
             .onChange(of: model.messages, initial: true) { messagesChanged() }
             .onChange(of: model.outbox, initial: true) { rebuild() }
-            // A fetched original turns "Loading…" into the message itself.
+            // A fetched original turns "Loading…" into the message itself, and
+            // a failed one turns it into an answer rather than a promise.
             .onChange(of: model.quotedParents) { rebuild() }
+            .onChange(of: model.unresolvedQuotes) { rebuild() }
             // The indicator changes the content height by about a bubble. A
             // reader at the foot should follow it; a reader in the history
             // should not feel it at all, which is what the missing size-change
@@ -685,7 +710,7 @@ struct ChatView: View {
                 .padding(.vertical, 14)
                 .frame(maxWidth: .infinity)
         } else {
-            EmptyState(conversation: conversation)
+            EmptyState(conversation: current)
         }
     }
 
@@ -990,7 +1015,64 @@ struct ChatView: View {
 
     // MARK: Chrome
 
+    /// The conversation on screen: the group, or one of its topics.
+    ///
+    /// Resolved out of the model rather than held, so an unread count or a name
+    /// that changes underneath is picked up. The row passed in is only ever the
+    /// starting point and a fallback for the frame before the list has it.
+    private var current: ConversationRow {
+        let id = activeID ?? conversation.id
+        return model.conversations.first { $0.id == id } ?? conversation
+    }
+
+    /// This group's topics, newest activity first.
+    private var topics: [ConversationRow] {
+        guard case .group(let id) = conversation.id else { return [] }
+        return model.conversations.filter { $0.parentID == id }
+    }
+
+    /// Where to start: the topic last read in this group, if it still exists.
+    private var rememberedRow: ConversationRow {
+        guard case .group(let id) = conversation.id,
+              let remembered = settings.lastTopic(inGroup: id),
+              let row = topics.first(where: { $0.id.remoteID == remembered })
+        else { return conversation }
+        return row
+    }
+
+    /// Move to another of this group's conversations without leaving the screen.
+    ///
+    /// The transcript's own state has to go with it. `rows`, the unread divider
+    /// and the scroll flags all describe the conversation being left, and
+    /// carrying them across would draw one conversation's divider over another's
+    /// messages.
+    private func switchTo(_ row: ConversationRow) {
+        isTopicPickerPresented = false
+        guard row.id != current.id else { return }
+        if case .group(let id) = conversation.id {
+            settings.rememberTopic(row.id.remoteID, inGroup: id)
+        }
+
+        activeID = row.id
+        rebuildTask?.cancel()
+        rows = []
+        unread = nil
+        hasResolvedUnread = false
+        hasSeenDivider = false
+        isAtFoot = true
+        Task { await model.openConversation(row.id) }
+    }
+
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        if !topics.isEmpty {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { isTopicPickerPresented = true } label: {
+                    Image(systemName: "square.stack.3d.up")
+                }
+                .accessibilityLabel("Topics")
+                .accessibilityHint("Switch between this group's topics")
+            }
+        }
         ToolbarItem(placement: .principal) {
             Button { isInfoPresented = true } label: { titleLabel }
                 .buttonStyle(.plain)
@@ -1014,17 +1096,17 @@ struct ChatView: View {
         // sizes itself to what is drawn.
         VStack(spacing: -6) {
             Avatar(
-                url: conversation.avatarURL,
-                name: conversation.name,
+                url: current.avatarURL,
+                name: current.name,
                 size: 62,
-                isGroup: conversation.isGroup
+                isGroup: current.isGroup
             )
             // A stack draws in order, so the pill would otherwise cover the
             // photo. Lifting the photo instead puts the overlap the right way
             // round: the face stays whole and the pill runs behind it.
             .zIndex(1)
             HStack(spacing: 3) {
-                Text(conversation.name)
+                Text(current.name)
                     .font(.footnote.weight(.semibold))
                     .lineLimit(1)
                     .foregroundStyle(.primary)
@@ -1047,15 +1129,15 @@ struct ChatView: View {
     }
 
     private var titleAccessibilityLabel: String {
-        guard conversation.isGroup, let count = memberCount else { return conversation.name }
-        return "\(conversation.name), \(count) members"
+        guard current.isGroup, let count = memberCount else { return current.name }
+        return "\(current.name), \(count) members"
     }
 
     /// The roster once it has been fetched, falling back to whatever the list
     /// row knew. The list row is a snapshot taken at navigation time, so it
     /// cannot learn a count; the model can.
     private var memberCount: Int? {
-        model.members.isEmpty ? conversation.memberCount : model.members.count
+        model.members.isEmpty ? current.memberCount : model.members.count
     }
 
     // MARK: Row building
@@ -1070,7 +1152,7 @@ struct ChatView: View {
         rebuild()
         // Anything that lands while the conversation is on screen has, by any
         // reasonable definition, been read.
-        Task { await model.markRead(conversation.id) }
+        Task { await model.markRead(current.id) }
     }
 
     /// Rebuilt on change rather than computed in `body`, so scrolling never
@@ -1088,6 +1170,7 @@ struct ChatView: View {
         let outbox = model.outbox
         let currentUser = model.currentUser
         let quoted = model.quotedParents
+        let unresolved = model.unresolvedQuotes
         let members = model.members
 
         // Before the receipt posts. `messagesChanged` marks the conversation
@@ -1101,7 +1184,7 @@ struct ChatView: View {
             let built = await Task.detached(priority: .userInitiated) {
                 Transcript.rows(
                     messages: messages, outbox: outbox, currentUser: currentUser,
-                    quoted: quoted, members: members, unread: unread)
+                    quoted: quoted, unresolved: unresolved, members: members, unread: unread)
             }.value
             guard !Task.isCancelled else { return }
             // Only when something actually moved.
@@ -1178,12 +1261,12 @@ struct ChatView: View {
         guard !hasResolvedUnread, !messages.isEmpty else { return }
         hasResolvedUnread = true
 
-        let count = conversation.unreadCount
+        let count = current.unreadCount
         guard count > 0 else { return }
 
         // The receipt is the good answer: the first message after it is the
         // first thing the reader has not seen.
-        if let lastRead = conversation.lastReadMessageID,
+        if let lastRead = current.lastReadMessageID,
            let index = messages.lastIndex(where: { $0.id == lastRead }) {
             guard index + 1 < messages.count else { return }
             // Counted from where the divider lands, not taken from the badge.
@@ -1465,5 +1548,79 @@ private struct NoScrollToTop: UIViewRepresentable {
                 ancestor = current.superview
             }
         }
+    }
+}
+
+/// Somewhere to choose between a group's conversations.
+///
+/// A sheet rather than a menu. Topics carry unread counts and posting rules, and
+/// a menu row is a line of text: it can show which one you are in, but not that
+/// two of them have something waiting or that one of them is read-only.
+private struct TopicPicker: View {
+    /// The group itself, which is a conversation like any other and is listed
+    /// first because it is the one that existed before anybody added topics.
+    let group: ConversationRow
+    let topics: [ConversationRow]
+    let current: ConversationID
+    let onPick: (ConversationRow) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section { row(for: group, name: "Main") }
+                if !topics.isEmpty {
+                    Section("Topics") {
+                        ForEach(topics) { topic in row(for: topic, name: topic.name) }
+                    }
+                }
+            }
+            .navigationTitle(group.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func row(for conversation: ConversationRow, name: String) -> some View {
+        Button {
+            onPick(conversation)
+        } label: {
+            HStack(spacing: 12) {
+                Avatar(
+                    url: conversation.avatarURL,
+                    name: name,
+                    size: 32,
+                    isGroup: conversation.isGroup
+                )
+                Text(name.isEmpty ? "Untitled" : name)
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
+
+                if conversation.postingPolicy == .adminsOnly {
+                    Image(systemName: "megaphone.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .accessibilityLabel("Announcements only")
+                }
+
+                Spacer(minLength: 8)
+
+                UnreadBadge(count: conversation.unreadCount, isMuted: conversation.isMuted)
+
+                if conversation.id == current {
+                    Image(systemName: "checkmark")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tint)
+                        .accessibilityLabel("Currently open")
+                }
+            }
+        }
+        .buttonStyle(.plain)
     }
 }
