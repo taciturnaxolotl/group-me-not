@@ -19,6 +19,9 @@ struct ConversationListView: View {
     /// branches of a list are open is the shape of one visit to it.
     @State private var expanded: Set<String> = []
     @State private var isRequestsPresented = false
+    /// The tile a long press landed on, named in the sheet that follows so
+    /// there is no doubt which one is about to change.
+    @State private var pinTarget: ConversationRow?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -47,6 +50,25 @@ struct ConversationListView: View {
                 }
                 .sheet(isPresented: $isRequestsPresented) {
                     RequestsView()
+                }
+                .confirmationDialog(
+                    pinTarget?.name ?? "",
+                    isPresented: .init(
+                        get: { pinTarget != nil },
+                        set: { if !$0 { pinTarget = nil } }
+                    ),
+                    titleVisibility: .visible
+                ) {
+                    if let target = pinTarget {
+                        let key = target.id.storageKey
+                        let isPinned = settings.isPinned(key)
+                        Button(isPinned ? "Unpin" : "Pin") {
+                            withAnimation(.snappy(duration: 0.25)) { settings.togglePin(key) }
+                            pinTarget = nil
+                        }
+                        .disabled(!isPinned && !settings.canPinMore)
+                        Button("Cancel", role: .cancel) { pinTarget = nil }
+                    }
                 }
         }
     }
@@ -200,7 +222,8 @@ struct ConversationListView: View {
                     row: member,
                     name: member.id == entry.row.id ? "Main" : member.name,
                     unread: member.unreadCount,
-                    size: 52
+                    size: 52,
+                    onLongPress: { pinTarget = member }
                 ) {
                     path.append(.chat(member))
                 }
@@ -270,7 +293,7 @@ struct ConversationListView: View {
             unread: unreadTotal(for: row),
             size: 60,
             leadsToChooser: hasTopics(row),
-            menu: { pinButton(for: row) }
+            onLongPress: { pinTarget = row }
         ) {
             path.append(destination(for: row))
         }
@@ -667,7 +690,7 @@ struct NetworkStatusBanner: View {
 /// point: both are "a handful of conversations that belong together", and
 /// drawing them the same way is what makes the second one legible. Rows with a
 /// rule down the side were decoration pretending to be structure.
-struct ConversationTile<Menu: View>: View {
+struct ConversationTile: View {
     let row: ConversationRow
     /// Usually the conversation's name, but "Main" for a group standing in for
     /// itself among its own topics.
@@ -676,7 +699,13 @@ struct ConversationTile<Menu: View>: View {
     var size: CGFloat = 56
     /// Marks a tile that opens a choice rather than a conversation.
     var leadsToChooser = false
-    @ViewBuilder var menu: () -> Menu
+    /// Held rather than long-pressed into a `contextMenu`.
+    ///
+    /// A `contextMenu` declared inside a `List` row is installed on the *row*,
+    /// and the row here is the whole grid: holding one tile offered a menu for
+    /// all of them at once. An explicit gesture on the tile is attached to the
+    /// tile, which is the only thing that reliably is.
+    var onLongPress: (() -> Void)?
     let action: () -> Void
 
     var body: some View {
@@ -697,7 +726,7 @@ struct ConversationTile<Menu: View>: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .contextMenu { menu() }
+        .onLongPressGesture(minimumDuration: 0.35) { onLongPress?() }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(unread > 0 ? "\(name), \(unread) unread" : name)
     }
@@ -722,13 +751,4 @@ struct ConversationTile<Menu: View>: View {
     }
 }
 
-extension ConversationTile where Menu == EmptyView {
-    init(
-        row: ConversationRow, name: String, unread: Int, size: CGFloat = 56,
-        leadsToChooser: Bool = false, action: @escaping () -> Void
-    ) {
-        self.init(
-            row: row, name: name, unread: unread, size: size,
-            leadsToChooser: leadsToChooser, menu: { EmptyView() }, action: action)
-    }
-}
+
