@@ -126,7 +126,7 @@ struct ConversationListView: View {
             Text("Chats")
                 .font(.largeTitle.bold())
             Spacer(minLength: 12)
-            accountMenu
+            accountButton
                 // Pulled back to the cap line so the avatar centres against the
                 // title rather than hanging off its baseline.
                 .alignmentGuide(.firstTextBaseline) { $0.height * 0.78 }
@@ -174,29 +174,24 @@ struct ConversationListView: View {
         .listRowBackground(Color.clear)
     }
 
-    /// Still a menu rather than a button straight to Settings, because this is
-    /// where account-level actions will keep landing and a menu can grow. Sign
-    /// Out has moved inside Settings, where it sits next to the account it ends.
-    private var accountMenu: some View {
-        SwiftUI.Group {
-            Menu {
-                if let name = model.currentUser?.name {
-                    Text(name)
-                }
-                Button {
-                    isSettingsPresented = true
-                } label: {
-                    Label("Settings", systemImage: "gearshape")
-                }
-            } label: {
-                Avatar(
-                    url: model.currentUser?.imageUrl,
-                    name: model.currentUser?.name ?? "?",
-                    size: 28
-                )
-            }
-            .accessibilityLabel("Account")
+    /// Straight to Settings. A menu holding a single item is a tap that buys
+    /// nothing: it asks the user to choose between one option, and it hides the
+    /// destination behind an animation. Everything account-level already lives
+    /// on that screen, including Sign Out, so there is nowhere else this could
+    /// reasonably go.
+    private var accountButton: some View {
+        Button {
+            isSettingsPresented = true
+        } label: {
+            Avatar(
+                url: model.currentUser?.imageUrl,
+                name: model.currentUser?.name ?? "?",
+                size: 28
+            )
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Settings")
+        .accessibilityHint("Your account and preferences")
     }
 }
 

@@ -282,6 +282,22 @@ struct ChatView: View {
             // there is a *bar*, which is what lets the edge effect dissolve
             // content under it instead of stopping it dead against a slab.
             .safeAreaBar(edge: .bottom, spacing: 0) { composer }
+            // After the bar, not before it. Inside `transcript` this overlay
+            // aligned to the scroll view's own bottom edge, which the composer
+            // then covered: the button was drawn underneath the bar, so every
+            // tap meant for it landed on the bar instead. Overlay content sits
+            // inside the container's safe area, and `safeAreaBar` is what puts
+            // the composer's height into that safe area, so applying it here
+            // lands the button just above the composer where it belongs.
+            .overlay(alignment: .bottomTrailing) {
+                // The stack is the stable parent the transition needs; the `if`
+                // lives one level down, inside `jumpButton`.
+                // Animated where the state changes rather than here: the
+                // reveal is deliberately delayed, and an implicit animation
+                // bound to the flag would fire the moment the flag flips
+                // regardless of what else the frame is doing.
+                ZStack { jumpButton }
+            }
             .navigationTitle(conversation.name)
             .navigationBarTitleDisplayMode(.inline)
             // The header belongs to the same sheet of paper as the transcript.
@@ -349,15 +365,6 @@ struct ChatView: View {
                 followWhenStill = false
                 if isNearBottom { bottomRequest += 1 }
             }
-            .overlay(alignment: .bottomTrailing) {
-                // The stack is the stable parent the transition needs; the `if`
-                // lives one level down, inside `jumpButton`.
-                // Animated where the state changes rather than here: the
-                // reveal is deliberately delayed, and an implicit animation
-                // bound to the flag would fire the moment the flag flips
-                // regardless of what else the frame is doing.
-                ZStack { jumpButton }
-            }
             // Short and flat rather than springy. A bouncing settle at the
             // foot is what reads as the transcript overshooting, and several of
             // these can overlap during a catch-up.
@@ -395,7 +402,7 @@ struct ChatView: View {
             // floating, and something floating needs air around it or the two
             // pieces look like one broken control.
             .padding(.trailing, 16)
-            .padding(.bottom, 16)
+            .padding(.bottom, 12)
             // Fades, and barely grows. A button that pops in at the edge of
             // vision reads as an alert; this one is a door left ajar.
             .transition(.opacity.combined(with: .scale(scale: 0.92)))
