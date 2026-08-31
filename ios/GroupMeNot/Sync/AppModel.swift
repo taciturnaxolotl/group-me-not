@@ -242,6 +242,7 @@ final class AppModel {
         Task { await self.drainReactions() }
         Task { await self.sync.sync(reason: .launch) }
         Task { await self.refreshIdentity() }
+        Task { await self.refreshRequests() }
     }
 
     /// Call when the app comes back to the foreground. Faye does not replay what
@@ -256,6 +257,7 @@ final class AppModel {
     func refresh() async {
         guard isSignedIn else { return }
         await sync.sync(reason: .manual)
+        await refreshRequests()
     }
 
     // MARK: - Conversations
@@ -616,6 +618,48 @@ final class AppModel {
             messages[index] = stored
         }
         await reloadConversations()
+    }
+
+    // MARK: - Requests
+
+    /// How many decisions are waiting, account-wide.
+    ///
+    /// Polled with the sync rather than watched, because there is no push for
+    /// it and a request is not urgent: somebody who asked to join a group is
+    /// content to wait a minute.
+    private(set) var pendingRequests = PendingRequests()
+
+    var waitingRequests: Int { pendingRequests.waiting }
+
+    func refreshRequests() async {
+        guard isSignedIn else { return }
+        guard let latest = try? await api.pendingRequests() else { return }
+        pendingRequests = latest
+    }
+
+    /// People asking to join one group.
+    func joinRequests(for conversation: ConversationID) async -> [JoinRequest] {
+        guard case .group(let groupID) = conversation,
+              role(in: conversation).canEditGroup
+        else { return [] }
+        return (try? await api.pendingMemberships(in: groupID)) ?? []
+    }
+
+    /// Approve or decline one, and refresh what is left.
+    @discardableResult
+    func respond(to request: JoinRequest, in conversation: ConversationID, approve: Bool) async -> Bool {
+        guard case .group(let groupID) = conversation, let id = request.approvalID
+        else { return false }
+        do {
+            try await api.respond(toMembership: id, in: groupID, approve: approve)
+            // An approval adds a member, so the roster is now wrong.
+            if approve { await sync.catchUp(conversation) }
+            await refreshRequests()
+            return true
+        } catch {
+            log.notice("could not answer a join request: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
     }
 
     // MARK: - Group settings

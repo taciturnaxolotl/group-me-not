@@ -653,6 +653,68 @@ nonisolated struct Chat: Codable, Hashable, Sendable {
     }
 }
 
+/// Somebody waiting to be let into a group.
+///
+/// `GET /v3/groups/{id}/pending_memberships`. Every field is optional on
+/// purpose: the endpoint answers `200` with an empty array on an account with
+/// nothing pending, which is the only state available to look at, so the item
+/// shape is taken from the client's own `JoinRequest` class rather than from a
+/// response. Optional fields mean an unexpected one costs a blank line rather
+/// than the whole list.
+nonisolated struct JoinRequest: Codable, Identifiable, Hashable, Sendable {
+    /// The *membership* id, which is what the approval route takes. Not the
+    /// user id, and confusing the two is how an approval is sent for the wrong
+    /// person.
+    var id: String?
+    var membershipId: String?
+    var userId: String?
+    var nickname: String?
+    var name: String?
+    var imageUrl: String?
+    var createdAt: Int?
+    /// Their answer to the group's join question, when it asks one.
+    var joinQuestionResponse: String?
+    var answer: String?
+
+    /// What the approval route needs.
+    var approvalID: String? { membershipId ?? id }
+    var displayName: String { nickname ?? name ?? "Someone" }
+    var response: String? {
+        let text = joinQuestionResponse ?? answer
+        return (text?.isEmpty ?? true) ? nil : text
+    }
+}
+
+/// Everything waiting on a decision, account-wide.
+///
+/// `GET /v4/requests`. The counts are reliable; the three arrays were empty
+/// when this was written, so their items are modelled loosely for the same
+/// reason ``JoinRequest`` is.
+nonisolated struct PendingRequests: Codable, Hashable, Sendable {
+    var dmRequests: [DirectRequest]?
+    var groupRequestsReceived: [JoinRequest]?
+    var counts: Counts?
+
+    nonisolated struct Counts: Codable, Hashable, Sendable {
+        var dm: Int?
+        var received: Int?
+        var sent: Int?
+        var total: Int?
+    }
+
+    /// A message from somebody not in your contacts, held back until you say so.
+    nonisolated struct DirectRequest: Codable, Identifiable, Hashable, Sendable {
+        var id: String?
+        var otherUser: Chat.OtherUser?
+        var lastMessage: Message?
+        var createdAt: Int?
+
+        var identity: String { otherUser?.id ?? id ?? UUID().uuidString }
+    }
+
+    var waiting: Int { counts?.total ?? 0 }
+}
+
 /// Somebody this account knows: a GroupMe contact.
 ///
 /// `GET /v4/relationships` is the address book, and it is the only list of

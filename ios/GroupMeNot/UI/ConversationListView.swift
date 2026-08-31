@@ -19,6 +19,7 @@ struct ConversationListView: View {
     /// branches of a list are open is the shape of one visit to it.
     @State private var expanded: Set<String> = []
     @State private var isEditingPins = false
+    @State private var isRequestsPresented = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -45,6 +46,9 @@ struct ConversationListView: View {
                 .sheet(isPresented: $isSettingsPresented) {
                     SettingsView()
                 }
+                .sheet(isPresented: $isRequestsPresented) {
+                    RequestsView()
+                }
         }
     }
 
@@ -62,6 +66,7 @@ struct ConversationListView: View {
         List {
             titleHeader
             searchField
+            if model.waitingRequests > 0 && query.isEmpty { requestsRow }
             if !pinnedRows.isEmpty && query.isEmpty { pinnedStrip }
             ForEach(entries) { entry in
                 SwiftUI.Group {
@@ -132,6 +137,36 @@ struct ConversationListView: View {
     /// hundreds, so filtering it in memory is a fraction of a millisecond and
     /// spares us a round trip to an actor on every keystroke.
     private var visibleRows: [ConversationRow] { matching }
+
+    /// Only when there is something in it.
+    ///
+    /// A permanent row saying "no requests" is a row that teaches people to
+    /// ignore that part of the screen, which is the opposite of what it is for.
+    private var requestsRow: some View {
+        Button {
+            isRequestsPresented = true
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "tray.fill")
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(Color.accentColor, in: .circle)
+                Text("Requests")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 8)
+                UnreadBadge(count: model.waitingRequests, isMuted: false)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .listRowInsets(.init(top: 8, leading: 16, bottom: 8, trailing: 16))
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+    }
 
     /// The pinned conversations, in the order they were pinned.
     ///

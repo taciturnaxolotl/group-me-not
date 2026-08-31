@@ -161,6 +161,43 @@ actor GroupMeAPI {
         return page.sorted { Message.isNewer($1.id, than: $0.id) }
     }
 
+    // MARK: - Requests
+
+    /// Everything waiting on a decision: message requests and group invitations.
+    func pendingRequests() async throws -> PendingRequests {
+        do {
+            return try await client.get(.v4, "/requests", retry: .background)
+        } catch APIError.noContent {
+            return PendingRequests()
+        }
+    }
+
+    /// People asking to join one group. Admins and the owner only.
+    func pendingMemberships(in groupID: String) async throws -> [JoinRequest] {
+        do {
+            return try await client.get(
+                .v3, "/groups/\(groupID)/pending_memberships", retry: .background)
+        } catch APIError.noContent {
+            return []
+        }
+    }
+
+    /// Let somebody in, or turn them away.
+    ///
+    /// Addressed by *membership* id rather than user id; see
+    /// ``JoinRequest/approvalID``.
+    func respond(
+        toMembership membershipID: String, in groupID: String, approve: Bool
+    ) async throws {
+        try await client.postIgnoringResponse(
+            .v3, "/groups/\(groupID)/members/\(membershipID)/approval",
+            body: Approval(approval: approve), retry: .interactive)
+    }
+
+    private nonisolated struct Approval: Encodable, Sendable {
+        var approval: Bool
+    }
+
     // MARK: - Group settings
 
     /// Change how you appear in one group.

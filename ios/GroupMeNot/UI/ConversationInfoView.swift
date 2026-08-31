@@ -64,6 +64,16 @@ struct ConversationInfoView: View {
             } label: {
                 Label(canEditGroup ? "Group Settings" : "Your Nickname", systemImage: "slider.horizontal.3")
             }
+
+            // Only where it can be acted on, and only where it applies. A group
+            // that lets anyone in has no queue to show.
+            if canEditGroup, conversation.requiresApproval == true {
+                NavigationLink {
+                    JoinRequestsView(conversation: conversation)
+                } label: {
+                    Label("Join Requests", systemImage: "person.badge.clock")
+                }
+            }
         }
     }
 
