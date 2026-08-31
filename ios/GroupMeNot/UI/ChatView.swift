@@ -324,6 +324,9 @@ struct ChatView: View {
     /// on the first fill and never again; see ``UnreadMark``.
     @State private var unread: UnreadMark?
     @State private var hasResolvedUnread = false
+    /// Whether the divider has been on screen, so it is only retired by being
+    /// scrolled past rather than by never having appeared.
+    @State private var hasSeenDivider = false
 
     /// The row the transcript opens on, when that is not the newest message.
     /// Set once, consumed once, by the effect inside the `ScrollViewReader`.
@@ -488,6 +491,7 @@ struct ChatView: View {
                     .onAppear { prefetchOlderIfNeeded(atRow: index) }
             case .unreadMarker(let mark):
                 UnreadDivider(count: mark.count)
+                    .onScrollVisibilityChange(threshold: 0.2, dividerVisibilityChanged)
             }
         }
     }
@@ -606,6 +610,25 @@ struct ChatView: View {
             .allowsHitTesting(false)
             .id(bottomAnchor)
             .onScrollVisibilityChange(threshold: 0.01, footVisibilityChanged)
+    }
+
+    /// Retire the divider once the reader has gone past it.
+    ///
+    /// It marks where reading stopped last time, which is worth knowing on
+    /// arrival and worth nothing afterwards; left in place it becomes a line
+    /// across a conversation the reader has finished with, and it survives every
+    /// rebuild, so it would sit there until the view is torn down.
+    ///
+    /// Retired on the way *out* of view rather than the way in. A run short
+    /// enough to fit on one screen would otherwise vanish the moment it drew,
+    /// which is the one case where the divider had no chance to do its job.
+    private func dividerVisibilityChanged(_ visible: Bool) {
+        if visible {
+            hasSeenDivider = true
+            return
+        }
+        guard hasSeenDivider, unread != nil else { return }
+        withAnimation(.easeOut(duration: 0.25)) { unread = nil }
     }
 
     /// The one place scroll position turns into state.
@@ -1138,7 +1161,18 @@ struct ChatView: View {
         if let lastRead = conversation.lastReadMessageID,
            let index = messages.lastIndex(where: { $0.id == lastRead }) {
             guard index + 1 < messages.count else { return }
-            unread = UnreadMark(firstUnreadID: messages[index + 1].id, count: count)
+            // Counted from where the divider lands, not taken from the badge.
+            //
+            // The two are different numbers arrived at different ways: the badge
+            // is the server's tally and the divider is placed from the read
+            // receipt, and they drift apart whenever one is fresher than the
+            // other. A divider reading "3 unread" with one message under it is
+            // not a small inaccuracy, it is a label contradicting the thing it
+            // labels. Deriving the count from the position makes them agree by
+            // construction.
+            unread = UnreadMark(
+                firstUnreadID: messages[index + 1].id,
+                count: messages.count - (index + 1))
             return
         }
 
@@ -1149,7 +1183,7 @@ struct ChatView: View {
         // rather than somewhere off above the loaded window.
         let index = max(0, messages.count - count)
         guard index < messages.count else { return }
-        unread = UnreadMark(firstUnreadID: messages[index].id, count: count)
+        unread = UnreadMark(firstUnreadID: messages[index].id, count: messages.count - index)
     }
 
     /// Anchors the content's end for the frame or two it takes the scroll view

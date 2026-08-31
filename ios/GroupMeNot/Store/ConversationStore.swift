@@ -414,9 +414,19 @@ actor ConversationStore {
     /// in flight when the user opens a conversation reports the count from
     /// before the read, and its newest message is one we have just read past, so
     /// it correctly resolves to zero rather than relighting the badge.
+    /// Whichever device has read furthest, because "has this been read" is a
+    /// question about the account and not about this phone.
     nonisolated private static let readEverythingReported = """
-    CAST(COALESCE(conversations.last_read_message_id, '0') AS INTEGER)
+    MAX(CAST(COALESCE(conversations.last_read_message_id, '0') AS INTEGER),
+        CAST(COALESCE(excluded.last_read_message_id, '0') AS INTEGER))
         >= excluded.last_message_sort
+    """
+
+    /// The server's read cursor is ahead of ours, which means reading happened
+    /// somewhere else and its tally is better informed than ours.
+    nonisolated private static let serverCursorIsAhead = """
+    CAST(COALESCE(excluded.last_read_message_id, '0') AS INTEGER)
+        > CAST(COALESCE(conversations.last_read_message_id, '0') AS INTEGER)
     """
 
     /// `COALESCE(excluded.x, conversations.x)` throughout, so a partial update
@@ -444,14 +454,22 @@ actor ConversationStore {
         last_message_sender = CASE WHEN excluded.last_message_sort >= conversations.last_message_sort
                                    THEN COALESCE(excluded.last_message_sender, conversations.last_message_sender)
                                    ELSE conversations.last_message_sender END,
-        unread_count = CASE WHEN \(ConversationStore.readEverythingReported)
-                            THEN 0
-                            -- Neither side is wholly trustworthy on its own: the
-                            -- server's count can lag a message that arrived over
-                            -- the socket a moment ago, and ours only counts what
-                            -- this device happened to be awake for. The larger is
-                            -- the one that does not hide a message.
-                            ELSE MAX(excluded.unread_count, conversations.unread_count) END,
+        -- Three cases, because this is a three-way reconciliation between what
+        -- the server counted, what this device saw arrive, and how far anybody
+        -- has read.
+        unread_count = CASE
+            -- Somebody has read to the end. Nothing is unread, whatever is
+            -- being reported.
+            WHEN \(ConversationStore.readEverythingReported) THEN 0
+            -- Reading happened on another device. Our tally counts pushes this
+            -- phone happened to be awake for and knows nothing about what was
+            -- read elsewhere, so the server's is simply better.
+            WHEN \(ConversationStore.serverCursorIsAhead) THEN excluded.unread_count
+            -- Otherwise neither is wholly trustworthy: the server's count can
+            -- lag a message that arrived over the socket a moment ago, and ours
+            -- only counts what this device saw. The larger is the one that does
+            -- not hide a message.
+            ELSE MAX(excluded.unread_count, conversations.unread_count) END,
         last_read_message_id = CASE WHEN \(ConversationStore.localCursorIsAhead)
                                     THEN conversations.last_read_message_id
                                     ELSE COALESCE(excluded.last_read_message_id, conversations.last_read_message_id) END,
