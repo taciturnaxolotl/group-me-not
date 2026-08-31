@@ -631,7 +631,7 @@ struct ChatView: View {
 
     @ViewBuilder private var typingRow: some View {
         if model.isAnyoneTyping {
-            TypingIndicator(names: model.typingNames)
+            TypingIndicator(people: model.typingPeople, names: model.typingNames)
                 .transition(.opacity)
                 // Scoped to the indicator. An implicit animation on the whole
                 // stack re-animates every row on every typing event, which is
@@ -1468,10 +1468,16 @@ private struct EmptyState: View {
 /// not draw them either, but they are still what VoiceOver reads: a bubble of
 /// dots is nothing to speak aloud.
 private struct TypingIndicator: View {
+    let people: [TypingPerson]
     let names: [String]
 
+    /// Enough to say "several", past which the faces are a smudge.
+    private static let visibleFaces = 3
+    private static let faceSize: CGFloat = 22
+
     var body: some View {
-        HStack {
+        HStack(spacing: 7) {
+            faces
             TypingDots()
                 .padding(.horizontal, 14)
                 .padding(.vertical, 11)
@@ -1479,9 +1485,28 @@ private struct TypingIndicator: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 2)
-        .padding(.vertical, 4)
+        .padding(.top, 4)
+        // Clearance from the composer. The bar insets the transcript, but the
+        // soft scroll edge dissolves the last stretch of content into it, and a
+        // bubble of dots is small enough to be dissolved entirely.
+        .padding(.bottom, 14)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(sentence)
+    }
+
+    /// Overlapped rather than spaced, so three people cost about the width of
+    /// two. The first typist is drawn on top, which keeps the pile from
+    /// reshuffling as people join and leave it.
+    @ViewBuilder private var faces: some View {
+        if !people.isEmpty {
+            HStack(spacing: -Self.faceSize * 0.35) {
+                ForEach(Array(people.prefix(Self.visibleFaces).enumerated()), id: \.element.id) { index, person in
+                    Avatar(url: person.imageURL, name: person.name, size: Self.faceSize)
+                        .overlay(Circle().strokeBorder(Color(.systemBackground), lineWidth: 1.5))
+                        .zIndex(Double(Self.visibleFaces - index))
+                }
+            }
+        }
     }
 
     private var sentence: String {
@@ -1497,41 +1522,42 @@ private struct TypingIndicator: View {
 /// The animation itself, kept apart so its `@State` is created and destroyed
 /// with the bubble rather than living for the length of the conversation.
 private struct TypingDots: View {
-    @State private var phase = 0.0
-
     private static let dotSize: CGFloat = 7
     private static let period = 1.2
     /// A third of the cycle between neighbours, which is what makes it read as
     /// a travelling wave rather than three lights blinking.
     private static let stagger = 0.2
 
+    /// Driven by the clock rather than by an animation.
+    ///
+    /// This used to be a `repeatForever` started in `onAppear`, and it did not
+    /// run: an ancestor's `.animation(_:value:)` replaces the animation context
+    /// for everything beneath it, so the repeating linear curve was quietly
+    /// swapped for the parent's quarter-second ease and the dots sat still. A
+    /// `TimelineView` asks what time it is instead, which nothing above can
+    /// override.
     var body: some View {
-        HStack(spacing: 5) {
-            ForEach(0..<3, id: \.self) { index in
-                Circle()
-                    .fill(.secondary)
-                    .frame(width: Self.dotSize, height: Self.dotSize)
-                    .scaleEffect(scale(index))
-                    .opacity(opacity(index))
-            }
-        }
-        .onAppear {
-            withAnimation(.linear(duration: Self.period).repeatForever(autoreverses: false)) {
-                phase = 1
+        TimelineView(.animation) { timeline in
+            let phase = timeline.date.timeIntervalSinceReferenceDate / Self.period
+            HStack(spacing: 5) {
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .fill(.secondary)
+                        .frame(width: Self.dotSize, height: Self.dotSize)
+                        .scaleEffect(0.75 + 0.35 * wave(index, at: phase))
+                        .opacity(0.4 + 0.6 * wave(index, at: phase))
+                }
             }
         }
     }
 
     /// A raised cosine over the cycle, offset per dot. Smooth at the wrap,
     /// which a keyframe list of discrete states is not.
-    private func wave(_ index: Int) -> Double {
+    private func wave(_ index: Int, at phase: Double) -> Double {
         let t = (phase - Double(index) * Self.stagger).truncatingRemainder(dividingBy: 1)
         let wrapped = t < 0 ? t + 1 : t
         return (1 - cos(wrapped * 2 * .pi)) / 2
     }
-
-    private func scale(_ index: Int) -> Double { 0.75 + 0.35 * wave(index) }
-    private func opacity(_ index: Int) -> Double { 0.4 + 0.6 * wave(index) }
 }
 
 /// Switches off the status bar's scroll-to-top gesture for the scroll view it

@@ -958,13 +958,24 @@ final class AppModel {
     ///
     /// Empty when nobody is, and also when we hold no roster for them, which is
     /// the normal case in a DM. The view says "Typing…" rather than guessing.
-    var typingNames: [String] {
+    var typingNames: [String] { typingPeople.map(\.name) }
+
+    /// Who is typing, with the face to draw for each.
+    ///
+    /// Only people the roster knows. A DM carries no membership, and an id with
+    /// no name is a face nobody would recognise anyway, so those are dropped
+    /// rather than drawn as a grey circle: the dots alone already say somebody
+    /// is typing.
+    var typingPeople: [TypingPerson] {
         guard !typingUserIDs.isEmpty else { return [] }
-        var names: [String: String] = [:]
-        for member in members {
-            if let name = member.nickname ?? member.name { names[member.identity] = name }
+        let byID = Dictionary(
+            members.map { ($0.identity, $0) }, uniquingKeysWith: { first, _ in first })
+        return typingUserIDs.keys.compactMap { id -> TypingPerson? in
+            guard let member = byID[id], let name = member.nickname ?? member.name
+            else { return nil }
+            return TypingPerson(id: id, name: name, imageURL: member.imageUrl)
         }
-        return typingUserIDs.keys.compactMap { names[$0] }.sorted()
+        .sorted { $0.name < $1.name }
     }
 
     var isAnyoneTyping: Bool { !typingUserIDs.isEmpty }
@@ -1083,4 +1094,12 @@ final class AppModel {
         attemptedHeals.formUnion(unresolved.map(\.id))
         Task { await self.sync.catchUp(conversation) }
     }
+}
+
+
+/// One person mid-sentence, for the indicator at the foot of a transcript.
+nonisolated struct TypingPerson: Identifiable, Hashable, Sendable {
+    let id: String
+    let name: String
+    let imageURL: String?
 }
