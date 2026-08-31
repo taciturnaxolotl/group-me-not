@@ -562,21 +562,77 @@ private struct AttachmentStack: View {
     var body: some View {
         if !attachments.isEmpty {
             VStack(alignment: isTrailing ? .trailing : .leading, spacing: 6) {
-                ForEach(Array(attachments.enumerated()), id: \.offset) { index, attachment in
-                    view(for: attachment, at: index)
+                pictureStack
+                ForEach(Array(others.enumerated()), id: \.offset) { _, attachment in
+                    view(for: attachment)
                 }
             }
             .fullScreenCover(item: $viewing) { item in
-                MediaViewer(attachment: item.attachment)
+                // The whole run, not the one that was tapped, so a swipe inside
+                // the viewer reaches the others.
+                MediaViewer(attachments: pictures, initialIndex: item.id)
             }
         }
     }
 
-    @ViewBuilder private func view(for attachment: Message.Attachment, at index: Int) -> some View {
+    /// Several photos are stacked and staggered rather than listed.
+    ///
+    /// This is what Messages does with a burst of pictures, and the reason is
+    /// not decoration: four photos in a plain column is most of a screen of
+    /// scrolling for one message, and it reads as four separate things rather
+    /// than as one thing somebody sent. Overlapping them says "these arrived
+    /// together" in a way vertical spacing cannot, and the alternating offset is
+    /// what keeps the one underneath legible instead of merely hidden.
+    @ViewBuilder private var pictureStack: some View {
+        if pictures.count == 1 {
+            thumbnail(pictures[0], at: 0)
+        } else if !pictures.isEmpty {
+            VStack(alignment: isTrailing ? .trailing : .leading, spacing: -Self.overlap) {
+                ForEach(Array(pictures.enumerated()), id: \.offset) { index, attachment in
+                    thumbnail(attachment, at: index)
+                        // Later photos sit on top, so the cascade reads front to
+                        // back in the order they were sent.
+                        .zIndex(Double(index))
+                        .offset(x: stagger(at: index))
+                }
+            }
+            // The stagger pushes the outer edges past the stack's own bounds;
+            // this is the room that costs.
+            .padding(.horizontal, Self.stagger)
+        }
+    }
+
+    private func thumbnail(_ attachment: Message.Attachment, at index: Int) -> some View {
+        MediaThumbnail(attachment: attachment, heightCap: heightCap)
+            .shadow(color: .black.opacity(pictures.count > 1 ? 0.22 : 0), radius: 5, y: 2)
+            .onTapGesture { viewing = ViewableMedia(id: index, attachment: attachment) }
+    }
+
+    /// How far each photo leans, alternating so the pile does not drift.
+    private static let stagger: CGFloat = 14
+    /// How much of the photo above stays covered.
+    private static let overlap: CGFloat = 22
+
+    private func stagger(at index: Int) -> CGFloat {
+        let lean = index.isMultiple(of: 2) ? -Self.stagger : Self.stagger
+        return isTrailing ? -lean : lean
+    }
+
+    /// The pictures, in order, which is also the order the viewer pages through.
+    private var pictures: [Message.Attachment] {
+        attachments.filter { Self.isPicture($0.type) }
+    }
+
+    private var others: [Message.Attachment] {
+        attachments.filter { !Self.isPicture($0.type) }
+    }
+
+    private static func isPicture(_ type: String?) -> Bool {
+        type == "image" || type == "video" || type == "linked_image"
+    }
+
+    @ViewBuilder private func view(for attachment: Message.Attachment) -> some View {
         switch attachment.type {
-        case "image", "video", "linked_image":
-            MediaThumbnail(attachment: attachment, heightCap: heightCap)
-                .onTapGesture { viewing = ViewableMedia(id: index, attachment: attachment) }
         case "location":
             AttachmentChip(
                 symbol: "mappin.and.ellipse",
@@ -605,8 +661,7 @@ private struct AttachmentStack: View {
     /// next. Fixed off the count rather than measured, so it is known before
     /// anything loads.
     private var heightCap: CGFloat {
-        let pictures = attachments.filter { $0.type == "image" || $0.type == "video" || $0.type == "linked_image" }
-        return pictures.count > 1 ? 240 : 360
+        pictures.count > 1 ? 240 : 360
     }
 
     /// A word for an attachment the transcript cannot render, used in previews

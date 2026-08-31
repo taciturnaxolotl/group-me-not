@@ -10,13 +10,19 @@ import SwiftUI
 /// drag it down. The chrome is deliberately sparse. Every control here does
 /// something real; none of it is there to fill the corners.
 struct MediaViewer: View {
-    let attachment: Message.Attachment
+    /// Every picture the message carried, so a swipe reaches the rest.
+    let attachments: [Message.Attachment]
+    /// Which one was tapped.
+    let initialIndex: Int
 
     @Environment(\.dismiss) private var dismiss
 
-    /// Whether the bars are showing. Starts true so the way out is visible
-    /// before the reader has learned that a tap brings it back.
-    @State private var isChromeVisible = true
+    @State private var index: Int = 0
+    /// Whether the bars are showing. Starts hidden: the picture is what was
+    /// asked for, and chrome that arrives uninvited is chrome that has to be
+    /// dismissed before the photo can be looked at. A tap brings it back, and a
+    /// downward drag closes the viewer without it.
+    @State private var isChromeVisible = false
     /// The loaded picture, held here rather than inside the zoom view so the
     /// share and save actions have something to hand over.
     @State private var image: UIImage?
@@ -24,10 +30,22 @@ struct MediaViewer: View {
     /// taken with it.
     @State private var dragOffset: CGSize = .zero
     @State private var saveResult: SaveResult?
+    /// The height of the top bar, measured, so the letterbox test below knows
+    /// how far down the bar actually reaches.
+    @State private var topBarHeight: CGFloat = 0
+    /// The screen, for the same test.
+    @State private var canvas: CGSize = .zero
 
     /// Past this much downward travel the picture is let go rather than
     /// snapping back. Roughly a thumb's comfortable reach.
     private static let dismissDistance: CGFloat = 140
+
+    /// The page being looked at. Falls back rather than trapping: `index` is
+    /// clamped on appear, but a viewer opened on an empty run should show
+    /// nothing rather than crash.
+    private var attachment: Message.Attachment? {
+        attachments.indices.contains(index) ? attachments[index] : attachments.first
+    }
 
     var body: some View {
         ZStack {
@@ -35,9 +53,14 @@ struct MediaViewer: View {
                 .opacity(backdropOpacity)
                 .ignoresSafeArea()
 
-            content
+            pages
                 .offset(dragOffset)
                 .scaleEffect(dragScale)
+        }
+        .onGeometryChange(for: CGSize.self, of: \.size) { canvas = $0 }
+        .onAppear {
+            guard !attachments.isEmpty else { return }
+            index = min(max(initialIndex, 0), attachments.count - 1)
         }
         .overlay(alignment: .top) { topBar }
         .overlay(alignment: .bottom) { bottomBar }
@@ -50,14 +73,33 @@ struct MediaViewer: View {
         }
     }
 
-    @ViewBuilder private var content: some View {
-        if attachment.type == "video", let url = mediaURL {
+    /// One page per picture. Paging is the system's, so the rubber band at
+    /// either end and the speed of a flick are the ones every other iOS gallery
+    /// has; writing our own would only be a worse copy of it.
+    private var pages: some View {
+        TabView(selection: $index) {
+            ForEach(Array(attachments.enumerated()), id: \.offset) { position, item in
+                page(for: item)
+                    .tag(position)
+            }
+        }
+        .tabViewStyle(.page(indexDisplayMode: .never))
+        .ignoresSafeArea()
+    }
+
+    @ViewBuilder private func page(for item: Message.Attachment) -> some View {
+        if item.type == "video", let url = Self.mediaURL(of: item) {
             VideoPlayer(player: AVPlayer(url: url))
                 .ignoresSafeArea()
         } else {
             ZoomableImage(
-                url: mediaURL,
-                onLoad: { image = $0 },
+                url: Self.mediaURL(of: item),
+                onLoad: { loaded in
+                    // Only the page being looked at owns the share and save
+                    // actions. Without this test a neighbouring page finishing
+                    // its download would quietly swap what the buttons act on.
+                    if item.url == attachment?.url { image = loaded }
+                },
                 onSingleTap: toggleChrome,
                 onDismissDrag: { translation, animated in
                     guard animated else {
@@ -88,15 +130,20 @@ struct MediaViewer: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        // A band, not just floating buttons. White glyphs over an arbitrary
-        // photo are legible on some pictures and invisible on others, and the
-        // one control that must always be findable is the way out. The material
-        // runs up under the status bar so the clock sits on it too, which is
-        // what makes it read as a bar rather than as a smudge.
+        .onGeometryChange(for: CGFloat.self, of: \.size.height) { topBarHeight = $0 }
+        // A band, but only when the bar has a picture to stand out against.
+        //
+        // White glyphs over an arbitrary photo are legible on some pictures and
+        // invisible on others, so the band exists for the pictures that reach
+        // the top of the screen. A letterboxed one does not: the bar sits on
+        // plain black, where nothing could be more readable, and the material
+        // would only be a lighter rectangle drawn over darkness for no reason.
         .background {
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .ignoresSafeArea(edges: .top)
+            if barOverlapsPicture {
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .ignoresSafeArea(edges: .top)
+            }
         }
         .opacity(isChromeVisible ? 1 : 0)
         .animation(.easeInOut(duration: 0.2), value: isChromeVisible)
@@ -111,7 +158,7 @@ struct MediaViewer: View {
                 .disabled(image == nil)
         } label: {
             HStack(spacing: 6) {
-                Text(attachment.type == "video" ? "Video" : "Photo")
+                Text(attachment?.type == "video" ? "Video" : "Photo")
                     .font(.headline)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 11, weight: .bold))
@@ -178,6 +225,24 @@ struct MediaViewer: View {
 
     // MARK: Behaviour
 
+    /// Whether the top bar actually covers any of the photo.
+    ///
+    /// The picture is drawn to fit, so its height on screen follows from its
+    /// aspect ratio and the canvas. If the top of that rectangle falls below the
+    /// bottom of the bar, the bar is over letterbox and needs no ground.
+    ///
+    /// Unknown shapes answer true, because a bar that is occasionally redundant
+    /// is a much smaller fault than a close button nobody can see.
+    private var barOverlapsPicture: Bool {
+        guard canvas.width > 0, canvas.height > 0, topBarHeight > 0 else { return true }
+        guard let size = MediaDimensions.declared(in: mediaURL) ?? image?.size,
+              size.width > 0, size.height > 0
+        else { return true }
+        let drawnHeight = min(canvas.height, canvas.width * size.height / size.width)
+        let pictureTop = (canvas.height - drawnHeight) / 2
+        return pictureTop < topBarHeight
+    }
+
     private func toggleChrome() {
         withAnimation(.easeInOut(duration: 0.2)) { isChromeVisible.toggle() }
     }
@@ -225,7 +290,9 @@ struct MediaViewer: View {
 
     /// The full-size asset, not the thumbnail: `url` first, and the preview only
     /// as a fallback for a video we have not got a playable copy of.
-    private var mediaURL: URL? {
+    private var mediaURL: URL? { attachment.flatMap(Self.mediaURL(of:)) }
+
+    static func mediaURL(of attachment: Message.Attachment) -> URL? {
         let candidate = attachment.url ?? attachment.sourceUrl ?? attachment.previewUrl
         return candidate.flatMap(URL.init(string:))
     }
@@ -336,20 +403,31 @@ private struct ZoomableImage: View {
             .onEnded { _ in committedOffset = offset }
     }
 
-    /// Drag the picture away to close. Horizontal travel is kept so the picture
-    /// follows the finger honestly, but only the vertical distance decides.
+    /// Drag the picture away to close.
+    ///
+    /// Only a mostly-vertical drag counts. Horizontal belongs to the pager, and
+    /// this gesture runs alongside it, so without the dominance test a swipe
+    /// towards the next photo would also start dragging this one off the screen.
+    /// The `minimumDistance` is what keeps a tap from registering as either.
     private var dismissDrag: some Gesture {
-        DragGesture()
-            .onChanged { value in onDismissDrag(value.translation, false) }
+        DragGesture(minimumDistance: 12)
+            .onChanged { value in
+                guard Self.isVertical(value.translation) else { return }
+                onDismissDrag(value.translation, false)
+            }
             .onEnded { value in
                 let travelled = abs(value.translation.height) > dismissDistance
                 let flicked = abs(value.predictedEndTranslation.height) > dismissDistance * 2
-                guard travelled || flicked else {
+                guard Self.isVertical(value.translation), travelled || flicked else {
                     onDismissDrag(.zero, true)
                     return
                 }
                 onDismiss()
             }
+    }
+
+    private static func isVertical(_ translation: CGSize) -> Bool {
+        abs(translation.height) > abs(translation.width)
     }
 
     private func toggleZoom() {
