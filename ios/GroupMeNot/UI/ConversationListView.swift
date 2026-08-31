@@ -70,23 +70,14 @@ struct ConversationListView: View {
             if !pinnedRows.isEmpty && query.isEmpty { pinnedStrip }
             ForEach(entries) { entry in
                 SwiftUI.Group {
-                    if entry.isExpandable {
+                    if entry.isGrid {
+                        topicGrid(entry)
+                    } else if entry.isExpandable {
                         // A header, not a destination. Its children include the
                         // main conversation, so sending the tap there as well
                         // would give one row two meanings.
                         Button {
                             toggle(entry.row)
-                        } label: {
-                            ConversationCell(entry: entry)
-                        }
-                        .buttonStyle(.plain)
-                    } else if entry.indented {
-                        // A `Button` rather than a `NavigationLink`, because a
-                        // link in a list draws a disclosure chevron and eight
-                        // of them stacked under one group is a column of
-                        // arrows pointing at nothing in particular.
-                        Button {
-                            path.append(.chat(entry.row))
                         } label: {
                             ConversationCell(entry: entry)
                         }
@@ -97,12 +88,17 @@ struct ConversationListView: View {
                         }
                     }
                 }
-                .listRowInsets(.init(
-                    top: entry.indented ? 5 : 8, leading: 16,
-                    bottom: entry.indented ? 5 : 8, trailing: 16))
-                // The run of topics reads as one block rather than as eight
-                // separate rows with rules between them.
-                .listRowSeparator(entry.indented ? .hidden : .visible)
+                .listRowInsets(entry.isGrid
+                    ? EdgeInsets()
+                    : .init(top: 8, leading: 16, bottom: 8, trailing: 16))
+                .listRowSeparator(entry.isGrid ? .hidden : .visible)
+                // Long press to pin, on every row that is a conversation. The
+                // swipe is still there; this is the gesture people reach for.
+                .contextMenu {
+                    if !entry.isGrid {
+                        pinButton(for: entry.row)
+                    }
+                }
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
                     if entry.row.hasUnread {
                         Button {
@@ -124,19 +120,7 @@ struct ConversationListView: View {
                     }
                     .tint(.indigo)
 
-                    if !entry.indented {
-                        let key = entry.row.id.storageKey
-                        let isPinned = settings.isPinned(key)
-                        Button {
-                            settings.togglePin(key)
-                        } label: {
-                            Label(isPinned ? "Unpin" : "Pin", systemImage: isPinned ? "pin.slash.fill" : "pin.fill")
-                        }
-                        .tint(.orange)
-                        // Silently doing nothing at the limit would read as a
-                        // broken swipe, so the action is simply not offered.
-                        .disabled(!isPinned && !settings.canPinMore)
-                    }
+                    if !entry.isGrid { pinButton(for: entry.row).tint(.orange) }
                 }
             }
         }
@@ -182,6 +166,51 @@ struct ConversationListView: View {
         .listRowInsets(.init(top: 8, leading: 16, bottom: 8, trailing: 16))
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
+    }
+
+    /// Pin or unpin, wherever the gesture came from.
+    @ViewBuilder private func pinButton(for row: ConversationRow) -> some View {
+        let key = row.id.storageKey
+        let isPinned = settings.isPinned(key)
+        Button {
+            withAnimation(.snappy(duration: 0.25)) { settings.togglePin(key) }
+        } label: {
+            Label(
+                isPinned ? "Unpin" : "Pin",
+                systemImage: isPinned ? "pin.slash.fill" : "pin.fill")
+        }
+        // Silently doing nothing at the limit would read as broken, so at the
+        // limit the action is simply not offered.
+        .disabled(!isPinned && !settings.canPinMore)
+    }
+
+    /// A group's conversations as tiles, in the same shape the pinned strip
+    /// uses.
+    ///
+    /// Rows with a rule down their left edge were decoration pretending to be
+    /// structure: eight of them read as a list that had gone wrong. Tiles say
+    /// "these belong together" by being a block, which is what an expanded group
+    /// actually is.
+    private func topicGrid(_ entry: Entry) -> some View {
+        LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3),
+            spacing: 14
+        ) {
+            ForEach(entry.members) { member in
+                ConversationTile(
+                    row: member,
+                    name: member.id == entry.row.id ? "Main" : member.name,
+                    unread: member.unreadCount,
+                    size: 52
+                ) {
+                    path.append(.chat(member))
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 4)
+        .padding(.bottom, 16)
+        .listRowBackground(Color.clear)
     }
 
     /// The pinned conversations, in the order they were pinned.
@@ -242,59 +271,19 @@ struct ConversationListView: View {
     /// a pinned chat opened somebody else's messages. Pushing the route by hand
     /// has neither problem.
     private func pinnedTile(_ row: ConversationRow) -> some View {
-        Button {
-            guard !isEditingPins else { return }
-            path.append(destination(for: row))
-        } label: {
-            VStack(spacing: 6) {
-                Avatar(url: row.avatarURL, name: row.name, size: 60, isGroup: row.isGroup)
-                    .overlay(alignment: .topTrailing) {
-                        if isEditingPins {
-                            Image(systemName: "minus.circle.fill")
-                                .font(.title3)
-                                .symbolRenderingMode(.palette)
-                                .foregroundStyle(.white, .red)
-                                .offset(x: 4, y: -4)
-                        } else {
-                            UnreadBadge(count: unreadTotal(for: row), isMuted: row.isMuted)
-                                .offset(x: 6, y: -2)
-                        }
-                    }
-                    // A topic-bearing group opens a chooser rather than a
-                    // conversation, and the stack of pages says so before it is
-                    // tapped.
-                    .overlay(alignment: .bottomTrailing) {
-                        if !isEditingPins, hasTopics(row) {
-                            Image(systemName: "square.stack.3d.up.fill")
-                                .font(.caption2)
-                                .foregroundStyle(.white)
-                                .padding(4)
-                                .background(Color.accentColor, in: .circle)
-                                .overlay(Circle().strokeBorder(Color(.systemBackground), lineWidth: 1.5))
-                        }
-                    }
-                Text(row.name)
-                    .font(.caption2)
-                    .lineLimit(1)
-                    .foregroundStyle(.primary)
-            }
-            .frame(maxWidth: .infinity)
-            .contentShape(.rect)
-        }
-        .buttonStyle(.plain)
-        .overlay {
-            // The remove target is the whole tile while editing, which is a
-            // 60-point circle rather than the 20-point badge drawn on it.
+        ConversationTile(
+            row: row,
+            name: row.name,
+            unread: unreadTotal(for: row),
+            size: 60,
+            isEditing: isEditingPins,
+            leadsToChooser: hasTopics(row),
+            menu: { pinButton(for: row) }
+        ) {
             if isEditingPins {
-                Button {
-                    withAnimation(.snappy(duration: 0.2)) {
-                        settings.togglePin(row.id.storageKey)
-                    }
-                } label: {
-                    Color.clear.contentShape(.rect)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Unpin \(row.name)")
+                withAnimation(.snappy(duration: 0.2)) { settings.togglePin(row.id.storageKey) }
+            } else {
+                path.append(destination(for: row))
             }
         }
     }
@@ -352,8 +341,10 @@ struct ConversationListView: View {
                 // row must not hide the fact that something is waiting in it.
                 badge: row.unreadCount + topics.reduce(0) { $0 + $1.unreadCount }))
             guard isOpen else { continue }
-            out.append(Entry(row: row, indented: true, label: "Main"))
-            out.append(contentsOf: topics.map { Entry(row: $0, indented: true) })
+            // One entry holding the whole set, drawn as a grid. Main first,
+            // because it is the conversation that existed before anybody added
+            // topics.
+            out.append(Entry(row: row, members: [row] + topics))
         }
         // A topic whose group is filtered out by the search term keeps its own
         // place rather than disappearing with it.
@@ -378,11 +369,15 @@ struct ConversationListView: View {
         let row: ConversationRow
         var isExpandable = false
         var isExpanded = false
-        var indented = false
         var label: String?
         var badge: Int?
+        /// When this is non-empty the entry is not a conversation but the set of
+        /// them belonging to the group above it, drawn as tiles. The group's own
+        /// row is the first member.
+        var members: [ConversationRow] = []
 
-        var id: String { "\(row.id.storageKey)#\(indented ? "child" : "row")" }
+        var isGrid: Bool { !members.isEmpty }
+        var id: String { "\(row.id.storageKey)#\(isGrid ? "grid" : "row")" }
         var name: String { label ?? row.name }
         var unread: Int { badge ?? row.unreadCount }
     }
@@ -519,32 +514,17 @@ struct ConversationCell: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            if entry.indented {
-                // A rule rather than blank space. Eight indented rows with
-                // nothing joining them read as eight conversations that happen
-                // to start further right.
-                Capsule()
-                    .fill(.quaternary)
-                    .frame(width: 2)
-                    .padding(.leading, 8)
-                    .accessibilityHidden(true)
-            }
-
             Avatar(
                 url: row.avatarURL,
                 name: entry.name,
-                size: entry.indented ? avatarSize * 0.62 : avatarSize,
+                size: avatarSize,
                 isGroup: row.isGroup
             )
 
-            VStack(alignment: .leading, spacing: entry.indented ? 1 : 3) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(entry.name.isEmpty ? "Conversation" : entry.name)
-                        // A topic is a room inside a conversation, not a
-                        // conversation. At the parent's weight, eight of them
-                        // read as eight chats that happen to be indented, which
-                        // is what made an expanded group look like a mistake.
-                        .font(entry.indented ? .subheadline : .headline)
+                        .font(.headline)
                         .lineLimit(1)
 
                     if entry.isExpandable {
@@ -574,7 +554,7 @@ struct ConversationCell: View {
 
                     if let date = row.lastMessageAt {
                         Text(Formatters.listTimestamp(date))
-                            .font(entry.indented ? .caption : .subheadline)
+                            .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .accessibilityHidden(true)
                     }
@@ -582,11 +562,9 @@ struct ConversationCell: View {
 
                 HStack(alignment: .top, spacing: 6) {
                     Text(preview)
-                        .font(entry.indented ? .caption : .subheadline)
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
-                        // One line for a topic. Two-line previews on eight rows
-                        // is most of a screen spent on a group's furniture.
-                        .lineLimit(entry.indented ? 1 : 2)
+                        .lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                     UnreadBadge(count: entry.unread, isMuted: row.isMuted)
@@ -692,5 +670,93 @@ struct NetworkStatusBanner: View {
         .transition(.move(edge: .top).combined(with: .opacity))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(text)
+    }
+}
+
+/// A conversation as a face and a name.
+///
+/// Shared by the pinned strip and by an expanded group's topics, which is the
+/// point: both are "a handful of conversations that belong together", and
+/// drawing them the same way is what makes the second one legible. Rows with a
+/// rule down the side were decoration pretending to be structure.
+struct ConversationTile<Menu: View>: View {
+    let row: ConversationRow
+    /// Usually the conversation's name, but "Main" for a group standing in for
+    /// itself among its own topics.
+    let name: String
+    let unread: Int
+    var size: CGFloat = 56
+    /// Shows the remove badge instead of the unread count.
+    var isEditing = false
+    /// Marks a tile that opens a choice rather than a conversation.
+    var leadsToChooser = false
+    @ViewBuilder var menu: () -> Menu
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Avatar(url: row.avatarURL, name: name, size: size, isGroup: row.isGroup)
+                    .overlay(alignment: .topTrailing) { corner }
+                    .overlay(alignment: .bottomTrailing) { hints }
+                Text(name)
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .contextMenu { menu() }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(unread > 0 ? "\(name), \(unread) unread" : name)
+    }
+
+    @ViewBuilder private var corner: some View {
+        if isEditing {
+            Image(systemName: "minus.circle.fill")
+                .font(.title3)
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, .red)
+                .offset(x: 4, y: -4)
+        } else {
+            UnreadBadge(count: unread, isMuted: row.isMuted)
+                .offset(x: 6, y: -2)
+        }
+    }
+
+    /// Two things worth knowing before tapping: that this leads to a choice
+    /// rather than a conversation, and that it is one nobody can post in.
+    @ViewBuilder private var hints: some View {
+        if !isEditing {
+            if leadsToChooser {
+                badge("square.stack.3d.up.fill", tint: Color.accentColor)
+            } else if row.postingPolicy == .adminsOnly {
+                badge("megaphone.fill", tint: .secondary)
+            }
+        }
+    }
+
+    private func badge(_ symbol: String, tint: Color) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(4)
+            .background(tint, in: .circle)
+            .overlay(Circle().strokeBorder(Color(.systemBackground), lineWidth: 1.5))
+    }
+}
+
+extension ConversationTile where Menu == EmptyView {
+    init(
+        row: ConversationRow, name: String, unread: Int, size: CGFloat = 56,
+        isEditing: Bool = false, leadsToChooser: Bool = false,
+        action: @escaping () -> Void
+    ) {
+        self.init(
+            row: row, name: name, unread: unread, size: size,
+            isEditing: isEditing, leadsToChooser: leadsToChooser,
+            menu: { EmptyView() }, action: action)
     }
 }
