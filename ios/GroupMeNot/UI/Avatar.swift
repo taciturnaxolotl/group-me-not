@@ -22,7 +22,7 @@ struct Avatar: View {
 
     var body: some View {
         RemoteImage(
-            url: URL(string: url ?? ""),
+            url: source,
             // Retina plus a little headroom. Downsampling at decode time is
             // what keeps a list of forty avatars off the main thread.
             maxPixelSize: size * 3
@@ -34,6 +34,17 @@ struct Avatar: View {
         // The surrounding row already speaks the name; a second reading of it
         // just slows VoiceOver down.
         .accessibilityHidden(true)
+    }
+
+    /// The 60-pixel rendering where there is one.
+    ///
+    /// A profile picture is stored at whatever size it was uploaded, which for a
+    /// photo off a phone is a couple of hundred kilobytes. Drawn at 28 points.
+    /// The `.avatar` copy is 2.5 KB and is the correct size for the job, so a
+    /// conversation list of forty faces costs 100 KB instead of eight megabytes.
+    private var source: URL? {
+        let original = URL(string: url ?? "")
+        return GroupMeImage.variant(.avatar, of: original) ?? original
     }
 }
 
@@ -97,6 +108,10 @@ private struct InitialsFill: View {
 struct RemoteImage<Placeholder: View>: View {
     let url: URL?
     var maxPixelSize: CGFloat?
+    /// A smaller copy of the same picture, shown while the real one is on its
+    /// way. Loaded in parallel rather than in sequence: it is a head start, not
+    /// a step the full image has to wait behind.
+    var previewURL: URL?
     /// The pixel size of whatever arrived, for callers that reserved space from
     /// a guess and want to correct it. Ignored by everything drawing into a
     /// fixed box, which is most of them.
@@ -104,6 +119,7 @@ struct RemoteImage<Placeholder: View>: View {
     @ViewBuilder var placeholder: () -> Placeholder
 
     @State private var image: UIImage?
+    @State private var preview: UIImage?
 
     var body: some View {
         ZStack {
@@ -112,6 +128,17 @@ struct RemoteImage<Placeholder: View>: View {
                     .resizable()
                     .scaledToFill()
                     .transition(.opacity)
+            } else if let preview {
+                // Blurred, and not out of decoration. It is a 200-pixel crop
+                // standing in for a full photograph; drawn sharp it reads as a
+                // bad image rather than as one that has not arrived. Blurred it
+                // reads as exactly what it is.
+                Image(uiImage: preview)
+                    .resizable()
+                    .scaledToFill()
+                    .blur(radius: 8)
+                    .clipped()
+                    .transition(.opacity)
             } else {
                 placeholder()
             }
@@ -119,6 +146,29 @@ struct RemoteImage<Placeholder: View>: View {
         // Keyed on the request, so a reused row cancels the load it no longer
         // wants and starts the one it does.
         .task(id: request) { await load() }
+        .task(id: previewRequest) { await loadPreview() }
+    }
+
+    private var previewRequest: ImageLoader.Request? {
+        previewURL.map { ImageLoader.Request(url: $0, maxPixelSize: nil) }
+    }
+
+    /// Races the real load rather than gating it. If the full picture wins, this
+    /// result is simply never drawn, which costs 13 KB and is the right trade at
+    /// any speed worth having a placeholder for.
+    private func loadPreview() async {
+        guard let previewRequest else {
+            preview = nil
+            return
+        }
+        if let hit = ImageLoader.shared.cached(previewRequest) {
+            preview = hit
+            return
+        }
+        preview = nil
+        let loaded = await ImageLoader.shared.image(for: previewRequest)
+        guard !Task.isCancelled, image == nil else { return }
+        withAnimation(.easeOut(duration: 0.12)) { preview = loaded }
     }
 
     private var request: ImageLoader.Request? {

@@ -40,3 +40,54 @@ nonisolated enum MediaDimensions {
         return CGSize(width: width, height: height)
     }
 }
+
+
+/// The resized copies GroupMe's CDN will serve of any picture it hosts.
+///
+/// Appending a suffix to an `i.groupme.com` URL returns a smaller rendering of
+/// the same image. Measured against two live pictures on 2026-08-31:
+///
+/// | suffix     | 1024×1024 source | bytes   |
+/// | ---------- | ---------------- | ------- |
+/// | *(none)*   | 1024×1024        | 207 KB  |
+/// | `.large`   | 960×960          | 122 KB  |
+/// | `.preview` | 200×200          | 13 KB   |
+/// | `.avatar`  | 60×60            | 2.5 KB  |
+///
+/// `.large` caps the long edge at 960 and keeps the aspect ratio. `.preview`
+/// and `.avatar` are square: they crop rather than letterbox, so they are
+/// stand-ins and thumbnails, never the picture itself.
+///
+/// This is worth a good deal on a weak connection, which is the whole point of
+/// this client. A transcript full of photographs was downloading full-resolution
+/// originals to draw them 240 points wide.
+nonisolated enum GroupMeImage {
+    enum Variant: String {
+        /// The long edge capped at 960. Plenty for anything drawn inline.
+        case large
+        /// 200 square. Small enough to arrive almost at once, which makes it the
+        /// thing to show while the real picture is still coming.
+        case preview
+        /// 60 square, for a face in a list.
+        case avatar
+    }
+
+    private static let host = "i.groupme.com"
+
+    /// The named rendering of `url`, or nil when there is no such thing.
+    ///
+    /// Nil rather than a guess for anything not on GroupMe's own picture host:
+    /// a `linked_image` can point anywhere, and appending `.preview` to somebody
+    /// else's URL is a request for a file that does not exist.
+    static func variant(_ variant: Variant, of url: URL?) -> URL? {
+        guard let url, url.host() == host else { return nil }
+        let name = url.lastPathComponent
+        // Already a variant. Asking for a variant of a variant is a 404.
+        guard !Variant.allSuffixes.contains(where: { name.hasSuffix($0) }) else { return nil }
+        return URL(string: url.absoluteString + "." + variant.rawValue)
+    }
+}
+
+private extension GroupMeImage.Variant {
+    static let allSuffixes: [String] = [".large", ".preview", ".avatar"]
+}

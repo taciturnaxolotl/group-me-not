@@ -534,7 +534,14 @@ private struct ZoomableImage: View {
     let onLoad: (UIImage) -> Void
 
     var body: some View {
-        RemoteImage(url: url, onLoad: nil) {
+        // The `.large` copy is almost always already in memory, because the
+        // bubble that was tapped drew it a moment ago. So the viewer opens on a
+        // picture rather than on a spinner, and sharpens to the original once
+        // that arrives.
+        RemoteImage(
+            url: url,
+            previewURL: GroupMeImage.variant(.large, of: url)
+        ) {
             ProgressView().tint(.white)
         }
         .scaledToFit()

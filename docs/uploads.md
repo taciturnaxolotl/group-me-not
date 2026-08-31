@@ -22,6 +22,29 @@ Response:
 Put that `url` into an `image` attachment. `source_url` on the attachment is for meme edits:
 it points at the unmodified original so clients can offer "view original".
 
+### Resized copies
+
+`i.groupme.com` serves smaller renderings of any picture it hosts, addressed by appending a
+suffix to the URL. Measured 2026-08-31 against two live images:
+
+| suffix     | from a 1024×1024 original | bytes  |
+| ---------- | ------------------------- | ------ |
+| *(none)*   | 1024×1024                 | 207 KB |
+| `.large`   | 960×960                   | 122 KB |
+| `.preview` | 200×200                   | 13 KB  |
+| `.avatar`  | 60×60                     | 2.5 KB |
+
+`.large` caps the long edge at 960 and keeps the aspect ratio; a source already under that
+comes back byte-identical to the original. `.preview` and `.avatar` are square and **crop**
+rather than letterbox, so they are stand-ins and thumbnails, never the picture itself.
+
+A variant of a variant is a 404. These are `i.groupme.com` only: a `linked_image` attachment
+can point at any host.
+
+Worth a great deal on a weak connection. Drawing a photo 240 points wide needs at most 720
+pixels, so `.large` is already more detail than can be shown, and `.preview` arrives fast
+enough to stand in while it loads.
+
 ## Media v2 (pre-signed URLs)
 
 The newer path asks for an upload URL first rather than posting bytes to GroupMe.

@@ -654,7 +654,10 @@ private struct MediaThumbnail: View {
     @State private var measured: CGSize?
 
     var body: some View {
-        RemoteImage(url: url, maxPixelSize: box.width * 3, onLoad: adopt) {
+        RemoteImage(
+            url: inlineURL, maxPixelSize: box.width * 3,
+            previewURL: GroupMeImage.variant(.preview, of: url), onLoad: adopt
+        ) {
             ZStack {
                 Rectangle().fill(.quaternary)
                 Image(systemName: attachment.type == "video" ? "play.rectangle.fill" : "photo")
@@ -728,6 +731,15 @@ private struct MediaThumbnail: View {
     /// exactly as happily as an HTTPS one; that is what lets one renderer draw a
     /// photo that is still on the phone and one that came back from GroupMe.
     private var url: URL? { Self.url(of: attachment) }
+
+    /// What to actually download for a bubble.
+    ///
+    /// Never more than 240 points wide, which is 720 pixels on the densest
+    /// screen Apple sells, so the 960-pixel `.large` copy is already more detail
+    /// than can be shown. Fetching the original to draw it this size is paying
+    /// for pixels nobody will ever see, on the connection this whole app exists
+    /// to be careful with.
+    private var inlineURL: URL? { GroupMeImage.variant(.large, of: url) ?? url }
 
     static func url(of attachment: Message.Attachment) -> URL? {
         let candidate = attachment.previewUrl ?? attachment.url ?? attachment.sourceUrl
