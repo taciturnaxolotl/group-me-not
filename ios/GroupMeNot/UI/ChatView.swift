@@ -240,6 +240,24 @@ struct ChatView: View {
     /// the lazy stack; see ``transcript``.
     private let bottomAnchor = "transcript.bottom"
 
+    /// The message under a long press, if any.
+    ///
+    /// Held here, and drawn here, rather than presented from the row.
+    ///
+    /// A `fullScreenCover` or a sheet takes over the window: it resigns first
+    /// responder, the keyboard leaves, the safe area shrinks by its height, and
+    /// the transcript moves. None of that is anything the reader asked for by
+    /// holding a finger on a bubble. An overlay changes no container and no safe
+    /// area, so the page cannot scroll, because nothing about the page has
+    /// changed. The keyboard is free to stay exactly where it was.
+    @State private var pressed: MessagePress?
+    /// The message an emoji browser is open for. That one really is a sheet, so
+    /// the keyboard does go; `keyboardWasOpen` is how it comes back.
+    @State private var emojiTarget: MessagePress?
+    @State private var keyboardWasOpen = false
+    @State private var editTarget: MessagePress?
+    @State private var editDraft = ""
+
     @State private var isAttachmentPickerPresented = false
     /// Media the user picked but has not sent yet, shown above the field.
     @State private var staged: [PickedMedia] = []
@@ -275,6 +293,34 @@ struct ChatView: View {
             // when content scrolls under it.
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar { toolbar }
+            .overlay { actionsOverlay }
+            .sheet(item: $emojiTarget) { target in
+                EmojiBrowser(selected: target.selectedGlyph) { glyph in
+                    emojiTarget = nil
+                    react(glyph, on: target.item)
+                }
+            }
+            .onChange(of: emojiTarget == nil) { _, closed in
+                // The sheet took the keyboard whether we wanted it to or not.
+                // Putting it back is the difference between a picker and an
+                // interruption.
+                guard closed, keyboardWasOpen else { return }
+                keyboardWasOpen = false
+                composerFocused = true
+            }
+            .alert("Edit Message", isPresented: .init(
+                get: { editTarget != nil },
+                set: { if !$0 { editTarget = nil } }
+            )) {
+                TextField("Message", text: $editDraft)
+                Button("Cancel", role: .cancel) {}
+                Button("Save") {
+                    guard let target = editTarget else { return }
+                    let text = editDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty, text != target.item.message.text else { return }
+                    edit(target.item, to: text)
+                }
+            }
             .sheet(isPresented: $isInfoPresented) {
                 ConversationInfoView(conversation: conversation, members: model.members)
             }
@@ -385,8 +431,76 @@ struct ChatView: View {
             // Asked each time the row is built, so the action disappears on its
             // own once the server's edit window closes.
             canEdit: model.canEdit(item.message),
-            onEdit: { text in edit(item, to: text) }
+            onEdit: { text in edit(item, to: text) },
+            onPress: { frame in
+                pressed = MessagePress(
+                    item: item, frame: frame, canEdit: model.canEdit(item.message))
+            }
         )
+    }
+
+    // MARK: Long press
+
+    private var actionsOverlay: some View {
+        // The `ZStack` is the stable parent the transition needs, and the
+        // animation is bound to presence rather than to identity: pressing a
+        // second message while the first is up should swap the contents, not
+        // fade one out and another in.
+        ZStack {
+            if let pressed {
+                MessageActionsOverlay(
+                    anchor: pressed.frame,
+                    glyphs: model.reactionCatalog.quick,
+                    selected: pressed.selectedGlyph,
+                    actions: actions(for: pressed),
+                    onPick: { glyph in
+                        self.pressed = nil
+                        react(glyph, on: pressed.item)
+                    },
+                    onMore: {
+                        // Remembered before the sheet takes it away.
+                        keyboardWasOpen = composerFocused
+                        self.pressed = nil
+                        emojiTarget = pressed
+                    },
+                    onDismiss: { self.pressed = nil })
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: pressed == nil)
+    }
+
+    /// The rows under the reaction pill. The pill is unconditional; these are
+    /// not, and an action that would fail is simply absent.
+    private func actions(for press: MessagePress) -> [MessageAction] {
+        let item = press.item
+        var actions: [MessageAction] = []
+        if !item.text.isEmpty, !item.message.isDeleted {
+            actions.append(.init("Copy", symbol: "doc.on.doc") {
+                UIPasteboard.general.string = item.text.plain
+                pressed = nil
+            })
+        }
+        if press.canEdit {
+            actions.append(.init("Edit", symbol: "pencil") {
+                // The server's own text, not the parsed copy: an edit starts
+                // from what was actually posted.
+                editDraft = item.message.text ?? ""
+                pressed = nil
+                editTarget = press
+            })
+        }
+        if item.isFailed {
+            actions.append(.init("Try Again", symbol: "arrow.clockwise") {
+                pressed = nil
+                retry(item)
+            })
+            actions.append(.init("Delete", symbol: "trash", isDestructive: true) {
+                pressed = nil
+                discard(item)
+            })
+        }
+        return actions
     }
 
     @ViewBuilder private var typingRow: some View {

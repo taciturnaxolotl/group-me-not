@@ -119,6 +119,9 @@ struct MessageRow: View {
     var canEdit: Bool = false
     /// Called with the new text when the user finishes an edit.
     var onEdit: (String) -> Void = { _ in }
+    /// A long press, with the bubble's frame in global space. The row does not
+    /// present anything itself; see ``ChatView`` for why.
+    var onPress: (CGRect) -> Void = { _ in }
 
     var body: some View {
         if item.message.isSystem {
@@ -132,7 +135,8 @@ struct MessageRow: View {
                 onRetry: onRetry,
                 onDiscard: onDiscard,
                 canEdit: canEdit,
-                onEdit: onEdit)
+                onEdit: onEdit,
+                onPress: onPress)
         }
     }
 }
@@ -165,6 +169,7 @@ private struct BubbleRow: View {
     let onDiscard: () -> Void
     let canEdit: Bool
     let onEdit: (String) -> Void
+    let onPress: (CGRect) -> Void
 
     @Environment(AppSettings.self) private var settings
 
@@ -180,17 +185,9 @@ private struct BubbleRow: View {
     /// long press can hand it to the overlay. Cheap, and the alternative is
     /// measuring at press time, which is a frame too late.
     @State private var bubbleFrame: CGRect = .zero
-    @State private var isPickerPresented = false
-    @State private var isEditorPresented = false
-    /// Same sequencing as `editWanted`: a sheet raised while the popover is
-    /// still dismissing is a sheet that never appears.
-    @State private var emojiWanted = false
-    @State private var isEmojiBrowserPresented = false
-    /// Set by the Edit action and consumed once the popover has actually gone.
-    /// Raising a sheet while a popover is still dismissing loses the sheet, so
-    /// the two are sequenced rather than fired together.
-    @State private var editWanted = false
-    @State private var editDraft = ""
+    /// Purely so the haptic has something to fire on. The overlay itself is
+    /// somebody else's business now.
+    @State private var wasPressed = false
 
     /// Which edge this bubble hangs off.
     ///
@@ -296,58 +293,13 @@ private struct BubbleRow: View {
         // real drag covers before the pan recogniser claims the touch, so
         // scrolling does not start opening pickers.
         .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { bubbleFrame = $0 }
-        .onLongPressGesture(minimumDuration: 0.32, maximumDistance: 44) { showPicker(true) }
+        .onLongPressGesture(minimumDuration: 0.32, maximumDistance: 44) {
+            wasPressed.toggle()
+            onPress(bubbleFrame)
+        }
         // On the way up only. A haptic for the dismissal would be a second
         // tap the user did not make.
-        .sensoryFeedback(trigger: isPickerPresented) { _, shown in
-            shown ? .impact(weight: .light) : nil
-        }
-        // A cover rather than a popover, so the two floating pieces can sit
-        // above and below the bubble instead of inside one box with an arrow.
-        // Its background is cleared and its own slide-up animation suppressed;
-        // the overlay animates itself, out of the message that was pressed.
-        .fullScreenCover(isPresented: $isPickerPresented) {
-            MessageActionsOverlay(
-                anchor: bubbleFrame,
-                glyphs: catalog.quick,
-                selected: mine,
-                actions: pickerActions,
-                onPick: { glyph in
-                    showPicker(false)
-                    onReact(glyph)
-                },
-                onMore: {
-                    emojiWanted = true
-                    showPicker(false)
-                },
-                onDismiss: { showPicker(false) })
-                .presentationBackground(.clear)
-        }
-        .onChange(of: isPickerPresented) { _, shown in
-            guard !shown else { return }
-            if editWanted {
-                editWanted = false
-                isEditorPresented = true
-            } else if emojiWanted {
-                emojiWanted = false
-                isEmojiBrowserPresented = true
-            }
-        }
-        .sheet(isPresented: $isEmojiBrowserPresented) {
-            EmojiBrowser(selected: mine) { glyph in
-                isEmojiBrowserPresented = false
-                onReact(glyph)
-            }
-        }
-        .alert("Edit Message", isPresented: $isEditorPresented) {
-            TextField("Message", text: $editDraft)
-            Button("Cancel", role: .cancel) {}
-            Button("Save") {
-                let text = editDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty, text != item.message.text else { return }
-                onEdit(text)
-            }
-        }
+        .sensoryFeedback(.impact(weight: .light), trigger: wasPressed)
     }
 
     @ViewBuilder private var chips: some View {
@@ -492,55 +444,9 @@ private struct BubbleRow: View {
 
     // MARK: The long-press bar
 
-    /// Raise or drop the actions overlay without the cover's own slide-up.
-    ///
-    /// A `fullScreenCover` animates in from the bottom edge, which is the wrong
-    /// gesture entirely for something that should appear on the message under
-    /// the finger. Suppressing it here rather than with a `.transaction` on the
-    /// row keeps the suppression to this one state change: the same modifier
-    /// applied to the view would silence the reaction chips and every other
-    /// animation in the subtree.
-    private func showPicker(_ shown: Bool) {
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) { isPickerPresented = shown }
-    }
-
     /// The glyph shown as selected, which is also the one a second tap clears.
     private var mine: String? {
         item.reactions.first { $0.reactedByMe }?.glyph
-    }
-
-    /// Everything the context menu used to carry. The reaction bar above it is
-    /// unconditional; these are not.
-    private var pickerActions: [MessageAction] {
-        var actions: [MessageAction] = []
-        if !item.text.isEmpty, !item.message.isDeleted {
-            actions.append(.init("Copy", symbol: "doc.on.doc") {
-                UIPasteboard.general.string = item.text.plain
-                showPicker(false)
-            })
-        }
-        if canEdit {
-            actions.append(.init("Edit", symbol: "pencil") {
-                // The server's own text, not the parsed copy: an edit starts
-                // from what was actually posted.
-                editDraft = item.message.text ?? ""
-                editWanted = true
-                showPicker(false)
-            })
-        }
-        if item.isFailed {
-            actions.append(.init("Try Again", symbol: "arrow.clockwise") {
-                showPicker(false)
-                onRetry()
-            })
-            actions.append(.init("Delete", symbol: "trash", isDestructive: true) {
-                showPicker(false)
-                onDiscard()
-            })
-        }
-        return actions
     }
 
     /// The photographs, in order, which is also the order the viewer pages
@@ -923,5 +829,23 @@ private struct UploadRing: View {
         .animation(.easeOut(duration: 0.25), value: fraction)
         .accessibilityLabel("Uploading")
         .accessibilityValue("\(Int(fraction * 100)) percent")
+    }
+}
+
+/// A long press, with everything the overlay needs to answer it.
+///
+/// Carries the frame it was pressed at rather than a way to ask for one: by the
+/// time the overlay is on screen the row may have scrolled, and the anchor
+/// should be where the finger went down.
+struct MessagePress: Identifiable {
+    let item: MessageDisplay
+    let frame: CGRect
+    let canEdit: Bool
+
+    var id: String { item.id }
+
+    /// The glyph this user already holds, drawn as selected in the pill.
+    var selectedGlyph: String? {
+        item.reactions.first { $0.reactedByMe }?.glyph
     }
 }
