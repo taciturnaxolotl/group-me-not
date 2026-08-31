@@ -118,11 +118,14 @@ actor MediaUploadService {
     ///   - groupID: the group, when there is one. Media v2 takes it; DMs omit it.
     ///   - conversationID: the REST conversation id, which the transcoder
     ///     requires as a header.
+    ///   - onProgress: called with 0...1 as the bytes go out. Off the main
+    ///     actor, and often, so a caller that redraws from it should coalesce.
     func upload(
         _ media: PendingMedia,
         senderID: String?,
         groupID: String?,
-        conversationID: String?
+        conversationID: String?,
+        onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> UploadedMedia {
         let data: Data
         do {
@@ -134,9 +137,11 @@ actor MediaUploadService {
 
         switch media.kind {
         case .image:
-            return try await uploadImage(data, media: media, senderID: senderID, groupID: groupID)
+            return try await uploadImage(
+                data, media: media, senderID: senderID, groupID: groupID, onProgress: onProgress)
         case .video:
-            return try await uploadVideo(data, media: media, conversationID: conversationID)
+            return try await uploadVideo(
+                data, media: media, conversationID: conversationID, onProgress: onProgress)
         }
     }
 
@@ -150,23 +155,26 @@ actor MediaUploadService {
     /// *retryable* v2 failure is not swallowed, though, because falling back on
     /// a dead radio would just fail twice and blame the wrong endpoint.
     private func uploadImage(
-        _ data: Data, media: PendingMedia, senderID: String?, groupID: String?
+        _ data: Data, media: PendingMedia, senderID: String?, groupID: String?,
+        onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> UploadedMedia {
         if let senderID {
             do {
                 return try await uploadViaMediaV2(
-                    data, media: media, senderID: senderID, groupID: groupID)
+                    data, media: media, senderID: senderID, groupID: groupID,
+                    onProgress: onProgress)
             } catch let error as MediaUploadError where !error.isRetryable && !error.needsCredentials {
                 log.notice("media v2 refused this image, trying the picture service")
             }
         }
-        return try await uploadToPictureService(data, media: media)
+        return try await uploadToPictureService(data, media: media, onProgress: onProgress)
     }
 
     /// `POST https://image.groupme.com/pictures`, one multipart part named
     /// `file`. Returns `{ "payload": { "url": … } }`.
     private func uploadToPictureService(
-        _ data: Data, media: PendingMedia
+        _ data: Data, media: PendingMedia,
+        onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> UploadedMedia {
         guard let token = await tokenProvider() else { throw MediaUploadError.unauthenticated }
         let url = URL(string: "https://image.groupme.com/pictures")!
@@ -183,7 +191,7 @@ actor MediaUploadService {
             mimeType: media.mimeType,
             data: data)
 
-        let body = try await perform(request)
+        let body = try await perform(request, reporting: onProgress)
         guard let payload = try? JSONDecoder().decode(PictureResponse.self, from: body),
               let uploaded = payload.payload?.url, !uploaded.isEmpty
         else { throw MediaUploadError.malformed("image.groupme.com returned no url") }
@@ -192,7 +200,8 @@ actor MediaUploadService {
 
     /// Ask `m.groupme.com` for a pre-signed URL, then PUT the bytes at Azure.
     private func uploadViaMediaV2(
-        _ data: Data, media: PendingMedia, senderID: String, groupID: String?
+        _ data: Data, media: PendingMedia, senderID: String, groupID: String?,
+        onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> UploadedMedia {
         let ticket = try await requestUploadURL(
             data, media: media, senderID: senderID, groupID: groupID)
@@ -200,7 +209,10 @@ actor MediaUploadService {
               let render = ticket.renderUrl, !render.isEmpty
         else { throw MediaUploadError.malformed("m.groupme.com returned an incomplete ticket") }
 
-        try await putToPresignedURL(target, data: data, mimeType: media.mimeType)
+        // The ticket is a few hundred bytes and the blob is the whole picture,
+        // so the PUT is the only part of this path worth reporting on.
+        try await putToPresignedURL(
+            target, data: data, mimeType: media.mimeType, onProgress: onProgress)
         return UploadedMedia(url: render, previewURL: ticket.thumbnailUrl)
     }
 
@@ -252,13 +264,16 @@ actor MediaUploadService {
     /// and sending a GroupMe token there would hand our access token to a party
     /// that has no business holding it. `x-ms-blob-type` is Azure's, and the
     /// PUT is rejected without it.
-    private func putToPresignedURL(_ url: URL, data: Data, mimeType: String) async throws {
+    private func putToPresignedURL(
+        _ url: URL, data: Data, mimeType: String,
+        onProgress: (@Sendable (Double) -> Void)? = nil
+    ) async throws {
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         request.setValue(mimeType, forHTTPHeaderField: "Content-Type")
         request.setValue("BlockBlob", forHTTPHeaderField: "x-ms-blob-type")
         request.httpBody = data
-        _ = try await perform(request)
+        _ = try await perform(request, reporting: onProgress)
     }
 
     // MARK: - Video
@@ -266,7 +281,8 @@ actor MediaUploadService {
     /// Post to the transcoder, then poll until it says done, fails, or the
     /// deadline passes.
     private func uploadVideo(
-        _ data: Data, media: PendingMedia, conversationID: String?
+        _ data: Data, media: PendingMedia, conversationID: String?,
+        onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> UploadedMedia {
         guard let token = await tokenProvider() else { throw MediaUploadError.unauthenticated }
         guard let conversationID, !conversationID.isEmpty else {
@@ -287,7 +303,7 @@ actor MediaUploadService {
             mimeType: media.mimeType,
             data: data)
 
-        let body = try await perform(request)
+        let body = try await perform(request, reporting: onProgress)
         guard let started = try? JSONDecoder().decode(TranscodeStart.self, from: body),
               let statusURL = started.status_url.flatMap(URL.init(string:))
         else { throw MediaUploadError.malformed("the transcoder returned no status url") }
@@ -349,10 +365,24 @@ actor MediaUploadService {
     // MARK: - Plumbing
 
     /// One request, with every failure translated into a ``MediaUploadError``.
-    private func perform(_ request: URLRequest) async throws -> Data {
+    ///
+    /// Sends through `upload(for:from:)` rather than `data(for:)` when somebody
+    /// is watching. The two do the same thing on the wire; only the upload form
+    /// takes a per-task delegate, and that delegate is the only way URLSession
+    /// will say how many bytes have actually left the phone.
+    private func perform(
+        _ request: URLRequest, reporting progress: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> Data {
         let data: Data, response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            if let progress, let body = request.httpBody {
+                var request = request
+                request.httpBody = nil
+                (data, response) = try await session.upload(
+                    for: request, from: body, delegate: UploadProgressDelegate(progress))
+            } else {
+                (data, response) = try await session.data(for: request)
+            }
         } catch let urlError as URLError {
             throw MediaUploadError.transport(urlError)
         }
@@ -426,5 +456,28 @@ actor MediaUploadService {
     private nonisolated struct TranscodeResult: Decodable, Sendable {
         var url: String?
         var thumbnail_url: String?
+    }
+}
+
+/// The only way `URLSession` will say how much of a body has gone out.
+///
+/// A per-task delegate, so it lives exactly as long as the one upload it
+/// watches. `@unchecked Sendable` because it holds nothing mutable: the closure
+/// is `@Sendable` and the delegate is called on the session's own queue.
+private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let report: @Sendable (Double) -> Void
+
+    init(_ report: @escaping @Sendable (Double) -> Void) {
+        self.report = report
+    }
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64, totalBytesExpectedToSend: Int64
+    ) {
+        // `-1` means the length is unknown, which is not a fraction of anything.
+        guard totalBytesExpectedToSend > 0 else { return }
+        report(min(Double(totalBytesSent) / Double(totalBytesExpectedToSend), 1))
     }
 }

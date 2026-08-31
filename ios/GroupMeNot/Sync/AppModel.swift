@@ -25,6 +25,12 @@ final class AppModel {
     private(set) var messages: [Message] = []
     /// Queued sends for the open conversation, to append below `messages`.
     private(set) var outbox: [OutboxEntry] = []
+    /// How far along each queued message's attachments are, by source guid.
+    ///
+    /// In memory only, and deliberately: a fraction is true for a few seconds
+    /// and meaningless afterwards. Entries are dropped as soon as the send
+    /// leaves the queue, so this never grows.
+    private(set) var uploadProgress: [String: Double] = [:]
     private(set) var openConversationID: ConversationID?
     private(set) var members: [Member] = []
 
@@ -155,6 +161,13 @@ final class AppModel {
 
         await sends.onNeedsReconcile { [sync] conversation in
             await sync.catchUp(conversation)
+        }
+
+        // Hops to the main actor because it redraws, and coalesces there rather
+        // than here: `didSendBodyData` fires per packet, and a photo on a slow
+        // connection would otherwise ask for a hundred frames a second.
+        await sends.onUploadProgress { [weak self] guid, fraction in
+            Task { @MainActor in self?.noteUploadProgress(guid, fraction) }
         }
 
         // 1. The screen, from disk. This is the part that must never wait.
@@ -690,6 +703,7 @@ final class AppModel {
         conversations = []
         messages = []
         outbox = []
+        uploadProgress = [:]
         members = []
         typingUserIDs = [:]
         openConversationID = nil
@@ -826,6 +840,14 @@ final class AppModel {
         }
     }
 
+    /// One tenth is the smallest step worth a redraw: it is a visible movement
+    /// of the ring, and it turns a hundred callbacks a second into ten.
+    private func noteUploadProgress(_ guid: String, _ fraction: Double) {
+        let previous = uploadProgress[guid] ?? 0
+        guard fraction >= 1 || fraction - previous >= 0.1 else { return }
+        uploadProgress[guid] = fraction
+    }
+
     private func outboxDidChange(_ conversation: ConversationID) async {
         scheduleReload(conversations: true, messages: conversation == openConversationID)
     }
@@ -922,6 +944,10 @@ final class AppModel {
         guard let conversation = openConversationID else { return }
         if let stored = await transcript(conversation) { messages = stored }
         outbox = await sends.pending(in: conversation)
+        // A send that has left the queue has no progress worth remembering, and
+        // this is the one place that reliably learns it went.
+        let queued = Set(outbox.map(\.sourceGuid))
+        uploadProgress = uploadProgress.filter { queued.contains($0.key) }
         healPlaceholders()
     }
 

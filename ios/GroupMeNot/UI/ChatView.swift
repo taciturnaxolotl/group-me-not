@@ -71,6 +71,7 @@ nonisolated enum Transcript {
         messages: [Message],
         outbox: [OutboxEntry],
         currentUser: CurrentUser?,
+        progress: [String: Double] = [:],
         unread: UnreadMark? = nil,
         calendar: Calendar = .current
     ) -> [TranscriptRow] {
@@ -85,7 +86,7 @@ nonisolated enum Transcript {
             .map { entry -> (Message, MessageDisplay.Delivery) in
                 let delivery: MessageDisplay.Delivery = entry.state == .failed
                     ? .failed(friendlyFailure(entry))
-                    : .pending
+                    : .pending(progress[entry.sourceGuid])
                 return (entry.localEcho(sender: currentUser), delivery)
             }
 
@@ -281,6 +282,10 @@ struct ChatView: View {
             .onDisappear(perform: teardown)
             .onChange(of: model.messages, initial: true) { messagesChanged() }
             .onChange(of: model.outbox, initial: true) { rebuild() }
+            // The ring lives in a built row, so a fraction that moves has to
+            // rebuild to be seen. Cheap because the model coalesces to tenths:
+            // this fires ten times per attachment, not once per packet.
+            .onChange(of: model.uploadProgress) { rebuild() }
             // The indicator changes the content height by about a bubble. A
             // reader at the foot should follow it; a reader in the history
             // should not feel it at all, which is what the missing size-change
@@ -774,6 +779,7 @@ struct ChatView: View {
         let messages = model.messages
         let outbox = model.outbox
         let currentUser = model.currentUser
+        let progress = model.uploadProgress
 
         // Before the receipt posts. `messagesChanged` marks the conversation
         // read in a task it kicks off after calling this, so resolving here is
@@ -784,7 +790,9 @@ struct ChatView: View {
         rebuildTask?.cancel()
         rebuildTask = Task {
             let built = await Task.detached(priority: .userInitiated) {
-                Transcript.rows(messages: messages, outbox: outbox, currentUser: currentUser, unread: unread)
+                Transcript.rows(
+                    messages: messages, outbox: outbox, currentUser: currentUser,
+                    progress: progress, unread: unread)
             }.value
             guard !Task.isCancelled else { return }
             // Only when something actually moved.

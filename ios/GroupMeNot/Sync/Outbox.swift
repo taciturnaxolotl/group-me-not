@@ -39,6 +39,7 @@ actor Outbox {
     private let vault: MediaVault
     private let continuation: AsyncStream<ConversationID>.Continuation
     private let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "outbox")
+    private var progressHook: (@Sendable (String, Double) -> Void)?
 
     private var draining: Task<Void, Never>?
     private var wakeup: Task<Void, Never>?
@@ -71,6 +72,16 @@ actor Outbox {
     /// a `409` can learn the server id it was not given.
     func onNeedsReconcile(_ hook: @escaping @Sendable (ConversationID) async -> Void) {
         reconcileHook = hook
+    }
+
+    /// Watch how far along an entry's attachments are, as a fraction.
+    ///
+    /// Deliberately a hook and not a stored column. Upload progress is true for
+    /// a few seconds and meaningless afterwards; writing it to SQLite would mean
+    /// a database write per network packet to persist a number that is wrong the
+    /// moment the app is killed.
+    func onUploadProgress(_ hook: @escaping @Sendable (String, Double) -> Void) {
+        progressHook = hook
     }
 
     // MARK: - Enqueueing
@@ -283,16 +294,31 @@ actor Outbox {
         let conversationID = try? await api.conversationRestID(entry.conversation)
 
         var entry = entry
+        // Progress is reported for the message, not for the file: the bubble is
+        // one thing and a reader does not care that it happens to be three
+        // photographs. Attachments already uploaded count as whole, which is
+        // what makes a resumed send pick up where the ring left off.
+        let total = Double(entry.media.count)
+        let done = { Double(entry.media.count(where: \.isUploaded)) }
+        let guid = entry.id
+        let report = progressHook
+
         for index in entry.media.indices where !entry.media[index].isUploaded {
+            let base = done()
             let uploaded = try await uploads.upload(
                 entry.media[index],
                 senderID: senderID,
                 groupID: groupID,
-                conversationID: conversationID)
+                conversationID: conversationID,
+                onProgress: { fraction in
+                    guard total > 0 else { return }
+                    report?(guid, min((base + fraction) / total, 1))
+                })
             entry.media[index].uploadedUrl = uploaded.url
             entry.media[index].uploadedPreviewUrl =
                 uploaded.previewURL ?? entry.media[index].uploadedPreviewUrl
             try? await store.outbox.setMedia(entry.media, for: entry.id)
+            progressHook?(entry.id, min(done() / total, 1))
             // The bubble picks up the real URL as soon as the row does, which
             // is what makes a slow send show its photo arriving rather than
             // sitting there looking stuck.

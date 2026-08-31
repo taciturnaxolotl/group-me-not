@@ -15,8 +15,10 @@ nonisolated struct MessageDisplay: Identifiable, Hashable, Sendable {
     enum Delivery: Hashable, Sendable {
         /// GroupMe has it.
         case sent
-        /// Queued locally, on its way or waiting for a network.
-        case pending
+        /// Queued locally, on its way or waiting for a network. The fraction is
+        /// how much of its attachments have gone out, and is nil when there are
+        /// none or nothing is in flight yet.
+        case pending(Double?)
         /// The last attempt failed. The string is what to tell the user.
         case failed(String?)
     }
@@ -44,7 +46,10 @@ nonisolated struct MessageDisplay: Identifiable, Hashable, Sendable {
     /// own membership resolved.
     var reactions: [Message.ReactionSummary]
 
-    var isPending: Bool { delivery == .pending }
+    var isPending: Bool {
+        if case .pending = delivery { return true }
+        return false
+    }
 
     var isFailed: Bool {
         if case .failed = delivery { return true }
@@ -257,6 +262,11 @@ private struct BubbleRow: View {
                 PhotoCascade(pictures: pictureAttachments, isTrailing: isTrailing)
                     .opacity(item.isPending ? 0.55 : 1)
                     .animation(.easeOut(duration: 0.2), value: item.isPending)
+                    // Over the pile rather than over each photo. One ring for
+                    // one message: the fraction covers all of its attachments,
+                    // and three rings counting the same thing would be three
+                    // ways to be confused.
+                    .overlay { uploadRing }
             }
             bubble
             if let link = item.previewLink {
@@ -350,6 +360,18 @@ private struct BubbleRow: View {
             )
             .offset(x: isTrailing ? -10 : 10, y: chipHeight - chipOverlap)
             .transition(.scale(scale: 0.8).combined(with: .opacity))
+        }
+    }
+
+    /// The ring over a photo still on its way out.
+    ///
+    /// Absent until there is something to say. A send that has not started, or
+    /// one with nothing to upload, gets the dimmed bubble and no ring: a ring
+    /// stuck at zero reads as a failure rather than as a queue.
+    @ViewBuilder private var uploadRing: some View {
+        if case .pending(let fraction) = item.delivery, let fraction, fraction < 1 {
+            UploadRing(fraction: fraction)
+                .transition(.opacity)
         }
     }
 
@@ -866,5 +888,40 @@ private struct AttachmentChip: View {
             .padding(.vertical, 7)
             .background(isOwn ? AnyShapeStyle(.white.opacity(0.18)) : AnyShapeStyle(.quaternary),
                         in: .rect(cornerRadius: 10, style: .continuous))
+    }
+}
+
+
+/// How much of an attachment has gone out.
+///
+/// A ring rather than a bar, because it sits on top of a picture and a bar wants
+/// an edge to live along. Determinate throughout: `URLSession` reports bytes
+/// sent against bytes expected, so there is never a moment where this has to
+/// pretend by spinning.
+private struct UploadRing: View {
+    let fraction: Double
+
+    private static let side: CGFloat = 44
+    private static let lineWidth: CGFloat = 3
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(.white.opacity(0.28), lineWidth: Self.lineWidth)
+            Circle()
+                .trim(from: 0, to: max(fraction, 0.02))
+                .stroke(.white, style: StrokeStyle(lineWidth: Self.lineWidth, lineCap: .round))
+                // Twelve o'clock, not three. A ring that starts at the right
+                // edge reads as already part-finished.
+                .rotationEffect(.degrees(-90))
+        }
+        .frame(width: Self.side, height: Self.side)
+        .padding(10)
+        // Its own ground, because the photo underneath is arbitrary and white on
+        // white is nothing at all.
+        .background(.black.opacity(0.35), in: .circle)
+        .animation(.easeOut(duration: 0.25), value: fraction)
+        .accessibilityLabel("Uploading")
+        .accessibilityValue("\(Int(fraction * 100)) percent")
     }
 }
