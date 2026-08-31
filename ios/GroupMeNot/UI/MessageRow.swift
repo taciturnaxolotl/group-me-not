@@ -229,12 +229,23 @@ private struct BubbleRow: View {
         item.isOwn && settings.ownMessageAlignment == .sided
     }
 
+    /// How much of the row the bubble leaves alone.
+    ///
+    /// The usual gutter exists so a paragraph does not run edge to edge, which
+    /// is what makes two columns of text readable. A poll or an event is not a
+    /// paragraph: it is a control with rows to press, and the reason to keep it
+    /// narrow does not apply. So it gets most of the row and the face stays on
+    /// screen.
+    private var gutterWidth: CGFloat {
+        otherAttachments.contains { $0.type == "poll" || $0.type == "event" } ? 12 : gutter
+    }
+
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
             if isTrailing {
                 // Keeps my bubbles from running the full width, which is what
                 // makes the two sides readable at a glance.
-                Spacer(minLength: gutter)
+                Spacer(minLength: gutterWidth)
             } else {
                 // In one-column mode my own messages get a face and a name too.
                 // Without them the column would start at a different x for me
@@ -260,7 +271,7 @@ private struct BubbleRow: View {
                 footer
             }
 
-            if !isTrailing { Spacer(minLength: gutter) }
+            if !isTrailing { Spacer(minLength: gutterWidth) }
         }
         .padding(.vertical, item.isRunTail ? 3 : 1)
         // `.contain` rather than `.combine`: the chips, the links and the

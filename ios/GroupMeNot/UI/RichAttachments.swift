@@ -159,13 +159,14 @@ struct VoiceNote: View {
     }
 }
 
-/// How wide a card in a bubble may be.
+/// How narrow a card may get before it stops being usable.
 ///
-/// Just under the bubble's own maximum, so a card fills the space a paragraph
-/// would rather than sitting in the middle of it looking provisional. Polls and
-/// events share it because they are the same kind of object: a thing with rows
-/// you press.
-private let cardWidth: CGFloat = 272
+/// A floor, not a width. Cards used to declare 272 points, which is wider than
+/// the space left after an avatar, the padding and the bubble's gutter — so the
+/// bubble grew past its row and pushed the sender's face off the screen. Asking
+/// for all the available width and settling for whatever that is leaves the
+/// layout to decide, which it is much better at.
+private let cardMinWidth: CGFloat = 220
 
 // MARK: - Polls
 
@@ -218,7 +219,7 @@ struct PollCard: View {
                 .foregroundStyle(ink.opacity(0.8))
         }
         .padding(12)
-        .frame(width: cardWidth, alignment: .leading)
+        .frame(minWidth: cardMinWidth, maxWidth: .infinity, alignment: .leading)
         .background(
             isOwn ? AnyShapeStyle(.white.opacity(0.15)) : AnyShapeStyle(.quaternary),
             in: .rect(cornerRadius: 14, style: .continuous))
@@ -392,7 +393,7 @@ struct EventCard: View {
             replies(event)
         }
         .padding(12)
-        .frame(width: cardWidth, alignment: .leading)
+        .frame(minWidth: cardMinWidth, maxWidth: .infinity, alignment: .leading)
         .background(
             isOwn ? AnyShapeStyle(.white.opacity(0.15)) : AnyShapeStyle(.quaternary),
             in: .rect(cornerRadius: 14, style: .continuous))
