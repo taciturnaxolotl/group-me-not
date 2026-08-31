@@ -31,6 +31,17 @@ final class AppModel {
     /// and meaningless afterwards. Entries are dropped as soon as the send
     /// leaves the queue, so this never grows.
     private(set) var uploadProgress: [String: Double] = [:]
+    /// Messages fetched only to be quoted above a reply.
+    ///
+    /// In memory rather than in the messages table, and that is deliberate. A
+    /// message pulled out of the middle of a conversation's history says nothing
+    /// about what surrounds it, and writing it to the table would put a row in a
+    /// range `history_synced_id` has not verified. The store's account of what
+    /// is contiguous depends on nothing arriving there by the side door.
+    private(set) var quotedParents: [String: Message] = [:]
+    /// Ids already asked for, successfully or not, so a quote whose original was
+    /// deleted is not re-requested on every rebuild.
+    @ObservationIgnored private var attemptedQuotes: Set<String> = []
     private(set) var openConversationID: ConversationID?
     private(set) var members: [Member] = []
 
@@ -257,6 +268,8 @@ final class AppModel {
         reachedBeginning = false
         olderPageFailed = false
         attemptedHeals = []
+        attemptedQuotes = []
+        quotedParents = [:]
         Task { [bayeux] in await bayeux.focus(on: nil) }
     }
 
@@ -979,7 +992,40 @@ final class AppModel {
         let queued = Set(outbox.map(\.sourceGuid))
         uploadProgress = uploadProgress.filter { queued.contains($0.key) }
         healPlaceholders()
+        resolveQuotes()
     }
+
+    /// Fetch the originals behind any quote we cannot already draw.
+    ///
+    /// Replies are common enough to matter: a sample of a hundred recent
+    /// messages across a dozen groups held twenty-nine of them. Most answer
+    /// something near at hand, which costs nothing here because it is already
+    /// loaded; the rest answer something older, and one small request turns
+    /// "Loading…" into the message the sender was pointing at.
+    ///
+    /// Bounded, because a page of history could in principle be replies to a
+    /// page of *different* old messages, and eighty requests to decorate one
+    /// screen is not a trade worth making.
+    private func resolveQuotes() {
+        guard let conversation = openConversationID else { return }
+        let have = Set(messages.map(\.id))
+        let wanted = Set(messages.compactMap(\.replyTargetID))
+            .subtracting(have)
+            .subtracting(attemptedQuotes)
+        guard !wanted.isEmpty else { return }
+
+        let batch = Array(wanted.prefix(Self.maxQuoteFetches))
+        attemptedQuotes.formUnion(batch)
+        Task { [api] in
+            for id in batch {
+                guard let parent = try? await api.message(id: id, in: conversation) else { continue }
+                guard conversation == self.openConversationID else { return }
+                self.quotedParents[id] = parent
+            }
+        }
+    }
+
+    private static let maxQuoteFetches = 12
 
     /// Replace any list-preview placeholder on screen with the server's copy.
     ///

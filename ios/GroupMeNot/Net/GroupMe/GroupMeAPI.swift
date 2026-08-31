@@ -161,6 +161,35 @@ actor GroupMeAPI {
         return page.sorted { Message.isNewer($1.id, than: $0.id) }
     }
 
+    /// One message by id, for a quote whose original is out of the loaded
+    /// window.
+    ///
+    /// The group form is v4; the DM form is v3 and wants the other user as a
+    /// query parameter. Returns nil rather than throwing when the server has
+    /// nothing, because the only caller is decorating a quote and a missing
+    /// original is a normal thing, not a failure.
+    func message(id: String, in conversation: ConversationID) async throws -> Message? {
+        do {
+            switch conversation {
+            case .group(let groupID):
+                let response: SingleMessage = try await client.get(
+                    .v4, "/groups/\(groupID)/messages/\(id)",
+                    query: ["acceptFiles": "true"], retry: .background)
+                return response.message
+            case .direct(let otherUserID):
+                let response: SingleMessage = try await client.get(
+                    .v3, "/direct_messages/\(id)",
+                    query: ["other_user_id": otherUserID, "acceptFiles": "true"],
+                    retry: .background)
+                return response.message ?? response.directMessage
+            }
+        } catch APIError.noContent {
+            return nil
+        } catch let error as APIError where error.status == 404 {
+            return nil
+        }
+    }
+
     // MARK: - Sending
 
     /// What a send call learned.

@@ -72,6 +72,8 @@ nonisolated enum Transcript {
         outbox: [OutboxEntry],
         currentUser: CurrentUser?,
         progress: [String: Double] = [:],
+        quoted: [String: Message] = [:],
+        members: [Member] = [],
         unread: UnreadMark? = nil,
         calendar: Calendar = .current
     ) -> [TranscriptRow] {
@@ -95,7 +97,13 @@ nonisolated enum Transcript {
 
         // One pass, so resolving a quote is a dictionary lookup rather than a
         // search of the whole transcript per bubble.
-        let byID = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var byID = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        // Originals fetched purely to be quoted sit alongside the loaded window,
+        // never inside it: they are here to be read, not to be scrolled to.
+        byID.merge(quoted) { loaded, _ in loaded }
+        let names = Dictionary(
+            members.map { ($0.identity, $0.nickname ?? $0.name ?? "Someone") },
+            uniquingKeysWith: { first, _ in first })
 
         var rows: [TranscriptRow] = []
         rows.reserveCapacity(timeline.count + 8)
@@ -139,7 +147,7 @@ nonisolated enum Transcript {
                 text: text,
                 styledText: MessageStyling.style(text, isOwn: own),
                 reactions: message.reactionSummaries(currentUserID: myID),
-                reply: replyPreview(for: message, in: byID)
+                reply: replyPreview(for: message, in: byID, names: names)
             )))
         }
         // Last, over finished rows: the fold only has to look at neighbours
@@ -165,11 +173,16 @@ nonisolated enum Transcript {
     /// quote, with the little that is known. The alternative is drawing the
     /// message as though it answered nothing, which is a different message.
     private static func replyPreview(
-        for message: Message, in byID: [String: Message]
+        for message: Message, in byID: [String: Message], names: [String: String]
     ) -> ReplyPreview? {
         guard let targetID = message.replyTargetID else { return nil }
         guard let parent = byID[targetID] else {
-            return ReplyPreview(messageID: nil, senderName: "Message", text: "Not loaded")
+            // The reply itself records who was answered, so even with the
+            // original still in flight the quote can name the right person.
+            // Naming them is most of what a quote is for.
+            let who = message.replyTargetUserID.flatMap { names[$0] }
+            return ReplyPreview(
+                messageID: nil, senderName: who ?? "Message", text: "Loading…")
         }
         return ReplyPreview(
             messageID: parent.id,
@@ -322,6 +335,10 @@ struct ChatView: View {
     private static let openingAnchor = UnitPoint(x: 0.5, y: 0.25)
 
     var body: some View {
+        lifecycle
+    }
+
+    private var chrome: some View {
         transcript
             .background(Color(.systemBackground))
             // `safeAreaBar`, not `safeAreaInset`. It insets the transcript in
@@ -367,6 +384,14 @@ struct ChatView: View {
             .sheet(isPresented: $isInfoPresented) {
                 ConversationInfoView(conversation: conversation, members: model.members)
             }
+    }
+
+    /// Split off `body` purely so the type checker can finish. Two chains of a
+    /// dozen modifiers are two tractable problems; one chain of two dozen is a
+    /// build that times out. Nothing here is grouped by meaning, and it would be
+    /// dishonest to pretend otherwise.
+    private var lifecycle: some View {
+        chrome
             .task { await model.openConversation(conversation.id) }
             .onDisappear(perform: teardown)
             .onChange(of: model.messages, initial: true) { messagesChanged() }
@@ -375,6 +400,8 @@ struct ChatView: View {
             // rebuild to be seen. Cheap because the model coalesces to tenths:
             // this fires ten times per attachment, not once per packet.
             .onChange(of: model.uploadProgress) { rebuild() }
+            // A fetched original turns "Loading…" into the message itself.
+            .onChange(of: model.quotedParents) { rebuild() }
             // The indicator changes the content height by about a bubble. A
             // reader at the foot should follow it; a reader in the history
             // should not feel it at all, which is what the missing size-change
@@ -987,6 +1014,8 @@ struct ChatView: View {
         let outbox = model.outbox
         let currentUser = model.currentUser
         let progress = model.uploadProgress
+        let quoted = model.quotedParents
+        let members = model.members
 
         // Before the receipt posts. `messagesChanged` marks the conversation
         // read in a task it kicks off after calling this, so resolving here is
@@ -999,7 +1028,7 @@ struct ChatView: View {
             let built = await Task.detached(priority: .userInitiated) {
                 Transcript.rows(
                     messages: messages, outbox: outbox, currentUser: currentUser,
-                    progress: progress, unread: unread)
+                    progress: progress, quoted: quoted, members: members, unread: unread)
             }.value
             guard !Task.isCancelled else { return }
             // Only when something actually moved.

@@ -21,6 +21,13 @@ nonisolated struct DirectMessagesPage: Decodable, Sendable {
     var directMessages: [Message]?
 }
 
+/// `GET /v4/groups/{id}/messages/{id}` and `GET /v3/direct_messages/{id}`.
+/// Two shapes for one thing, so both keys are read and whichever answered wins.
+nonisolated struct SingleMessage: Decodable, Sendable {
+    var message: Message?
+    var directMessage: Message?
+}
+
 /// `POST /v3/groups/{id}/messages`
 nonisolated struct SentGroupMessage: Decodable, Sendable {
     var message: Message

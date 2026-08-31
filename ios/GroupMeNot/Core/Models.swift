@@ -49,9 +49,17 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
             type: "reply",
             replyId: message.id,
             // Answering a reply keeps the original root; answering anything else
-            // makes that message the root.
+            // makes that message the root. Confirmed against live traffic: a
+            // reply to a reply carries the first message's id here, not the
+            // second's.
             baseReplyId: message.attachments?
-                .first { $0.type == "reply" }?.baseReplyId ?? message.id)
+                .first { $0.type == "reply" }?.baseReplyId ?? message.id,
+            userId: message.senderId ?? message.userId)
+    }
+
+    /// Who wrote the message this one answers, as the sender recorded it.
+    var replyTargetUserID: String? {
+        attachments?.first { $0.type == "reply" }?.userId
     }
     var isSystem: Bool { system == true }
     var isDeleted: Bool { (deletedAt ?? 0) > 0 }
@@ -424,6 +432,13 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
         var lng: String?
         var replyId: String?
         var baseReplyId: String?
+        /// On a `reply`, who wrote the message being answered.
+        ///
+        /// Distinct from `userIds`, which is the mention list. Every reply the
+        /// official clients send carries this, and it is the one thing that lets
+        /// a quote name a person before the message being quoted has been
+        /// fetched, so it is worth sending and worth reading.
+        var userId: String?
         var userIds: [String]?
         var loci: [[Int]]?
         var placeholder: String?
