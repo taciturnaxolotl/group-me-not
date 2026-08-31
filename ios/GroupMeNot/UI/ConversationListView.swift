@@ -14,6 +14,9 @@ struct ConversationListView: View {
     @State private var path: [ConversationRow] = []
     @State private var query = ""
     @State private var isSettingsPresented = false
+    /// Groups whose topics are showing, by group id. Not persisted: which
+    /// branches of a list are open is the shape of one visit to it.
+    @State private var expanded: Set<String> = []
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -52,15 +55,29 @@ struct ConversationListView: View {
         List {
             titleHeader
             searchField
-            ForEach(visibleRows) { row in
-                NavigationLink(value: row) {
-                    ConversationCell(row: row)
+            ForEach(entries) { entry in
+                SwiftUI.Group {
+                    if entry.isExpandable {
+                        // A header, not a destination. Its children include the
+                        // main conversation, so sending the tap there as well
+                        // would give one row two meanings.
+                        Button {
+                            toggle(entry.row)
+                        } label: {
+                            ConversationCell(entry: entry)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        NavigationLink(value: entry.row) {
+                            ConversationCell(entry: entry)
+                        }
+                    }
                 }
                 .listRowInsets(.init(top: 8, leading: 16, bottom: 8, trailing: 16))
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                    if row.hasUnread {
+                    if entry.row.hasUnread {
                         Button {
-                            Task { await model.markRead(row.id) }
+                            Task { await model.markRead(entry.row.id) }
                         } label: {
                             Label("Read", systemImage: "envelope.open.fill")
                         }
@@ -69,11 +86,11 @@ struct ConversationListView: View {
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     Button {
-                        Task { await model.setMuted(!row.isMuted, for: row.id) }
+                        Task { await model.setMuted(!entry.row.isMuted, for: entry.row.id) }
                     } label: {
                         Label(
-                            row.isMuted ? "Unmute" : "Mute",
-                            systemImage: row.isMuted ? "bell.fill" : "bell.slash.fill"
+                            entry.row.isMuted ? "Unmute" : "Mute",
+                            systemImage: entry.row.isMuted ? "bell.fill" : "bell.slash.fill"
                         )
                     }
                     .tint(.indigo)
@@ -83,7 +100,7 @@ struct ConversationListView: View {
         .listStyle(.plain)
         // The list is small and entirely local, so the animation is honest:
         // rows really do reorder the instant a message lands.
-        .animation(.default, value: visibleRows)
+        .animation(.default, value: entries)
     }
 
     /// A local, case- and diacritic-insensitive filter.
@@ -91,11 +108,67 @@ struct ConversationListView: View {
     /// Deliberately not a database query. The list tops out in the low
     /// hundreds, so filtering it in memory is a fraction of a millisecond and
     /// spares us a round trip to an actor on every keystroke.
-    private var visibleRows: [ConversationRow] {
-        // Topics are reached from inside their group, not from here. Six rows
-        // named "RULES" and "GRAVEYARD" scattered through a list sorted by
-        // recency is a list that has stopped being a list of conversations.
-        matching.filter { !$0.isTopic }
+    private var visibleRows: [ConversationRow] { matching }
+
+    private func toggle(_ row: ConversationRow) {
+        let id = row.id.remoteID
+        if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) }
+    }
+
+    /// The list as drawn: groups, and beneath an expanded one its main
+    /// conversation and each of its topics.
+    ///
+    /// Collapsed by default, because a group's topics are its business and six
+    /// extra rows in everybody's list is the tail wagging the dog. Sorting them
+    /// in by recency, which is what the list did briefly, scattered rows named
+    /// "RULES" and "GRAVEYARD" through it with nothing to say what they belonged
+    /// to.
+    private var entries: [Entry] {
+        let rows = matching
+        let byParent = Dictionary(grouping: rows.filter(\.isTopic)) { $0.parentID ?? "" }
+        guard !byParent.isEmpty else { return rows.map { Entry(row: $0) } }
+
+        var out: [Entry] = []
+        for row in rows where !row.isTopic {
+            guard case .group(let id) = row.id, let topics = byParent[id], !topics.isEmpty else {
+                out.append(Entry(row: row))
+                continue
+            }
+            let isOpen = expanded.contains(id)
+            out.append(Entry(
+                row: row,
+                isExpandable: true,
+                isExpanded: isOpen,
+                // Collapsed, the group has to answer for its topics: hiding a
+                // row must not hide the fact that something is waiting in it.
+                badge: row.unreadCount + topics.reduce(0) { $0 + $1.unreadCount }))
+            guard isOpen else { continue }
+            out.append(Entry(row: row, indented: true, label: "Main"))
+            out.append(contentsOf: topics.map { Entry(row: $0, indented: true) })
+        }
+        // A topic whose group is filtered out by the search term keeps its own
+        // place rather than disappearing with it.
+        let shown = Set(out.map(\.row.id))
+        out.append(contentsOf: rows.filter(\.isTopic)
+            .filter { !shown.contains($0.id) }
+            .map { Entry(row: $0) })
+        return out
+    }
+
+    /// One drawn row. A conversation can appear twice — once as the header for
+    /// its topics and once as "Main" beneath them — so identity is the pairing
+    /// of the conversation with its role, not the conversation alone.
+    struct Entry: Identifiable, Hashable {
+        let row: ConversationRow
+        var isExpandable = false
+        var isExpanded = false
+        var indented = false
+        var label: String?
+        var badge: Int?
+
+        var id: String { "\(row.id.storageKey)#\(indented ? "child" : "row")" }
+        var name: String { label ?? row.name }
+        var unread: Int { badge ?? row.unreadCount }
     }
 
     private var matching: [ConversationRow] {
@@ -212,24 +285,47 @@ struct ConversationListView: View {
 /// layout people already know how to read: face, then two lines of text, then
 /// the time and whatever is still unread.
 struct ConversationCell: View {
-    let row: ConversationRow
+    let entry: ConversationListView.Entry
+
+    private var row: ConversationRow { entry.row }
 
     @ScaledMetric(relativeTo: .body) private var avatarSize: CGFloat = 50
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
+            if entry.indented {
+                // A rule rather than blank space. Six indented rows with nothing
+                // joining them read as six conversations that happen to start
+                // further right.
+                Capsule()
+                    .fill(.quaternary)
+                    .frame(width: 2)
+                    .padding(.leading, 6)
+                    .padding(.vertical, 2)
+                    .accessibilityHidden(true)
+            }
+
             Avatar(
                 url: row.avatarURL,
-                name: row.name,
-                size: avatarSize,
+                name: entry.name,
+                size: entry.indented ? avatarSize * 0.7 : avatarSize,
                 isGroup: row.isGroup
             )
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Text(row.name.isEmpty ? "Conversation" : row.name)
-                        .font(.headline)
+                    Text(entry.name.isEmpty ? "Conversation" : entry.name)
+                        .font(entry.indented ? .subheadline.weight(.semibold) : .headline)
                         .lineLimit(1)
+
+                    if entry.isExpandable {
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.tertiary)
+                            .rotationEffect(.degrees(entry.isExpanded ? 90 : 0))
+                            .animation(.snappy(duration: 0.2), value: entry.isExpanded)
+                            .accessibilityHidden(true)
+                    }
 
                     if row.postingPolicy == .adminsOnly {
                         Image(systemName: "megaphone.fill")
@@ -262,9 +358,7 @@ struct ConversationCell: View {
                         .lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
 
-                    if row.hasUnread {
-                        UnreadBadge(count: row.unreadCount, isMuted: row.isMuted)
-                    }
+                    UnreadBadge(count: entry.unread, isMuted: row.isMuted)
                 }
             }
         }
@@ -288,9 +382,12 @@ struct ConversationCell: View {
     }
 
     private var accessibilityLabel: String {
-        var parts: [String] = [row.name]
-        if row.hasUnread {
-            parts.append("\(row.unreadCount) unread message\(row.unreadCount == 1 ? "" : "s")")
+        var parts: [String] = [entry.name]
+        if entry.unread > 0 {
+            parts.append("\(entry.unread) unread message\(entry.unread == 1 ? "" : "s")")
+        }
+        if entry.isExpandable {
+            parts.append(entry.isExpanded ? "topics showing" : "has topics")
         }
         if row.isMuted { parts.append("muted") }
         parts.append(preview)

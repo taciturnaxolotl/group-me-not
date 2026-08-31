@@ -244,21 +244,12 @@ struct ChatView: View {
     let conversation: ConversationRow
 
     @Environment(AppModel.self) private var model
-    @Environment(AppSettings.self) private var settings
 
     @State private var rows: [TranscriptRow] = []
     @State private var rebuildTask: Task<Void, Never>?
     @State private var draft = ""
     @State private var isLoadingOlder = false
     @State private var isInfoPresented = false
-    /// Which of the group's conversations is on screen: the group itself, or one
-    /// of its topics. Nil until `.task` resolves the remembered one.
-    @State private var activeID: ConversationID?
-    @State private var isTopicPickerPresented = false
-    /// Set when the transcript is about to be filled for a conversation the
-    /// scroll view has already laid out once, which is what switching topics
-    /// does. See ``apply(_:)``.
-    @State private var needsOpeningScroll = false
     /// The reaction whose people are being looked at.
     @State private var reactionDetail: Message.ReactionSummary?
     @FocusState private var composerFocused: Bool
@@ -419,21 +410,10 @@ struct ChatView: View {
     /// dishonest to pretend otherwise.
     private var lifecycle: some View {
         chrome
-            .task {
-                let start = rememberedRow
-                activeID = start.id
-                await model.openConversation(start.id)
-            }
+            .task { await model.openConversation(conversation.id) }
             .sheet(item: $reactionDetail) { summary in
                 ReactionRoster(
                     summary: summary, members: model.members, meID: model.currentUser?.id)
-            }
-            .sheet(isPresented: $isTopicPickerPresented) {
-                TopicPicker(
-                    group: conversation,
-                    topics: topics,
-                    current: current.id,
-                    onPick: switchTo)
             }
             .onDisappear(perform: teardown)
             .onChange(of: model.messages, initial: true) { messagesChanged() }
@@ -1026,65 +1006,14 @@ struct ChatView: View {
 
     // MARK: Chrome
 
-    /// The conversation on screen: the group, or one of its topics.
-    ///
-    /// Resolved out of the model rather than held, so an unread count or a name
-    /// that changes underneath is picked up. The row passed in is only ever the
-    /// starting point and a fallback for the frame before the list has it.
+    /// The conversation on screen, resolved out of the model rather than held,
+    /// so an unread count or a name that changes underneath is picked up. The
+    /// row passed in is the fallback for the frame before the list has it.
     private var current: ConversationRow {
-        let id = activeID ?? conversation.id
-        return model.conversations.first { $0.id == id } ?? conversation
-    }
-
-    /// This group's topics, newest activity first.
-    private var topics: [ConversationRow] {
-        guard case .group(let id) = conversation.id else { return [] }
-        return model.conversations.filter { $0.parentID == id }
-    }
-
-    /// Where to start: the topic last read in this group, if it still exists.
-    private var rememberedRow: ConversationRow {
-        guard case .group(let id) = conversation.id,
-              let remembered = settings.lastTopic(inGroup: id),
-              let row = topics.first(where: { $0.id.remoteID == remembered })
-        else { return conversation }
-        return row
-    }
-
-    /// Move to another of this group's conversations without leaving the screen.
-    ///
-    /// The transcript's own state has to go with it. `rows`, the unread divider
-    /// and the scroll flags all describe the conversation being left, and
-    /// carrying them across would draw one conversation's divider over another's
-    /// messages.
-    private func switchTo(_ row: ConversationRow) {
-        isTopicPickerPresented = false
-        guard row.id != current.id else { return }
-        if case .group(let id) = conversation.id {
-            settings.rememberTopic(row.id.remoteID, inGroup: id)
-        }
-
-        activeID = row.id
-        needsOpeningScroll = true
-        rebuildTask?.cancel()
-        rows = []
-        unread = nil
-        hasResolvedUnread = false
-        hasSeenDivider = false
-        isAtFoot = true
-        Task { await model.openConversation(row.id) }
+        model.conversations.first { $0.id == conversation.id } ?? conversation
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        if !topics.isEmpty {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { isTopicPickerPresented = true } label: {
-                    Image(systemName: "square.stack.3d.up")
-                }
-                .accessibilityLabel("Topics")
-                .accessibilityHint("Switch between this group's topics")
-            }
-        }
         ToolbarItem(placement: .principal) {
             Button { isInfoPresented = true } label: { titleLabel }
                 .buttonStyle(.plain)
@@ -1242,21 +1171,6 @@ struct ChatView: View {
         // After the assignment, so the row it scrolls to exists by the time the
         // effect runs.
         if opensOnDivider { openingTarget = TranscriptRow.unreadMarkerID }
-
-        // The first fill after switching topics.
-        //
-        // On the first fill of the *view*, the newest message is on screen
-        // because `defaultScrollAnchor(.bottom, for: .initialOffset)` put it
-        // there. Switching topics does not get that: the scroll view has been
-        // laid out already and keeps the offset it had, so a new transcript
-        // arrives showing its oldest message. Asking for the foot here is the
-        // equivalent of that initial anchor, and it defers to the unread divider
-        // when there is one, because that is a better place to land than either.
-        if needsOpeningScroll, !built.isEmpty {
-            needsOpeningScroll = false
-            if !opensOnDivider { bottomRequest += 1 }
-            return
-        }
 
         if grewAbove { return }
         guard grewBelow else { return }
@@ -1601,80 +1515,6 @@ private struct NoScrollToTop: UIViewRepresentable {
                 ancestor = current.superview
             }
         }
-    }
-}
-
-/// Somewhere to choose between a group's conversations.
-///
-/// A sheet rather than a menu. Topics carry unread counts and posting rules, and
-/// a menu row is a line of text: it can show which one you are in, but not that
-/// two of them have something waiting or that one of them is read-only.
-private struct TopicPicker: View {
-    /// The group itself, which is a conversation like any other and is listed
-    /// first because it is the one that existed before anybody added topics.
-    let group: ConversationRow
-    let topics: [ConversationRow]
-    let current: ConversationID
-    let onPick: (ConversationRow) -> Void
-
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section { row(for: group, name: "Main") }
-                if !topics.isEmpty {
-                    Section("Topics") {
-                        ForEach(topics) { topic in row(for: topic, name: topic.name) }
-                    }
-                }
-            }
-            .navigationTitle(group.name)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
-    }
-
-    private func row(for conversation: ConversationRow, name: String) -> some View {
-        Button {
-            onPick(conversation)
-        } label: {
-            HStack(spacing: 12) {
-                Avatar(
-                    url: conversation.avatarURL,
-                    name: name,
-                    size: 32,
-                    isGroup: conversation.isGroup
-                )
-                Text(name.isEmpty ? "Untitled" : name)
-                    .lineLimit(1)
-                    .foregroundStyle(.primary)
-
-                if conversation.postingPolicy == .adminsOnly {
-                    Image(systemName: "megaphone.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .accessibilityLabel("Announcements only")
-                }
-
-                Spacer(minLength: 8)
-
-                UnreadBadge(count: conversation.unreadCount, isMuted: conversation.isMuted)
-
-                if conversation.id == current {
-                    Image(systemName: "checkmark")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.tint)
-                        .accessibilityLabel("Currently open")
-                }
-            }
-        }
-        .buttonStyle(.plain)
     }
 }
 
