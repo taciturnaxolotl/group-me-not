@@ -211,21 +211,6 @@ struct ChatView: View {
 
     private var isNearBottom: Bool { isAtFoot }
 
-    /// Whether to draw the way back down. Held apart from `isAtFoot` so it can
-    /// settle: it goes true only after the foot has been gone for a moment, and
-    /// false the instant it returns. A flick that overshoots and drops back
-    /// never shows the button at all.
-    @State private var showsJumpButton = false
-    @State private var jumpRevealTask: Task<Void, Never>?
-
-    /// How long the foot has to stay away before the button is offered.
-    private static let jumpRevealDelay = Duration.milliseconds(400)
-
-    /// How many messages have arrived below the fold since the reader left it.
-    /// Drawn as a count on the button, the way Messages does, and cleared when
-    /// they get back to the foot.
-    @State private var newBelowCount = 0
-
     /// True while the reader's finger, or its momentum, owns the scroll view.
     /// Nothing may move the content out from under either one.
     @State private var isUserScrolling = false
@@ -282,22 +267,6 @@ struct ChatView: View {
             // there is a *bar*, which is what lets the edge effect dissolve
             // content under it instead of stopping it dead against a slab.
             .safeAreaBar(edge: .bottom, spacing: 0) { composer }
-            // After the bar, not before it. Inside `transcript` this overlay
-            // aligned to the scroll view's own bottom edge, which the composer
-            // then covered: the button was drawn underneath the bar, so every
-            // tap meant for it landed on the bar instead. Overlay content sits
-            // inside the container's safe area, and `safeAreaBar` is what puts
-            // the composer's height into that safe area, so applying it here
-            // lands the button just above the composer where it belongs.
-            .overlay(alignment: .bottomTrailing) {
-                // The stack is the stable parent the transition needs; the `if`
-                // lives one level down, inside `jumpButton`.
-                // Animated where the state changes rather than here: the
-                // reveal is deliberately delayed, and an implicit animation
-                // bound to the flag would fire the moment the flag flips
-                // regardless of what else the frame is doing.
-                ZStack { jumpButton }
-            }
             .navigationTitle(conversation.name)
             .navigationBarTitleDisplayMode(.inline)
             // The header belongs to the same sheet of paper as the transcript.
@@ -383,57 +352,6 @@ struct ChatView: View {
         }
     }
 
-    /// The way back down, and the only notice a reader up in the history gets
-    /// that something has arrived. Small, out of the way, and absent entirely
-    /// while they are already at the foot.
-    @ViewBuilder private var jumpButton: some View {
-        if showsJumpButton {
-            Button { bottomRequest += 1 } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 34, height: 34)
-                    .glassEffect(.regular.interactive(), in: .circle)
-                    .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
-                    .overlay(alignment: .topTrailing) { unreadBadge }
-            }
-            .buttonStyle(.plain)
-            // Roomier than it was against the old opaque bar. Glass reads as
-            // floating, and something floating needs air around it or the two
-            // pieces look like one broken control.
-            .padding(.trailing, 16)
-            .padding(.bottom, 12)
-            // Fades, and barely grows. A button that pops in at the edge of
-            // vision reads as an alert; this one is a door left ajar.
-            .transition(.opacity.combined(with: .scale(scale: 0.92)))
-            .accessibilityLabel(accessibleJumpLabel)
-        }
-    }
-
-    /// What arrived while the reader was away. A number, not a tint: a colour
-    /// change on a button nobody is looking at says nothing, and the one thing
-    /// worth saying here is how much they have missed.
-    @ViewBuilder private var unreadBadge: some View {
-        if newBelowCount > 0 {
-            Text(newBelowCount > 99 ? "99+" : "\(newBelowCount)")
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 5)
-                .frame(minWidth: 18, minHeight: 18)
-                .background(Color.accentColor, in: .capsule)
-                .offset(x: 7, y: -6)
-                .transition(.scale.combined(with: .opacity))
-        }
-    }
-
-    private var accessibleJumpLabel: String {
-        switch newBelowCount {
-        case 0: "Jump to latest"
-        case 1: "1 new message, jump to latest"
-        default: "\(newBelowCount) new messages, jump to latest"
-        }
-    }
-
     @ViewBuilder private var messageRows: some View {
         ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
             switch row {
@@ -492,20 +410,13 @@ struct ChatView: View {
     }
 
     /// The one place scroll position turns into state.
+    ///
+    /// Only one question is asked of it now: is the reader standing at the foot?
+    /// That is what decides whether a new message follows them down or is left
+    /// alone. There is no longer a button to reveal, so there is nothing here to
+    /// settle or delay.
     private func footVisibilityChanged(_ visible: Bool) {
         isAtFoot = visible
-        jumpRevealTask?.cancel()
-
-        guard !visible else {
-            newBelowCount = 0
-            withAnimation(.easeInOut(duration: 0.22)) { showsJumpButton = false }
-            return
-        }
-        jumpRevealTask = Task {
-            try? await Task.sleep(for: Self.jumpRevealDelay)
-            guard !Task.isCancelled else { return }
-            withAnimation(.easeInOut(duration: 0.22)) { showsJumpButton = true }
-        }
     }
 
     // MARK: Paging
@@ -763,7 +674,6 @@ struct ChatView: View {
     private func teardown() {
         rebuildTask?.cancel()
         anchorResetTask?.cancel()
-        jumpRevealTask?.cancel()
         model.closeConversation()
     }
 
@@ -832,10 +742,6 @@ struct ChatView: View {
             ? !built.isEmpty
             : built.count > rows.count && built.first?.id != rows.first?.id
         let grewBelow = !built.isEmpty && built.last?.id != rows.last?.id
-        // Counted before the assignment, and only over real messages: this is
-        // what the badge on the jump button says.
-        let arrived = built.count(where: \.isMessage) - rows.count(where: \.isMessage)
-
         // The sixth case: a conversation with unreads opens on the divider
         // rather than at the foot. The end anchor is skipped for that fill,
         // since holding the content's end for the next few frames is the one
@@ -851,12 +757,11 @@ struct ChatView: View {
 
         if grewAbove { return }
         guard grewBelow else { return }
-        guard isNearBottom else {
-            withAnimation(.snappy(duration: 0.2)) {
-                newBelowCount += max(1, arrived)
-            }
-            return
-        }
+        // A reader up in the history is left exactly where they are. Nothing
+        // announces the new message: they will scroll down when they mean to,
+        // and moving the transcript under them would be the rudest thing this
+        // view could do.
+        guard isNearBottom else { return }
         // Following is for a reader who is standing still at the foot. While
         // they are dragging, or coasting, the scroll view is theirs; the follow
         // waits for them to stop rather than yanking the content mid-gesture.
