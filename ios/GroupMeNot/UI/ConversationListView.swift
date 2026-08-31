@@ -80,13 +80,29 @@ struct ConversationListView: View {
                             ConversationCell(entry: entry)
                         }
                         .buttonStyle(.plain)
+                    } else if entry.indented {
+                        // A `Button` rather than a `NavigationLink`, because a
+                        // link in a list draws a disclosure chevron and eight
+                        // of them stacked under one group is a column of
+                        // arrows pointing at nothing in particular.
+                        Button {
+                            path.append(.chat(entry.row))
+                        } label: {
+                            ConversationCell(entry: entry)
+                        }
+                        .buttonStyle(.plain)
                     } else {
                         NavigationLink(value: Route.chat(entry.row)) {
                             ConversationCell(entry: entry)
                         }
                     }
                 }
-                .listRowInsets(.init(top: 8, leading: 16, bottom: 8, trailing: 16))
+                .listRowInsets(.init(
+                    top: entry.indented ? 5 : 8, leading: 16,
+                    bottom: entry.indented ? 5 : 8, trailing: 16))
+                // The run of topics reads as one block rather than as eight
+                // separate rows with rules between them.
+                .listRowSeparator(entry.indented ? .hidden : .visible)
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
                     if entry.row.hasUnread {
                         Button {
@@ -504,28 +520,31 @@ struct ConversationCell: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             if entry.indented {
-                // A rule rather than blank space. Six indented rows with nothing
-                // joining them read as six conversations that happen to start
-                // further right.
+                // A rule rather than blank space. Eight indented rows with
+                // nothing joining them read as eight conversations that happen
+                // to start further right.
                 Capsule()
                     .fill(.quaternary)
                     .frame(width: 2)
-                    .padding(.leading, 6)
-                    .padding(.vertical, 2)
+                    .padding(.leading, 8)
                     .accessibilityHidden(true)
             }
 
             Avatar(
                 url: row.avatarURL,
                 name: entry.name,
-                size: entry.indented ? avatarSize * 0.7 : avatarSize,
+                size: entry.indented ? avatarSize * 0.62 : avatarSize,
                 isGroup: row.isGroup
             )
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: entry.indented ? 1 : 3) {
                 HStack(spacing: 6) {
                     Text(entry.name.isEmpty ? "Conversation" : entry.name)
-                        .font(entry.indented ? .subheadline.weight(.semibold) : .headline)
+                        // A topic is a room inside a conversation, not a
+                        // conversation. At the parent's weight, eight of them
+                        // read as eight chats that happen to be indented, which
+                        // is what made an expanded group look like a mistake.
+                        .font(entry.indented ? .subheadline : .headline)
                         .lineLimit(1)
 
                     if entry.isExpandable {
@@ -555,7 +574,7 @@ struct ConversationCell: View {
 
                     if let date = row.lastMessageAt {
                         Text(Formatters.listTimestamp(date))
-                            .font(.subheadline)
+                            .font(entry.indented ? .caption : .subheadline)
                             .foregroundStyle(.secondary)
                             .accessibilityHidden(true)
                     }
@@ -563,9 +582,11 @@ struct ConversationCell: View {
 
                 HStack(alignment: .top, spacing: 6) {
                     Text(preview)
-                        .font(.subheadline)
+                        .font(entry.indented ? .caption : .subheadline)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        // One line for a topic. Two-line previews on eight rows
+                        // is most of a screen spent on a group's furniture.
+                        .lineLimit(entry.indented ? 1 : 2)
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                     UnreadBadge(count: entry.unread, isMuted: row.isMuted)
