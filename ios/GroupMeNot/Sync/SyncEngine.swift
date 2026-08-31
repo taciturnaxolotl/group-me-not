@@ -572,8 +572,18 @@ actor SyncEngine {
                 if let head = row.lastMessageID, !Message.isNewer(head, than: readID) {
                     try await store.conversations.markRead(conversation, upTo: readID)
                 } else if row.lastReadMessageID != readID {
-                    row.lastReadMessageID = readID
-                    try await store.conversations.upsert(row: row)
+                    // We are ahead: something was read on this device and the
+                    // receipt did not reach the server. `markRead` posts once
+                    // and does not retry, which is right for a tap and wrong
+                    // forever, so this is where forever gets fixed. Without it
+                    // every other device keeps showing a badge for a
+                    // conversation that was read here days ago.
+                    if let local = row.lastReadMessageID, Message.isNewer(local, than: readID) {
+                        try? await api.markRead(conversation: conversation, messageId: local)
+                    } else {
+                        row.lastReadMessageID = readID
+                        try await store.conversations.upsert(row: row)
+                    }
                 }
             }
             continuation.yield(.conversations)

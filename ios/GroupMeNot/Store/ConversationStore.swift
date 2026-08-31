@@ -397,6 +397,28 @@ actor ConversationStore {
         > CAST(COALESCE(excluded.last_read_message_id, '0') AS INTEGER)
     """
 
+    /// Whether our read cursor has reached the newest message the server is
+    /// reporting. If it has, the conversation is read and the count is zero
+    /// whatever the incoming row says.
+    ///
+    /// This replaced a comparison of the two *cursors*, which was wrong in a way
+    /// that only showed up over time. Marking a conversation read writes the
+    /// cursor locally and posts it to the server once, without retrying; when
+    /// that post does not land, the local cursor is permanently ahead of the
+    /// server's. The old rule read that as "ours is more current, keep our
+    /// count" and so ignored the server's badge for that conversation *forever*.
+    /// The conversation had unread messages on every other device and none here.
+    ///
+    /// Comparing the cursor to the messages instead has no such memory. It also
+    /// still covers the case the old rule was written for: a list fetch already
+    /// in flight when the user opens a conversation reports the count from
+    /// before the read, and its newest message is one we have just read past, so
+    /// it correctly resolves to zero rather than relighting the badge.
+    nonisolated private static let readEverythingReported = """
+    CAST(COALESCE(conversations.last_read_message_id, '0') AS INTEGER)
+        >= excluded.last_message_sort
+    """
+
     /// `COALESCE(excluded.x, conversations.x)` throughout, so a partial update
     /// adds knowledge and never removes it. The last-message columns carry the
     /// extra guard that they only move forwards, and so, via
@@ -422,9 +444,14 @@ actor ConversationStore {
         last_message_sender = CASE WHEN excluded.last_message_sort >= conversations.last_message_sort
                                    THEN COALESCE(excluded.last_message_sender, conversations.last_message_sender)
                                    ELSE conversations.last_message_sender END,
-        unread_count = CASE WHEN \(ConversationStore.localCursorIsAhead)
-                            THEN conversations.unread_count
-                            ELSE excluded.unread_count END,
+        unread_count = CASE WHEN \(ConversationStore.readEverythingReported)
+                            THEN 0
+                            -- Neither side is wholly trustworthy on its own: the
+                            -- server's count can lag a message that arrived over
+                            -- the socket a moment ago, and ours only counts what
+                            -- this device happened to be awake for. The larger is
+                            -- the one that does not hide a message.
+                            ELSE MAX(excluded.unread_count, conversations.unread_count) END,
         last_read_message_id = CASE WHEN \(ConversationStore.localCursorIsAhead)
                                     THEN conversations.last_read_message_id
                                     ELSE COALESCE(excluded.last_read_message_id, conversations.last_read_message_id) END,
