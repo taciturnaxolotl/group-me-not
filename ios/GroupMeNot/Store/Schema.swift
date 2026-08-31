@@ -10,7 +10,7 @@ import OSLog
 /// `Message` never needs a migration.
 nonisolated enum Schema {
     /// Bump this and add a `case` to `apply(step:)` for every change.
-    static let version: Int32 = 7
+    static let version: Int32 = 8
 
     private static let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "schema")
 
@@ -54,6 +54,7 @@ nonisolated enum Schema {
         case 5: try db.execute(addOutboxMedia)
         case 6: try db.execute(addHistorySynced)
         case 7: try db.execute(addLikeIcon)
+        case 8: try db.execute(addSubgroups)
         default:
             throw SQLError(code: 1, message: "no migration defined for schema \(step)", sql: nil)
         }
@@ -381,4 +382,34 @@ nonisolated extension ConversationID {
         default: return nil
         }
     }
+}
+
+extension Schema {
+    // MARK: - Version 8
+
+    /// Subgroups, which GroupMe calls topics.
+    ///
+    /// A group with `children_count > 0` holds a set of them, and they are all
+    /// but invisible to a client that does not ask: they never appear in
+    /// `GET /v3/groups`, and `GET /v3/groups/{subgroupID}` is a 404. Only
+    /// `GET /v3/groups/{parentID}/subgroups` lists them. Their messages,
+    /// however, are read and written at the ordinary group message routes, so a
+    /// subgroup is a conversation in every way that matters here.
+    ///
+    /// `parent_id` is what lets the list draw them under the group they belong
+    /// to, and what tells the roster fetch to ask the parent instead of asking
+    /// for a group id that does not resolve.
+    ///
+    /// `posting_policy` is separate from `type` because the wire word is about
+    /// joining as much as posting: a subgroup of type `announcement` accepts
+    /// messages from admins and owners only, and one of type `private` accepts
+    /// them from anybody in the parent group.
+    static let addSubgroups = """
+    ALTER TABLE conversations ADD COLUMN parent_id TEXT;
+    ALTER TABLE conversations ADD COLUMN posting_policy INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE conversations ADD COLUMN topic TEXT;
+
+    CREATE INDEX conversations_parent
+        ON conversations(parent_id) WHERE parent_id IS NOT NULL;
+    """
 }

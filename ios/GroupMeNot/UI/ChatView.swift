@@ -1013,8 +1013,9 @@ struct ChatView: View {
             .glassEffect(.regular.interactive(), in: .capsule)
         }
         // Clear of the status bar. A picture that starts where the safe area
-        // does is a picture touching the clock.
-        .padding(.top, 6)
+        // does is a picture touching the clock, and this item is tall enough
+        // that the bar grows to fit it rather than the other way round.
+        .padding(.top, 14)
         // On the pieces, not on the whole stack. The gap between the face and
         // the name is not part of either, and a hit area that covers it is a hit
         // area covering the bar itself.

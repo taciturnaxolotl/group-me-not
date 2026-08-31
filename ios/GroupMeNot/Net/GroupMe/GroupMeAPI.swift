@@ -161,6 +161,24 @@ actor GroupMeAPI {
         return page.sorted { Message.isNewer($1.id, than: $0.id) }
     }
 
+    /// The topics inside a group.
+    ///
+    /// The only way to see them. Subgroups never appear in `GET /v3/groups`, and
+    /// `GET /v3/groups/{subgroupID}` answers 404, so a client that does not make
+    /// this call is a client for which six of this group's conversations simply
+    /// do not exist. Their messages, once you have the ids, are read and written
+    /// at the ordinary group routes.
+    func subgroups(of groupID: String) async throws -> [Subgroup] {
+        do {
+            let response: [Subgroup] = try await client.get(
+                .v3, "/groups/\(groupID)/subgroups",
+                query: ["include": "unread_count"], retry: .background)
+            return response
+        } catch APIError.noContent {
+            return []
+        }
+    }
+
     /// One message by id, for a quote whose original is out of the loaded
     /// window.
     ///

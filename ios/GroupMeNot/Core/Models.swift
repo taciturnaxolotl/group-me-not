@@ -562,6 +562,52 @@ nonisolated struct Member: Codable, Identifiable, Hashable, Sendable {
     var roles: [String]?
 
     var identity: String { userId ?? id ?? UUID().uuidString }
+
+    /// Whether this member may post in an announcement topic.
+    ///
+    /// GroupMe uses three role words: `owner`, `admin`, `user`. Only the first
+    /// two carry any authority, and the third is everybody else.
+    var canPostInAnnouncements: Bool {
+        guard let roles else { return false }
+        return roles.contains("admin") || roles.contains("owner")
+    }
+}
+
+/// A topic inside a group.
+///
+/// Reached only through `GET /v3/groups/{parentID}/subgroups`. Note `topic`
+/// rather than `name`, and that the ids arrive as numbers rather than strings,
+/// which is the one place this API breaks its own habit.
+nonisolated struct Subgroup: Codable, Hashable, Sendable {
+    var id: Int
+    var parentId: Int
+    var topic: String?
+    var description: String?
+    var avatarUrl: String?
+    /// `announcement` or `private`. See ``PostingPolicy``.
+    var type: String?
+    var mutedUntil: Int?
+    var likeIcon: Message.Reaction?
+    var unreadCount: Int?
+    var lastReadMessageId: String?
+    var messageEditPeriod: Int?
+    var messages: Group.MessagesSummary?
+
+    var groupID: String { String(id) }
+    var parentGroupID: String { String(parentId) }
+}
+
+/// Who may post in a conversation.
+nonisolated enum PostingPolicy: Int, Codable, Sendable, Hashable {
+    /// Anybody in it. Every ordinary group and DM.
+    case everyone = 0
+    /// Admins and the owner only. GroupMe's `announcement` topics, which is how
+    /// a rules or announcements channel is expressed.
+    case adminsOnly = 1
+
+    init(wireType: String?) {
+        self = wireType == "announcement" ? .adminsOnly : .everyone
+    }
 }
 
 nonisolated struct Chat: Codable, Hashable, Sendable {

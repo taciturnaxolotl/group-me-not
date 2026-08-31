@@ -36,8 +36,23 @@ nonisolated struct ConversationRow: Identifiable, Hashable, Sendable {
     /// True while all we know is that the conversation exists, because a
     /// message arrived for it before any list fetch did.
     var isPlaceholder: Bool
+    /// The group this is a topic of, for a subgroup. Nil for everything else.
+    ///
+    /// Also the roster to consult: `GET /v3/groups/{subgroupID}` is a 404, so a
+    /// topic has no membership of its own to fetch and borrows its parent's.
+    var parentID: String?
+    /// Who may post here. See ``PostingPolicy``.
+    var postingPolicy: PostingPolicy = .everyone
 
     var isGroup: Bool { id.isGroup }
+
+    /// True for a topic inside a group rather than a group in its own right.
+    var isTopic: Bool { parentID != nil }
+
+    /// The conversation whose roster and membership govern this one.
+    var rosterSource: ConversationID {
+        parentID.map { ConversationID.group($0) } ?? id
+    }
     var hasUnread: Bool { unreadCount > 0 }
 
     func isMuted(at date: Date = Date()) -> Bool {
@@ -85,6 +100,15 @@ actor ConversationStore {
         }
     }
 
+    func upsert(subgroups: [Subgroup]) throws {
+        guard !subgroups.isEmpty else { return }
+        try db.transaction {
+            for subgroup in subgroups {
+                try upsert(row: Self.row(from: subgroup))
+            }
+        }
+    }
+
     /// Folds a page of `/v3/chats` into the list.
     func upsert(chats: [Chat]) throws {
         guard !chats.isEmpty else { return }
@@ -124,6 +148,8 @@ actor ConversationStore {
             SQLValue(row.messageEditPeriod),
             SQLValue(row.messageDeletionPeriod),
             SQLValue(StoreCoding.encodeIfPresent(row.likeIcon)),
+            SQLValue(row.parentID),
+            SQLValue(row.postingPolicy.rawValue),
         ])
     }
 
@@ -348,7 +374,7 @@ actor ConversationStore {
     kind, remote_id, name, avatar_url, last_message_id, last_message_at,
     last_message_preview, last_message_sender, unread_count, last_read_message_id,
     muted_until, member_count, placeholder, message_edit_period, message_deletion_period,
-    like_icon
+    like_icon, parent_id, posting_policy
     """
 
     nonisolated private static func decode(_ row: Row) throws -> ConversationRow {
@@ -371,7 +397,9 @@ actor ConversationStore {
             messageEditPeriod: row.intOrNil(13),
             messageDeletionPeriod: row.intOrNil(14),
             likeIcon: StoreCoding.decodeIfPossible(Message.Reaction.self, from: row.dataOrNil(15)),
-            isPlaceholder: row.bool(12)
+            isPlaceholder: row.bool(12),
+            parentID: row.stringOrNil(16),
+            postingPolicy: PostingPolicy(rawValue: row.int(17)) ?? .everyone
         )
     }
 
@@ -438,8 +466,8 @@ actor ConversationStore {
         (key, kind, remote_id, name, avatar_url, last_message_id, last_message_sort,
          last_message_at, last_message_preview, last_message_sender, unread_count,
          last_read_message_id, muted_until, member_count, placeholder, synced_at,
-         message_edit_period, message_deletion_period, like_icon)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         message_edit_period, message_deletion_period, like_icon, parent_id, posting_policy)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(key) DO UPDATE SET
         name       = COALESCE(excluded.name, conversations.name),
         avatar_url = COALESCE(excluded.avatar_url, conversations.avatar_url),
@@ -481,7 +509,9 @@ actor ConversationStore {
         synced_at = excluded.synced_at,
         message_edit_period = COALESCE(excluded.message_edit_period, conversations.message_edit_period),
         message_deletion_period = COALESCE(excluded.message_deletion_period, conversations.message_deletion_period),
-        like_icon = COALESCE(excluded.like_icon, conversations.like_icon)
+        like_icon = COALESCE(excluded.like_icon, conversations.like_icon),
+        parent_id = COALESCE(excluded.parent_id, conversations.parent_id),
+        posting_policy = excluded.posting_policy
     """
 
     // MARK: - Wire model to row
@@ -507,6 +537,39 @@ actor ConversationStore {
             messageDeletionPeriod: group.messageDeletionPeriod,
             likeIcon: group.likeIcon,
             isPlaceholder: false
+        )
+    }
+
+    /// A topic, as a conversation in its own right.
+    ///
+    /// Deliberately not given the parent's name. A list showing six rows all
+    /// called "ASSASSINS 26" is a list nobody can use, and the topic is the only
+    /// thing that distinguishes them.
+    nonisolated static func row(from subgroup: Subgroup) -> ConversationRow {
+        let summary = subgroup.messages
+        return ConversationRow(
+            id: .group(subgroup.groupID),
+            name: subgroup.topic ?? "",
+            avatarURL: subgroup.avatarUrl,
+            lastMessageID: summary?.lastMessageId,
+            lastMessageAt: summary?.lastMessageCreatedAt
+                .map { Date(timeIntervalSince1970: TimeInterval($0)) },
+            lastMessagePreview: summary?.preview.flatMap {
+                ConversationWrites.previewText(text: $0.text, attachments: $0.attachments)
+            },
+            lastMessageSender: summary?.preview?.nickname,
+            unreadCount: subgroup.unreadCount ?? 0,
+            lastReadMessageID: subgroup.lastReadMessageId,
+            mutedUntil: subgroup.mutedUntil.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+            // Its own membership does not exist; the parent's is the answer, and
+            // `rosterSource` is what sends every asker there.
+            memberCount: nil,
+            messageEditPeriod: subgroup.messageEditPeriod,
+            messageDeletionPeriod: nil,
+            likeIcon: subgroup.likeIcon,
+            isPlaceholder: false,
+            parentID: subgroup.parentGroupID,
+            postingPolicy: PostingPolicy(wireType: subgroup.type)
         )
     }
 
