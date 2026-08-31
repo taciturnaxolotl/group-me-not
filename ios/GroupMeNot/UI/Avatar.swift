@@ -44,7 +44,7 @@ struct Avatar: View {
     /// conversation list of forty faces costs 100 KB instead of eight megabytes.
     private var source: URL? {
         let original = URL(string: url ?? "")
-        return GroupMeImage.variant(.avatar, of: original) ?? original
+        return GroupMeImage.variant(.face, of: original) ?? original
     }
 }
 

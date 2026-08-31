@@ -540,7 +540,7 @@ private struct ZoomableImage: View {
         // that arrives.
         RemoteImage(
             url: url,
-            previewURL: GroupMeImage.variant(.large, of: url)
+            previewURL: GroupMeImage.variant(.inline, of: url)
         ) {
             ProgressView().tint(.white)
         }

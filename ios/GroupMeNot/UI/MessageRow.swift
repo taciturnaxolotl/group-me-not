@@ -656,7 +656,7 @@ private struct MediaThumbnail: View {
     var body: some View {
         RemoteImage(
             url: inlineURL, maxPixelSize: box.width * 3,
-            previewURL: GroupMeImage.variant(.preview, of: url), onLoad: adopt
+            previewURL: GroupMeImage.variant(.placeholder, of: url), onLoad: adopt
         ) {
             ZStack {
                 Rectangle().fill(.quaternary)
@@ -739,7 +739,7 @@ private struct MediaThumbnail: View {
     /// than can be shown. Fetching the original to draw it this size is paying
     /// for pixels nobody will ever see, on the connection this whole app exists
     /// to be careful with.
-    private var inlineURL: URL? { GroupMeImage.variant(.large, of: url) ?? url }
+    private var inlineURL: URL? { GroupMeImage.variant(.inline, of: url) ?? url }
 
     static func url(of attachment: Message.Attachment) -> URL? {
         let candidate = attachment.previewUrl ?? attachment.url ?? attachment.sourceUrl

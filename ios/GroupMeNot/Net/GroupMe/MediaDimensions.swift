@@ -3,33 +3,40 @@ import Foundation
 
 /// The pixel size GroupMe writes into its media URLs.
 ///
-/// Their CDN names every upload after the picture's dimensions:
+/// Every host puts the dimensions in the path, and every host puts them
+/// somewhere different:
 ///
 ///     https://i.groupme.com/486x281.jpeg.6381f1f67dd64013a98e2c945044fab1
-///     https://i.groupme.com/1024x1024.jpeg.45043fe768fd4636bfc6b8fffd8d7389
+///     https://m.groupme.com/uploads/659c31aa…/3024x4032.original.jpeg
+///     https://v.groupme.com/117088005/2026-08-31T05:48:48Z/7ee0c134.1126x2436r0.mp4
 ///
-/// The leading path component is `{width}x{height}`, so a photo's shape is
-/// known before a byte of it is fetched. That is the whole trick behind drawing
-/// images at their true aspect ratio without the transcript jumping when they
-/// arrive: the box is reserved from the URL, and the pixels land inside a
-/// space that was already the right shape.
+/// So a photo's shape is known before a byte of it is fetched. That is the whole
+/// trick behind drawing images at their true aspect ratio without the transcript
+/// jumping when they arrive: the box is reserved from the URL, and the pixels
+/// land in a space that was already the right shape.
 nonisolated enum MediaDimensions {
 
     /// The size declared by the URL, or nil when it declares none.
     ///
-    /// Plenty of URLs take the nil path and that is fine: older messages, other
-    /// hosts, some video stills, and the `file://` URLs a queued upload points
-    /// at while it is still on the phone. Callers fall back to a fixed box for
-    /// those rather than guessing a shape.
+    /// Scans every dot-separated piece of every path component rather than
+    /// guessing which one holds it. The previous version read only the first
+    /// component, which is right for `i.groupme.com` and wrong for both of the
+    /// others, so every photo posted through media v2 and every video fell back
+    /// to a fixed box and drew cropped.
     static func declared(in url: URL?) -> CGSize? {
-        guard let url, let first = url.pathComponents.first(where: { $0 != "/" }) else { return nil }
-        return parse(first)
+        guard let url else { return nil }
+        for component in url.pathComponents where component != "/" {
+            for piece in component.split(separator: ".") {
+                if let size = parse(String(piece)) { return size }
+            }
+        }
+        return nil
     }
 
-    /// Reads `486x281` off the front of a filename, ignoring the extension and
-    /// the hash that follow it.
-    static func parse(_ component: String) -> CGSize? {
-        guard let stem = component.split(separator: ".").first else { return nil }
+    /// Reads `486x281`, or `1126x2436r0` with the transcoder's rotation suffix.
+    static func parse(_ piece: String) -> CGSize? {
+        // `r` and anything after it is orientation, not size.
+        let stem = piece.split(separator: "r", maxSplits: 1).first.map(String.init) ?? piece
         let parts = stem.split(separator: "x", omittingEmptySubsequences: false)
         guard parts.count == 2,
               let width = Int(parts[0]), let height = Int(parts[1]),
@@ -41,53 +48,102 @@ nonisolated enum MediaDimensions {
     }
 }
 
-
-/// The resized copies GroupMe's CDN will serve of any picture it hosts.
+/// The resized copies GroupMe will serve of a picture it hosts.
 ///
-/// Appending a suffix to an `i.groupme.com` URL returns a smaller rendering of
-/// the same image. Measured against two live pictures on 2026-08-31:
+/// Two hosts, two schemes, measured 2026-08-31 against live images:
 ///
-/// | suffix     | 1024×1024 source | bytes   |
-/// | ---------- | ---------------- | ------- |
-/// | *(none)*   | 1024×1024        | 207 KB  |
-/// | `.large`   | 960×960          | 122 KB  |
-/// | `.preview` | 200×200          | 13 KB   |
-/// | `.avatar`  | 60×60            | 2.5 KB  |
+/// `i.groupme.com`, by appending a suffix:
 ///
-/// `.large` caps the long edge at 960 and keeps the aspect ratio. `.preview`
-/// and `.avatar` are square: they crop rather than letterbox, so they are
-/// stand-ins and thumbnails, never the picture itself.
+/// | suffix     | from 1024×1024 | bytes  |
+/// | ---------- | -------------- | ------ |
+/// | *(none)*   | 1024×1024      | 207 KB |
+/// | `.large`   | 960×960        | 122 KB |
+/// | `.preview` | 200×200        | 13 KB  |
+/// | `.avatar`  | 60×60          | 2.5 KB |
 ///
-/// This is worth a good deal on a weak connection, which is the whole point of
-/// this client. A transcript full of photographs was downloading full-resolution
-/// originals to draw them 240 points wide.
+/// `m.groupme.com`, by replacing the `.original` segment:
+///
+/// | segment      | from 1333×1000 | bytes  |
+/// | ------------ | -------------- | ------ |
+/// | `.original`  | 1333×1000      | 163 KB |
+/// | `.large`     | 1200×900       | 68 KB  |
+/// | `.small`     | 300×225        | 15 KB  |
+///
+/// The difference that matters: `i.groupme.com`'s small copies are **square
+/// crops**, while `m.groupme.com`'s keep the aspect ratio. So the placeholder
+/// from one host is a stand-in and the placeholder from the other is genuinely
+/// the picture, smaller.
+///
+/// This is worth a great deal on a weak connection, which is the point of this
+/// client. Drawing a photo 240 points wide needs 720 pixels at the very most; a
+/// transcript was downloading half-megabyte originals to do it.
 nonisolated enum GroupMeImage {
-    enum Variant: String {
-        /// The long edge capped at 960. Plenty for anything drawn inline.
-        case large
-        /// 200 square. Small enough to arrive almost at once, which makes it the
-        /// thing to show while the real picture is still coming.
-        case preview
-        /// 60 square, for a face in a list.
-        case avatar
+    /// What a copy is *for*, rather than what it is called. The names differ by
+    /// host and the callers do not care.
+    enum Size {
+        /// Big enough for anything drawn inline in a transcript.
+        case inline
+        /// Small enough to arrive almost at once, for standing in while the
+        /// real picture loads.
+        case placeholder
+        /// A face in a list.
+        case face
     }
-
-    private static let host = "i.groupme.com"
 
     /// The named rendering of `url`, or nil when there is no such thing.
     ///
-    /// Nil rather than a guess for anything not on GroupMe's own picture host:
-    /// a `linked_image` can point anywhere, and appending `.preview` to somebody
-    /// else's URL is a request for a file that does not exist.
-    static func variant(_ variant: Variant, of url: URL?) -> URL? {
-        guard let url, url.host() == host else { return nil }
-        let name = url.lastPathComponent
-        // Already a variant. Asking for a variant of a variant is a 404.
-        guard !Variant.allSuffixes.contains(where: { name.hasSuffix($0) }) else { return nil }
-        return URL(string: url.absoluteString + "." + variant.rawValue)
+    /// Nil rather than a guess for any host that is not GroupMe's: a
+    /// `linked_image` can point anywhere, and a video poster on
+    /// `v.groupme.com` is served at one size only.
+    static func variant(_ size: Size, of url: URL?) -> URL? {
+        guard let url else { return nil }
+        switch url.host() {
+        case "i.groupme.com": return appendingSuffix(size, to: url)
+        case "m.groupme.com": return replacingSegment(size, in: url)
+        default: return nil
+        }
     }
-}
 
-private extension GroupMeImage.Variant {
-    static let allSuffixes: [String] = [".large", ".preview", ".avatar"]
+    // MARK: i.groupme.com
+
+    private static func appendingSuffix(_ size: Size, to url: URL) -> URL? {
+        let suffix: String
+        switch size {
+        case .inline: suffix = "large"
+        case .placeholder: suffix = "preview"
+        case .face: suffix = "avatar"
+        }
+        let name = url.lastPathComponent
+        // A variant of a variant is a 404.
+        guard !["large", "preview", "avatar"].contains(where: { name.hasSuffix(".\($0)") })
+        else { return nil }
+        return URL(string: url.absoluteString + "." + suffix)
+    }
+
+    // MARK: m.groupme.com
+
+    /// `/uploads/{id}/{width}x{height}.{segment}.{ext}`, where the segment names
+    /// the rendering. Rewritten in place rather than appended, because appending
+    /// would leave `.original` in the path and the service would ignore us.
+    private static func replacingSegment(_ size: Size, in url: URL) -> URL? {
+        let segment: String
+        switch size {
+        case .inline: segment = "large"
+        // No `.avatar` on this host, and `.small` is 15 KB, which is a perfectly
+        // good face and a perfectly good stand-in.
+        case .placeholder, .face: segment = "small"
+        }
+
+        var components = url.pathComponents.filter { $0 != "/" }
+        guard let name = components.popLast() else { return nil }
+        var pieces = name.split(separator: ".").map(String.init)
+        guard pieces.count >= 3,
+              ["original", "large", "small", "thumbnail"].contains(pieces[pieces.count - 2])
+        else { return nil }
+        pieces[pieces.count - 2] = segment
+
+        var rebuilt = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        rebuilt?.path = "/" + (components + [pieces.joined(separator: ".")]).joined(separator: "/")
+        return rebuilt?.url
+    }
 }
