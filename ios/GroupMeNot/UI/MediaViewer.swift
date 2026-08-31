@@ -36,9 +36,27 @@ struct MediaViewer: View {
     /// The screen, for the same test.
     @State private var canvas: CGSize = .zero
 
+    /// How far the current page has been dragged sideways.
+    @State private var pageDrag: CGFloat = 0
+    /// Which way this drag turned out to be, decided once on the first few
+    /// points of movement and held for the rest of the gesture.
+    @State private var axis: Axis?
+
+    /// Zoom belongs to the viewer rather than to a page, so the one gesture
+    /// below can consult it, and so swiping away from a photo returns it to
+    /// life size instead of leaving it magnified for whenever you come back.
+    @State private var scale: CGFloat = 1
+    @State private var committedScale: CGFloat = 1
+    @State private var pan: CGSize = .zero
+    @State private var committedPan: CGSize = .zero
+
     /// Past this much downward travel the picture is let go rather than
     /// snapping back. Roughly a thumb's comfortable reach.
     private static let dismissDistance: CGFloat = 140
+    /// How far sideways before the page turns instead of springing back.
+    private static let pageTurnFraction: CGFloat = 0.22
+
+    private var isZoomed: Bool { scale > 1.01 }
 
     /// The page being looked at. Falls back rather than trapping: `index` is
     /// clamped on appear, but a viewer opened on an empty run should show
@@ -73,44 +91,160 @@ struct MediaViewer: View {
         }
     }
 
-    /// One page per picture. Paging is the system's, so the rubber band at
-    /// either end and the speed of a flick are the ones every other iOS gallery
-    /// has; writing our own would only be a worse copy of it.
+    /// One page per picture, laid out in a row and offset by hand.
+    ///
+    /// Deliberately not a `TabView`. A paging `TabView` is a `UIScrollView`
+    /// underneath, and the drag-to-dismiss gesture on its contents has to
+    /// negotiate with that scroll view's pan for every touch. Whoever wins, one
+    /// of the two behaviours stops working, and here it was the swipe: the
+    /// dismiss gesture claimed the touch and the pages never turned.
+    ///
+    /// So there is exactly one gesture in this view. It decides on the first few
+    /// points of movement whether the finger is turning a page or throwing the
+    /// picture away, and nothing has to be arbitrated at all.
     private var pages: some View {
-        TabView(selection: $index) {
+        HStack(spacing: 0) {
             ForEach(Array(attachments.enumerated()), id: \.offset) { position, item in
-                page(for: item)
-                    .tag(position)
+                page(for: item, at: position)
+                    .frame(width: canvas.width)
             }
         }
-        .tabViewStyle(.page(indexDisplayMode: .never))
+        .offset(x: -CGFloat(index) * canvas.width + pageDrag)
+        .frame(width: canvas.width, alignment: .leading)
+        .contentShape(.rect)
+        .gesture(drag)
+        .simultaneousGesture(magnify)
+        .onTapGesture(count: 2) { toggleZoom() }
+        // Ordered after the double tap so a second tap is not swallowed by the
+        // first. SwiftUI resolves the higher count first when both are present.
+        .onTapGesture { toggleChrome() }
         .ignoresSafeArea()
     }
 
-    @ViewBuilder private func page(for item: Message.Attachment) -> some View {
+    @ViewBuilder private func page(for item: Message.Attachment, at position: Int) -> some View {
         if item.type == "video", let url = Self.mediaURL(of: item) {
             VideoPlayer(player: AVPlayer(url: url))
-                .ignoresSafeArea()
         } else {
             ZoomableImage(
                 url: Self.mediaURL(of: item),
+                // Only the page being looked at is zoomed or panned. The others
+                // sit at life size waiting their turn.
+                scale: position == index ? scale : 1,
+                offset: position == index ? pan : .zero,
                 onLoad: { loaded in
                     // Only the page being looked at owns the share and save
                     // actions. Without this test a neighbouring page finishing
                     // its download would quietly swap what the buttons act on.
-                    if item.url == attachment?.url { image = loaded }
-                },
-                onSingleTap: toggleChrome,
-                onDismissDrag: { translation, animated in
-                    guard animated else {
-                        dragOffset = translation
-                        return
-                    }
-                    withAnimation(.snappy(duration: 0.25)) { dragOffset = translation }
-                },
-                onDismiss: { dismiss() },
-                dismissDistance: Self.dismissDistance)
+                    if position == index { image = loaded }
+                })
         }
+    }
+
+    // MARK: The one gesture
+
+    private var drag: some Gesture {
+        DragGesture(minimumDistance: 8)
+            .onChanged { value in
+                guard !isZoomed else {
+                    pan = CGSize(
+                        width: committedPan.width + value.translation.width,
+                        height: committedPan.height + value.translation.height)
+                    return
+                }
+                if axis == nil {
+                    axis = abs(value.translation.width) > abs(value.translation.height)
+                        ? .horizontal : .vertical
+                }
+                switch axis {
+                case .horizontal: pageDrag = resisted(value.translation.width)
+                case .vertical: dragOffset = value.translation
+                case nil: break
+                }
+            }
+            .onEnded { value in
+                defer { axis = nil }
+                guard !isZoomed else {
+                    committedPan = pan
+                    return
+                }
+                switch axis {
+                case .horizontal: settlePage(value)
+                case .vertical: settleDismiss(value)
+                case nil: break
+                }
+            }
+    }
+
+    /// Half travel past either end, which is the standard way of saying "there
+    /// is nothing over here" without simply refusing to move.
+    private func resisted(_ translation: CGFloat) -> CGFloat {
+        let atStart = index == 0 && translation > 0
+        let atEnd = index == attachments.count - 1 && translation < 0
+        return atStart || atEnd ? translation / 2.5 : translation
+    }
+
+    /// Turn the page, or spring back. Both are the same animation, because both
+    /// are the offset returning to a whole number of pages.
+    private func settlePage(_ value: DragGesture.Value) {
+        let threshold = canvas.width * Self.pageTurnFraction
+        let travelled = value.translation.width
+        let predicted = value.predictedEndTranslation.width
+        let wantsPrevious = travelled > threshold || predicted > canvas.width / 2
+        let wantsNext = travelled < -threshold || predicted < -canvas.width / 2
+
+        var target = index
+        if wantsPrevious { target = max(index - 1, 0) }
+        if wantsNext { target = min(index + 1, attachments.count - 1) }
+
+        withAnimation(.interactiveSpring(response: 0.32, dampingFraction: 0.86)) {
+            if target != index { resetZoom() }
+            index = target
+            pageDrag = 0
+        }
+    }
+
+    private func settleDismiss(_ value: DragGesture.Value) {
+        let travelled = abs(value.translation.height) > Self.dismissDistance
+        let flicked = abs(value.predictedEndTranslation.height) > Self.dismissDistance * 2
+        guard travelled || flicked else {
+            withAnimation(.snappy(duration: 0.25)) { dragOffset = .zero }
+            return
+        }
+        dismiss()
+    }
+
+    /// Pinch. Simultaneous with the drag rather than exclusive, because a pinch
+    /// is two fingers and a drag is one; they are never the same touch, and a
+    /// zoom that had to wait for the drag to decline would miss its first frame.
+    private var magnify: some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                // Clamped rather than free: an unbounded pinch leaves the user
+                // looking at four grey pixels with no way back.
+                scale = min(max(committedScale * value.magnification, 1), 6)
+            }
+            .onEnded { _ in
+                committedScale = scale
+                if scale <= 1 { withAnimation(.snappy(duration: 0.2)) { resetZoom() } }
+            }
+    }
+
+    private func toggleZoom() {
+        withAnimation(.snappy(duration: 0.25)) {
+            if isZoomed {
+                resetZoom()
+            } else {
+                scale = 2.5
+                committedScale = 2.5
+            }
+        }
+    }
+
+    private func resetZoom() {
+        scale = 1
+        committedScale = 1
+        pan = .zero
+        committedPan = .zero
     }
 
     // MARK: Chrome
@@ -292,7 +426,9 @@ struct MediaViewer: View {
     /// as a fallback for a video we have not got a playable copy of.
     private var mediaURL: URL? { attachment.flatMap(Self.mediaURL(of:)) }
 
-    static func mediaURL(of attachment: Message.Attachment) -> URL? {
+    /// `nonisolated` because `flatMap` calls it outside the actor, and it only
+    /// ever reads its argument.
+    nonisolated static func mediaURL(of attachment: Message.Attachment) -> URL? {
         let candidate = attachment.url ?? attachment.sourceUrl ?? attachment.previewUrl
         return candidate.flatMap(URL.init(string:))
     }
@@ -323,29 +459,20 @@ private enum SaveResult: String, Identifiable {
     }
 }
 
-/// Pinch, pan, double tap, and drag away.
+/// One picture, drawn at the scale and offset it is told.
+///
+/// Owns nothing but its pixels. Every gesture lives in ``MediaViewer``, because
+/// zoom, pan, page and dismiss are four readings of the same finger and only one
+/// place can decide which of them a given touch is.
 ///
 /// Built on the loader everything else uses, so an image already on screen in
 /// the transcript opens instantly rather than downloading a second time. No
 /// `maxPixelSize`: this is the one place the full resolution is the point.
 private struct ZoomableImage: View {
     let url: URL?
+    let scale: CGFloat
+    let offset: CGSize
     let onLoad: (UIImage) -> Void
-    let onSingleTap: () -> Void
-    /// Reports the dismissing drag up to the owner, which is the one that
-    /// moves the picture. Doing it here as well would move it twice as fast as
-    /// the finger. The flag is set only for the snap back, which is a movement
-    /// the reader should see; the drag itself must track the finger exactly.
-    let onDismissDrag: (CGSize, Bool) -> Void
-    let onDismiss: () -> Void
-    let dismissDistance: CGFloat
-
-    @State private var scale: CGFloat = 1
-    @State private var committed: CGFloat = 1
-    @State private var offset: CGSize = .zero
-    @State private var committedOffset: CGSize = .zero
-
-    private var isZoomed: Bool { scale > 1.01 }
 
     var body: some View {
         RemoteImage(url: url, onLoad: nil) {
@@ -354,16 +481,6 @@ private struct ZoomableImage: View {
         .scaledToFit()
         .scaleEffect(scale)
         .offset(offset)
-        .gesture(magnify)
-        // Panning while zoomed and dragging to dismiss while not are the same
-        // finger doing two different jobs, so only one of them is ever live.
-        .simultaneousGesture(isZoomed ? pan : nil)
-        .simultaneousGesture(isZoomed ? nil : dismissDrag)
-        .onTapGesture(count: 2) { toggleZoom() }
-        // Ordered after the double tap so a second tap is not swallowed by the
-        // first. SwiftUI resolves the higher count first when both are present.
-        .onTapGesture { onSingleTap() }
-        .animation(.snappy(duration: 0.25), value: scale)
         .accessibilityLabel("Photo")
         .task(id: url) { await preload() }
     }
@@ -378,71 +495,5 @@ private struct ZoomableImage: View {
             return
         }
         if let loaded = await ImageLoader.shared.image(for: request) { onLoad(loaded) }
-    }
-
-    private var magnify: some Gesture {
-        MagnifyGesture()
-            .onChanged { value in
-                // Clamped rather than free: an unbounded pinch leaves the user
-                // looking at four grey pixels with no way back.
-                scale = min(max(committed * value.magnification, 1), 6)
-            }
-            .onEnded { _ in
-                committed = scale
-                if scale <= 1 { resetPan() }
-            }
-    }
-
-    private var pan: some Gesture {
-        DragGesture()
-            .onChanged { value in
-                offset = CGSize(
-                    width: committedOffset.width + value.translation.width,
-                    height: committedOffset.height + value.translation.height)
-            }
-            .onEnded { _ in committedOffset = offset }
-    }
-
-    /// Drag the picture away to close.
-    ///
-    /// Only a mostly-vertical drag counts. Horizontal belongs to the pager, and
-    /// this gesture runs alongside it, so without the dominance test a swipe
-    /// towards the next photo would also start dragging this one off the screen.
-    /// The `minimumDistance` is what keeps a tap from registering as either.
-    private var dismissDrag: some Gesture {
-        DragGesture(minimumDistance: 12)
-            .onChanged { value in
-                guard Self.isVertical(value.translation) else { return }
-                onDismissDrag(value.translation, false)
-            }
-            .onEnded { value in
-                let travelled = abs(value.translation.height) > dismissDistance
-                let flicked = abs(value.predictedEndTranslation.height) > dismissDistance * 2
-                guard Self.isVertical(value.translation), travelled || flicked else {
-                    onDismissDrag(.zero, true)
-                    return
-                }
-                onDismiss()
-            }
-    }
-
-    private static func isVertical(_ translation: CGSize) -> Bool {
-        abs(translation.height) > abs(translation.width)
-    }
-
-    private func toggleZoom() {
-        if isZoomed {
-            scale = 1
-            committed = 1
-            resetPan()
-        } else {
-            scale = 2.5
-            committed = 2.5
-        }
-    }
-
-    private func resetPan() {
-        offset = .zero
-        committedOffset = .zero
     }
 }
