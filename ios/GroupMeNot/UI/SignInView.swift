@@ -16,7 +16,7 @@ struct SignInView: View {
     @State private var token = ""
     @State private var isRevealed = false
     @State private var isSigningIn = false
-    @State private var isAuthorising = false
+    @State private var authorising: OAuth.Provider?
     @State private var isShowingTokenEntry = false
     @State private var oauthError: String?
     @FocusState private var tokenFieldFocused: Bool
@@ -34,46 +34,33 @@ struct SignInView: View {
                 }
 
                 Section {
-                    Button(action: signInWithGroupMe) {
-                        HStack {
-                            Spacer()
-                            if isAuthorising {
-                                ProgressView()
-                            } else {
-                                Label("Continue with GroupMe", systemImage: "person.crop.circle")
-                                    .fontWeight(.semibold)
+                    ForEach(OAuth.Provider.allCases, id: \.self) { provider in
+                        Button {
+                            signIn(with: provider)
+                        } label: {
+                            HStack {
+                                Spacer()
+                                if authorising == provider {
+                                    ProgressView()
+                                } else {
+                                    Label(provider.title, systemImage: provider.symbol)
+                                        .fontWeight(provider == .apple ? .semibold : .regular)
+                                }
+                                Spacer()
                             }
-                            Spacer()
                         }
+                        .disabled(isBusy)
                     }
-                    .disabled(isBusy || !OAuth.isConfigured)
                 } footer: {
-                    if OAuth.isConfigured {
-                        Text("Opens GroupMe's own sign-in page. Your password is never seen by this app.")
-                    } else {
-                        // Shown rather than hidden: a missing build constant is a
-                        // setup step, and hiding the control makes the feature
-                        // look absent instead of unfinished.
-                        Label {
-                            Text("Needs a client ID. Register an app at dev.groupme.com with the callback "
-                                 + "`groupmenot://oauth`, then set `OAuth.clientID` in Auth/OAuth.swift.")
-                        } icon: {
-                            Image(systemName: "wrench.and.screwdriver")
-                        }
-                        .font(.footnote)
-                    }
+                    Text("Opens GroupMe's own sign-in page. Your password is never seen by this app.")
                 }
 
                 Section {
-                    if OAuth.isConfigured {
-                        DisclosureGroup("Use a token instead", isExpanded: $isShowingTokenEntry) {
-                            tokenField
-                        }
-                    } else {
+                    DisclosureGroup("Use a token instead", isExpanded: $isShowingTokenEntry) {
                         tokenField
                     }
                 } header: {
-                    Text(OAuth.isConfigured ? "Advanced" : "Access Token")
+                    Text("Advanced")
                 } footer: {
                     Text("Stored in the keychain on this device. It is never sent anywhere except GroupMe.")
                 }
@@ -172,7 +159,7 @@ struct SignInView: View {
 
     private var instructions: some View {
         VStack(alignment: .leading, spacing: 12) {
-            step(1, "Open dev.groupme.com and sign in.")
+            step(1, "Open dev.groupme.com and sign in with an email and password.")
             step(2, "Choose Access Token at the top right. A dialog shows a long string of letters and numbers.")
             step(3, "Copy it, come back here, and paste it above.")
 
@@ -223,29 +210,29 @@ struct SignInView: View {
     }
 
     private var canSubmit: Bool { !trimmedToken.isEmpty && !isBusy }
-    private var isBusy: Bool { isSigningIn || isAuthorising }
+    private var isBusy: Bool { isSigningIn || authorising != nil }
 
     /// The token field is always reachable, but it is only the primary path when
     /// this build has no client id to run OAuth with.
-    private var isTokenEntryVisible: Bool { !OAuth.isConfigured || isShowingTokenEntry }
+    private var isTokenEntryVisible: Bool { isShowingTokenEntry }
 
-    /// Hand off to GroupMe's own page. The token comes back through the custom
-    /// scheme; we never see a password.
-    private func signInWithGroupMe() {
+    /// Hand off to GroupMe's own page. The token comes back through their
+    /// desktop callback scheme; we never see a password.
+    private func signIn(with provider: OAuth.Provider) {
         guard !isBusy else { return }
         tokenFieldFocused = false
-        isAuthorising = true
+        authorising = provider
         oauthError = nil
         Task {
             do {
-                let token = try await OAuth.signIn()
+                let token = try await OAuth.signIn(with: provider)
                 await model.signIn(token: token)
             } catch OAuth.Failure.cancelled {
                 // They closed the sheet. Say nothing.
             } catch {
                 oauthError = error.localizedDescription
             }
-            isAuthorising = false
+            authorising = nil
         }
     }
 

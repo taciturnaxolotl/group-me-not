@@ -35,6 +35,7 @@ nonisolated enum OAuth {
         case cancelled
         case noToken
         case session(String)
+        case stateMismatch
 
         var errorDescription: String? {
             switch self {
@@ -44,6 +45,8 @@ nonisolated enum OAuth {
                 nil  // The user closed the sheet; not worth a message.
             case .noToken:
                 "GroupMe finished sign-in without returning a token."
+            case .stateMismatch:
+                "That sign-in response did not match this request."
             case .session(let detail):
                 detail
             }
@@ -90,21 +93,111 @@ nonisolated enum OAuth {
         }
     }
 
-    /// GroupMe returns `groupmenot://oauth?access_token=…`. Some OAuth servers
-    /// use the fragment instead, so check both rather than assume.
-    static func token(from url: URL) -> String? {
+
+    // MARK: - Desktop handoff
+
+    /// The providers GroupMe's own web client will hand off to.
+    nonisolated enum Provider: String, CaseIterable, Sendable {
+        case apple, google, microsoft, facebook
+
+        var title: String {
+            switch self {
+            case .apple: "Continue with Apple"
+            case .google: "Continue with Google"
+            case .microsoft: "Continue with Microsoft"
+            case .facebook: "Continue with Facebook"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .apple: "apple.logo"
+            case .google, .facebook, .microsoft: "globe"
+            }
+        }
+    }
+
+    /// Sign in through a provider, using the handoff GroupMe's web client already
+    /// implements for their desktop app.
+    ///
+    /// `web.groupme.com/signin?desktop_auth=1&provider=…&state=…` runs the normal
+    /// web sign-in and then redirects to
+    /// `groupme://oauth/callback#access_token=…&state=…`.
+    ///
+    /// This matters because it is the only route an Apple-registered account has.
+    /// The Android app offers Google and Microsoft only, and dev.groupme.com
+    /// takes an email and password, so neither can authenticate one. This can.
+    ///
+    /// No client id and no app registration: the mechanism is GroupMe's, and we
+    /// are asking their page to do what it already does.
+    @MainActor
+    static func signIn(with provider: Provider) async throws -> String {
+        // Echoed back untouched, so it is worth checking. A response carrying
+        // somebody else's state is a response to somebody else's request.
+        let state = UUID().uuidString
+
+        var components = URLComponents(string: "https://web.groupme.com/signin")!
+        components.queryItems = [
+            URLQueryItem(name: "desktop_auth", value: "1"),
+            URLQueryItem(name: "provider", value: provider.rawValue),
+            URLQueryItem(name: "state", value: state),
+            URLQueryItem(name: "intent", value: "signin"),
+        ]
+
+        guard let anchor = PresentationAnchor.resolve() else {
+            throw Failure.session("There is no window to present sign-in in.")
+        }
+
+        let callback: URL = try await withCheckedThrowingContinuation { continuation in
+            let session = ASWebAuthenticationSession(
+                url: components.url!,
+                callbackURLScheme: handoffScheme
+            ) { callback, error in
+                if let error {
+                    let isCancel = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
+                    continuation.resume(throwing: isCancel ? Failure.cancelled
+                                                           : Failure.session(error.localizedDescription))
+                    return
+                }
+                guard let callback else {
+                    continuation.resume(throwing: Failure.noToken)
+                    return
+                }
+                continuation.resume(returning: callback)
+            }
+            session.presentationContextProvider = anchor
+            session.prefersEphemeralWebBrowserSession = false
+            if !session.start() {
+                continuation.resume(throwing: Failure.session("Could not open the GroupMe sign-in page."))
+            }
+        }
+
+        guard value(named: "state", in: callback) == state else { throw Failure.stateMismatch }
+        guard let token = token(from: callback) else { throw Failure.noToken }
+        return token
+    }
+
+    /// GroupMe's desktop scheme. We only ever intercept it inside an
+    /// `ASWebAuthenticationSession`, which resolves the redirect itself rather
+    /// than handing it to the system, so this does not need registering and does
+    /// not fight the official app for the scheme.
+    private static let handoffScheme = "groupme"
+
+    /// Reads a parameter from either the query or the fragment.
+    static func value(named name: String, in url: URL) -> String? {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
-        if let value = components.queryItems?.first(where: { $0.name == "access_token" })?.value,
-           !value.isEmpty {
-            return value
+        if let found = components.queryItems?.first(where: { $0.name == name })?.value, !found.isEmpty {
+            return found
         }
         guard let fragment = components.fragment else { return nil }
-        var fragmentComponents = URLComponents()
-        fragmentComponents.query = fragment
-        return fragmentComponents.queryItems?
-            .first(where: { $0.name == "access_token" })?.value
-            .flatMap { $0.isEmpty ? nil : $0 }
+        var parsed = URLComponents()
+        parsed.query = fragment
+        return parsed.queryItems?.first(where: { $0.name == name })?.value.flatMap { $0.isEmpty ? nil : $0 }
     }
+
+    /// GroupMe returns `groupmenot://oauth?access_token=…`. Some OAuth servers
+    /// use the fragment instead, so check both rather than assume.
+    static func token(from url: URL) -> String? { value(named: "access_token", in: url) }
 }
 
 /// `ASWebAuthenticationSession` needs a window to hang the sheet on. SwiftUI has

@@ -146,6 +146,40 @@ POST https://api.groupme.com/v3/installations
 The `client_id` here is the same UUID sent as `device_id` during login, so generate it once
 and persist it.
 
+## Sign in with Apple, and the desktop handoff
+
+Apple accounts cannot authenticate through any of the routes above. The Android app's
+welcome screen offers only `btn_google` and `btn_microsoft` (its sign-in telemetry declares
+an `APPLE` method, but nothing in the app ever fires it), and `dev.groupme.com/session/new`
+takes an email or phone plus a password. An account created through Sign in with Apple has
+neither, so it cannot reach the developer portal to collect a token or register an OAuth app.
+
+The web client has a way in, built for GroupMe's own desktop app. From
+`assets/js/desktopAuthHandoff-*.js`:
+
+```js
+var e = [`microsoft`, `google`, `facebook`, `apple`];
+// reads: desktop_auth, provider, state, intent
+window.location.href = `groupme://oauth/callback#${n}`;   // n = access_token=…&state=…
+```
+
+So:
+
+```
+https://web.groupme.com/signin?desktop_auth=1&provider=apple&state=<nonce>&intent=signin
+   → the normal web sign-in, whatever the account uses
+   → groupme://oauth/callback#access_token=<token>&state=<nonce>
+```
+
+Providers are `apple`, `google`, `microsoft`, `facebook`. `intent` is `signin` or `signup`.
+The `state` is echoed back untouched, so generate a nonce and check it.
+
+No client id and no app registration: this is not the documented OAuth flow, it is the
+mechanism their web client already implements for their own desktop client. It is the only
+route an Apple-registered account has, and the token it returns is an ordinary access token.
+
+Note the token arrives in the URL **fragment**, not the query.
+
 ## Multi-factor auth
 
 | Action | Route |
