@@ -161,6 +161,56 @@ actor GroupMeAPI {
         return page.sorted { Message.isNewer($1.id, than: $0.id) }
     }
 
+    // MARK: - Group settings
+
+    /// Change how you appear in one group.
+    ///
+    /// Per-group, which is the point: GroupMe lets the same person be "Kieran"
+    /// in one place and "K" in another, and this is the route that does it.
+    /// Nothing about the account changes.
+    func updateMembership(
+        in groupID: String, nickname: String? = nil, avatarURL: String? = nil
+    ) async throws {
+        var fields: [String: String] = [:]
+        if let nickname { fields["nickname"] = nickname }
+        if let avatarURL { fields["avatar_url"] = avatarURL }
+        guard !fields.isEmpty else { return }
+        try await client.postIgnoringResponse(
+            .v3, "/groups/\(groupID)/memberships/update",
+            body: MembershipUpdate(membership: fields), retry: .interactive)
+    }
+
+    private nonisolated struct MembershipUpdate: Encodable, Sendable {
+        var membership: [String: String]
+    }
+
+    /// Change the group itself. Admins and the owner only, which the server
+    /// enforces and the UI should not offer past.
+    ///
+    /// Only the fields passed are sent. GroupMe's update route replaces what it
+    /// is given, so sending a whole group back is how a description somebody
+    /// else wrote a minute ago gets overwritten with the copy this device
+    /// happened to be holding.
+    @discardableResult
+    func updateGroup(
+        _ groupID: String,
+        name: String? = nil,
+        description: String? = nil,
+        imageURL: String? = nil,
+        requiresApproval: Bool? = nil
+    ) async throws -> Group? {
+        var body: [String: AnyEncodable] = [:]
+        if let name { body["name"] = AnyEncodable(name) }
+        if let description { body["description"] = AnyEncodable(description) }
+        if let imageURL { body["image_url"] = AnyEncodable(imageURL) }
+        if let requiresApproval { body["requires_approval"] = AnyEncodable(requiresApproval) }
+        guard !body.isEmpty else { return nil }
+
+        try await client.postIgnoringResponse(
+            .v3, "/groups/\(groupID)/update", body: body, retry: .interactive)
+        return try? await group(id: groupID)
+    }
+
     // MARK: - Profile
 
     /// Change the parts of your own profile GroupMe lets you change.

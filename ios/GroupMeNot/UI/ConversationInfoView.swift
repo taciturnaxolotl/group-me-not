@@ -32,6 +32,7 @@ struct ConversationInfoView: View {
                         LabeledContent("Created", value: created.formatted(date: .abbreviated, time: .omitted))
                     }
                 }
+                if conversation.isGroup { settingsSection }
                 if !people.isEmpty { roster }
             }
             .listStyle(.insetGrouped)
@@ -46,6 +47,33 @@ struct ConversationInfoView: View {
                 InvitePeopleView(conversation: conversation, alreadyIn: members)
             }
         }
+    }
+
+    // MARK: Settings
+
+    /// What this account may change here.
+    ///
+    /// Everyone gets their own nickname; the group's own name, picture,
+    /// description and join rule are admin and owner only. Absent rather than
+    /// disabled for a member, because a greyed-out row invites a tap and then
+    /// explains nothing.
+    private var settingsSection: some View {
+        Section("Settings") {
+            NavigationLink {
+                GroupSettingsView(conversation: conversation, myNickname: myNickname)
+            } label: {
+                Label(canEditGroup ? "Group Settings" : "Your Nickname", systemImage: "slider.horizontal.3")
+            }
+        }
+    }
+
+    private var canEditGroup: Bool { model.role(in: conversation.id).canEditGroup }
+
+    private var myNickname: String {
+        guard let me = model.currentUser?.id,
+              let mine = members.first(where: { $0.identity == me })
+        else { return "" }
+        return mine.nickname ?? mine.name ?? ""
     }
 
     // MARK: Invitations

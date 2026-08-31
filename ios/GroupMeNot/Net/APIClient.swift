@@ -228,3 +228,22 @@ nonisolated struct Discard: Codable, Sendable {
     init(from decoder: Decoder) throws {}
     func encode(to encoder: Encoder) throws {}
 }
+
+/// A `String`, `Bool`, or `Int` in a heterogeneous body.
+///
+/// GroupMe's update routes take a flat object of mixed types and only the keys
+/// you mean to change, which a `Codable` struct cannot express: a struct with
+/// optional fields either sends nulls or needs a custom encoder per route. One
+/// small box is less code than either and reads the same at every call site.
+nonisolated struct AnyEncodable: Encodable, Sendable {
+    private let encode: @Sendable (inout any SingleValueEncodingContainer) throws -> Void
+
+    init(_ value: String) { encode = { try $0.encode(value) } }
+    init(_ value: Bool) { encode = { try $0.encode(value) } }
+    init(_ value: Int) { encode = { try $0.encode(value) } }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try encode(&container)
+    }
+}

@@ -618,6 +618,91 @@ final class AppModel {
         await reloadConversations()
     }
 
+    // MARK: - Group settings
+
+    /// What this account may change about a group.
+    ///
+    /// Read from the roster rather than assumed. The server enforces it anyway,
+    /// so this is about not offering an action that is going to be refused,
+    /// which is the same rule the edit window follows.
+    func role(in conversation: ConversationID) -> GroupRole {
+        guard case .group = conversation, let me = currentUser?.id else { return .member }
+        guard let mine = members.first(where: { $0.identity == me }) else { return .member }
+        let roles = mine.roles ?? []
+        if roles.contains("owner") { return .owner }
+        if roles.contains("admin") { return .admin }
+        return .member
+    }
+
+    nonisolated enum GroupRole: Sendable {
+        case owner, admin, member
+
+        /// Renaming a group, changing its picture or its description, and who
+        /// may join. The server allows both admins and the owner.
+        var canEditGroup: Bool { self != .member }
+    }
+
+    /// Your nickname in one group.
+    @discardableResult
+    func setNickname(_ nickname: String, in conversation: ConversationID) async -> Bool {
+        guard case .group(let groupID) = conversation else { return false }
+        do {
+            try await api.updateMembership(in: groupID, nickname: nickname)
+            // The roster is what the transcript draws names from, so it is what
+            // has to catch up before the change is visible anywhere.
+            await sync.catchUp(conversation)
+            return true
+        } catch {
+            log.notice("could not set nickname: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
+    }
+
+    /// Change the group itself. Refused for a member, before it is sent.
+    @discardableResult
+    func updateGroup(
+        _ conversation: ConversationID,
+        name: String? = nil,
+        description: String? = nil,
+        requiresApproval: Bool? = nil
+    ) async -> Bool {
+        guard case .group(let groupID) = conversation, role(in: conversation).canEditGroup
+        else { return false }
+        do {
+            guard let updated = try await api.updateGroup(
+                groupID, name: name, description: description,
+                requiresApproval: requiresApproval)
+            else { return true }
+            try? await store.conversations.upsert(groups: [updated])
+            await reloadConversations()
+            return true
+        } catch {
+            log.notice("could not update group: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
+    }
+
+    /// Replace a group's picture, uploading it first.
+    @discardableResult
+    func updateGroupPhoto(_ picked: PickedMedia, in conversation: ConversationID) async -> Bool {
+        guard case .group(let groupID) = conversation, role(in: conversation).canEditGroup
+        else { return false }
+        do {
+            let media = try await MediaVault.shared.adopt(picked)
+            let uploaded = try await uploads.upload(
+                media, senderID: currentUser?.id, groupID: groupID, conversationID: nil)
+            await MediaVault.shared.remove(media)
+            guard let updated = try await api.updateGroup(groupID, imageURL: uploaded.url)
+            else { return true }
+            try? await store.conversations.upsert(groups: [updated])
+            await reloadConversations()
+            return true
+        } catch {
+            log.notice("could not set group photo: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
+    }
+
     // MARK: - Profile
 
     /// Change your own name, bio, photo, or postcode.
