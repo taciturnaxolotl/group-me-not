@@ -430,6 +430,25 @@ struct ChatView: View {
                 guard isNearBottom, !isUserScrolling else { return }
                 bottomRequest += 1
             }
+            // The keyboard takes half the screen, and the scroll view answers a
+            // growing bottom inset by keeping its offset: the content stays
+            // where it was and the newest messages end up behind the keys. What
+            // a reader wants is the opposite, that what they were looking at
+            // stays looked at, so the foot is asked for again.
+            //
+            // Twice, because the inset is not final on the frame the field takes
+            // focus; the second request lands once the keyboard has finished
+            // arriving. Both scroll to the same anchor, so the second is free
+            // when the first was enough.
+            .onChange(of: composerFocused) { _, focused in
+                guard focused, isNearBottom else { return }
+                bottomRequest += 1
+                Task {
+                    try? await Task.sleep(for: .milliseconds(280))
+                    guard composerFocused, isNearBottom else { return }
+                    bottomRequest += 1
+                }
+            }
     }
 
     // MARK: Transcript
