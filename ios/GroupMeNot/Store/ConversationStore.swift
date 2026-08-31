@@ -493,10 +493,17 @@ actor ConversationStore {
             -- phone happened to be awake for and knows nothing about what was
             -- read elsewhere, so the server's is simply better.
             WHEN \(ConversationStore.serverCursorIsAhead) THEN excluded.unread_count
-            -- Otherwise neither is wholly trustworthy: the server's count can
-            -- lag a message that arrived over the socket a moment ago, and ours
-            -- only counts what this device saw. The larger is the one that does
-            -- not hide a message.
+            -- We have read further than the server has been told. Its count is
+            -- therefore counting messages this device has already shown, and
+            -- taking the larger of the two — which is what this used to do —
+            -- keeps that stale number: a conversation with two unread messages
+            -- reported eleven, and the transcript opened eleven messages back
+            -- because the divider is placed from the same figure.
+            WHEN \(ConversationStore.localCursorIsAhead) THEN conversations.unread_count
+            -- Cursors agree, so the only disagreement is about arrivals: the
+            -- server's count can lag a message that came over the socket a
+            -- moment ago, and ours only counts what this device was awake for.
+            -- The larger is the one that does not hide a message.
             ELSE MAX(excluded.unread_count, conversations.unread_count) END,
         last_read_message_id = CASE WHEN \(ConversationStore.localCursorIsAhead)
                                     THEN conversations.last_read_message_id

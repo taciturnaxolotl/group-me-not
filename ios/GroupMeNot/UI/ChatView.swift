@@ -1256,11 +1256,19 @@ struct ChatView: View {
             return
         }
 
-        // No receipt, or one older than anything loaded. Counting back from the
-        // newest message is the same arithmetic the badge was drawn from, and
-        // clamping to the first loaded message is what covers a long absence:
-        // everything on screen is unread, so the divider sits at the top of it
-        // rather than somewhere off above the loaded window.
+        // A receipt we hold but cannot find means everything loaded is newer
+        // than it, so everything loaded is unread and the divider belongs at the
+        // top. Counting back by the badge here would be worse than useless: the
+        // badge is a number from the server about a range we cannot see, and
+        // using it would place the divider in the middle of messages we know
+        // are unread.
+        if current.lastReadMessageID != nil {
+            unread = UnreadMark(firstUnreadID: messages[0].id, count: messages.count)
+            return
+        }
+
+        // No receipt at all. Counting back from the newest message is the same
+        // arithmetic the badge was drawn from, clamped to the window.
         let index = max(0, messages.count - count)
         guard index < messages.count else { return }
         unread = UnreadMark(firstUnreadID: messages[index].id, count: messages.count - index)
