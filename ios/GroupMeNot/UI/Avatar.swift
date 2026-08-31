@@ -36,15 +36,22 @@ struct Avatar: View {
         .accessibilityHidden(true)
     }
 
-    /// The 60-pixel rendering where there is one.
+    /// A rendering big enough for the size being drawn, and no bigger.
     ///
     /// A profile picture is stored at whatever size it was uploaded, which for a
-    /// photo off a phone is a couple of hundred kilobytes. Drawn at 28 points.
-    /// The `.avatar` copy is 2.5 KB and is the correct size for the job, so a
-    /// conversation list of forty faces costs 100 KB instead of eight megabytes.
+    /// photo off a phone is a couple of hundred kilobytes drawn at 28 points. The
+    /// small copies exist precisely for this, so a conversation list of forty
+    /// faces costs kilobytes rather than megabytes.
+    ///
+    /// The threshold is the size the copy actually is. GroupMe's face rendering
+    /// is 60 pixels square, so it holds up to 20 points on a 3× screen and turns
+    /// soft above that; a header drawn at 56 needs the next one up. Deriving it
+    /// from `size` means no call site has to remember this, and one that changes
+    /// its mind about how big it wants to be gets the right file automatically.
     private var source: URL? {
         let original = URL(string: url ?? "")
-        return GroupMeImage.variant(.face, of: original) ?? original
+        let wanted: GroupMeImage.Size = size * 3 <= 60 ? .face : .placeholder
+        return GroupMeImage.variant(wanted, of: original) ?? original
     }
 }
 

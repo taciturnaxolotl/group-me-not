@@ -969,7 +969,7 @@ struct ChatView: View {
             Avatar(
                 url: conversation.avatarURL,
                 name: conversation.name,
-                size: 50,
+                size: 56,
                 isGroup: conversation.isGroup
             )
             // A stack draws in order, so the pill would otherwise cover the
@@ -989,6 +989,9 @@ struct ChatView: View {
             .padding(.vertical, 5)
             .glassEffect(.regular.interactive(), in: .capsule)
         }
+        // Clear of the status bar. A picture that starts where the safe area
+        // does is a picture touching the clock.
+        .padding(.top, 6)
         // On the pieces, not on the whole stack. The gap between the face and
         // the name is not part of either, and a hit area that covers it is a hit
         // area covering the bar itself.
