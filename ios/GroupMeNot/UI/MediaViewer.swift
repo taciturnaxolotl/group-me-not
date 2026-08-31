@@ -50,9 +50,16 @@ struct MediaViewer: View {
     @State private var pan: CGSize = .zero
     @State private var committedPan: CGSize = .zero
 
-    /// Past this much downward travel the picture is let go rather than
-    /// snapping back. Roughly a thumb's comfortable reach.
-    private static let dismissDistance: CGFloat = 140
+    /// True from the moment a dismissal is committed to. The picture keeps
+    /// travelling the way it was thrown rather than vanishing on release, which
+    /// is the whole difference between a gesture that completes and one that is
+    /// merely interrupted.
+    @State private var isDismissing = false
+
+    /// How far down the screen a drag has to get before letting go completes the
+    /// dismissal. A fraction rather than a fixed distance: the gesture is "throw
+    /// it off the screen", and how far that is depends on the screen.
+    private static let dismissFraction: CGFloat = 0.16
     /// How far sideways before the page turns instead of springing back.
     private static let pageTurnFraction: CGFloat = 0.22
 
@@ -72,8 +79,9 @@ struct MediaViewer: View {
                 .ignoresSafeArea()
 
             pages
-                .offset(dragOffset)
                 .scaleEffect(dragScale)
+                .offset(dragOffset)
+                .opacity(isDismissing ? 0 : 1)
         }
         .onGeometryChange(for: CGSize.self, of: \.size) { canvas = $0 }
         .onAppear {
@@ -84,6 +92,10 @@ struct MediaViewer: View {
         .overlay(alignment: .bottom) { bottomBar }
         .statusBarHidden()
         .preferredColorScheme(.dark)
+        // Without this the cover paints its own opaque ground behind everything,
+        // and fading `backdropOpacity` would reveal nothing but another black
+        // rectangle. Clearing it is what puts the transcript back there.
+        .presentationBackground(.clear)
         .persistentSystemOverlays(.hidden)
         .alert(item: $saveResult) { result in
             Alert(title: Text(result.title), message: Text(result.message),
@@ -203,14 +215,41 @@ struct MediaViewer: View {
         }
     }
 
+    /// Let go, and the picture either springs back or carries on.
+    ///
+    /// The old version called `dismiss()` on release, so the photo stopped dead
+    /// under the finger and the cover cut away underneath it. Every iOS viewer
+    /// that does this finishes the throw: the picture keeps going the way it was
+    /// sent, the ground goes with it, and only then is the cover taken down. The
+    /// sleep is that animation's length, and the dismissal is untransacted so
+    /// the system does not slide a second one over the top of it.
     private func settleDismiss(_ value: DragGesture.Value) {
-        let travelled = abs(value.translation.height) > Self.dismissDistance
-        let flicked = abs(value.predictedEndTranslation.height) > Self.dismissDistance * 2
+        let threshold = max(canvas.height * Self.dismissFraction, 90)
+        let travelled = abs(value.translation.height) > threshold
+        let flicked = abs(value.predictedEndTranslation.height) > threshold * 2.5
         guard travelled || flicked else {
-            withAnimation(.snappy(duration: 0.25)) { dragOffset = .zero }
+            // A spring, not a duration. Springing back is the one moment the
+            // gesture has momentum of its own, and easing it out drops that on
+            // the floor.
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.84)) {
+                dragOffset = .zero
+            }
             return
         }
-        dismiss()
+
+        let heading: CGFloat = value.predictedEndTranslation.height >= 0 ? 1 : -1
+        withAnimation(.easeOut(duration: 0.22)) {
+            isDismissing = true
+            dragOffset = CGSize(
+                width: value.translation.width,
+                height: heading * canvas.height)
+        }
+        Task {
+            try? await Task.sleep(for: .milliseconds(200))
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { dismiss() }
+        }
     }
 
     /// Pinch. Simultaneous with the drag rather than exclusive, because a pinch
@@ -279,9 +318,12 @@ struct MediaViewer: View {
                     .ignoresSafeArea(edges: .top)
             }
         }
-        .opacity(isChromeVisible ? 1 : 0)
+        // Tied to the ground rather than to its own flag, so a drag takes the
+        // bars with it. Chrome left hanging over a photo that is on its way out
+        // is the clearest possible sign that two things are animating separately.
+        .opacity(isChromeVisible ? backdropOpacity : 0)
         .animation(.easeInOut(duration: 0.2), value: isChromeVisible)
-        .allowsHitTesting(isChromeVisible)
+        .allowsHitTesting(isChromeVisible && dragOffset == .zero)
     }
 
     private var titleMenu: some View {
@@ -339,9 +381,12 @@ struct MediaViewer: View {
             .ignoresSafeArea(edges: .bottom)
             .allowsHitTesting(false)
         }
-        .opacity(isChromeVisible ? 1 : 0)
+        // Tied to the ground rather than to its own flag, so a drag takes the
+        // bars with it. Chrome left hanging over a photo that is on its way out
+        // is the clearest possible sign that two things are animating separately.
+        .opacity(isChromeVisible ? backdropOpacity : 0)
         .animation(.easeInOut(duration: 0.2), value: isChromeVisible)
-        .allowsHitTesting(isChromeVisible)
+        .allowsHitTesting(isChromeVisible && dragOffset == .zero)
     }
 
     private func circleButton(
@@ -383,15 +428,29 @@ struct MediaViewer: View {
 
     /// The ground thins out as the picture is dragged away, so the transcript
     /// underneath comes back gradually rather than all at once at the end.
-    private var backdropOpacity: Double {
-        let travel = min(abs(dragOffset.height) / (Self.dismissDistance * 2), 1)
-        return 1 - travel * 0.85
+    /// How far through a dismissal the finger has got, as a fraction of the
+    /// screen. Everything the gesture animates is a function of this one number,
+    /// which is what keeps the pieces moving together instead of each on its own
+    /// arbitrary curve.
+    private var dragProgress: CGFloat {
+        guard canvas.height > 0 else { return 0 }
+        return min(abs(dragOffset.height) / canvas.height, 1)
     }
 
-    /// A little shrink as it goes, which is what makes the gesture read as
-    /// putting the picture back rather than sliding it off an edge.
+    /// The ground clears as the picture is thrown, and it clears *early*: fully
+    /// transparent by the time the drag is a third of the way down, so what is
+    /// underneath is visible well before the gesture ends. That is the part that
+    /// makes this read as putting the photo back where it came from rather than
+    /// as sliding a black card away.
+    private var backdropOpacity: Double {
+        Double(max(1 - dragProgress * 3, 0))
+    }
+
+    /// Shrinks as it goes, and much more than a token amount. A picture that
+    /// only barely changes size reads as stuck; one that visibly recedes reads
+    /// as going back into the conversation.
     private var dragScale: CGFloat {
-        1 - min(abs(dragOffset.height) / 2200, 0.12)
+        max(1 - dragProgress * 0.7, 0.62)
     }
 
     // MARK: Actions
