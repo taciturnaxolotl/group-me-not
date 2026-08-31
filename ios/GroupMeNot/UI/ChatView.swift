@@ -328,6 +328,12 @@ struct ChatView: View {
     @State private var isAttachmentPickerPresented = false
     /// Media the user picked but has not sent yet, shown above the field.
     @State private var staged: [PickedMedia] = []
+    /// People named in the draft so far, in the order they were chosen.
+    ///
+    /// Kept rather than re-derived, because a name in the text is not enough to
+    /// find a person: two members can share one, and the draft only carries what
+    /// was typed. Locating them in the text happens once, at send.
+    @State private var named: [MentionDraft.Named] = []
 
     // MARK: Unread
 
@@ -854,6 +860,11 @@ struct ChatView: View {
                 .animation(.snappy(duration: 0.22), value: staged)
             }
 
+            if !mentionMatches.isEmpty {
+                mentionSuggestions
+                Divider().padding(.leading, 14)
+            }
+
             HStack(alignment: .bottom, spacing: 4) {
                 TextField("Message", text: $draft, axis: .vertical)
                     .textInputAutocapitalization(.sentences)
@@ -887,6 +898,60 @@ struct ChatView: View {
         // height, and the taller it gets the more the ends bow out. At a single
         // line's height this is within a point of the capsule it replaces.
         .glassEffect(.regular, in: .rect(cornerRadius: 20, style: .continuous))
+    }
+
+    /// Members matching the name being typed after an `@`.
+    ///
+    /// Capped, because this sits above the keyboard and a list that grows past a
+    /// few rows pushes the message it belongs to off the screen.
+    private var mentionMatches: [Member] {
+        guard current.isGroup, let query = MentionDraft.query(in: draft) else { return [] }
+        let me = model.currentUser?.id
+        let people = model.members.filter { $0.identity != me }
+        guard !query.isEmpty else { return Array(people.prefix(Self.mentionLimit)) }
+        return Array(
+            people
+                .filter { (($0.nickname ?? $0.name) ?? "").localizedStandardContains(query) }
+                .prefix(Self.mentionLimit))
+    }
+
+    private static let mentionLimit = 5
+
+    private var mentionSuggestions: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(mentionMatches, id: \.identity) { member in
+                    Button { complete(with: member) } label: {
+                        HStack(spacing: 6) {
+                            Avatar(url: member.imageUrl, name: name(of: member), size: 22)
+                            Text(name(of: member))
+                                .font(.subheadline)
+                                .lineLimit(1)
+                        }
+                        .padding(.leading, 4)
+                        .padding(.trailing, 10)
+                        .padding(.vertical, 4)
+                        .background(.quaternary, in: .capsule)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+        }
+        .scrollIndicators(.hidden)
+        .scrollBounceBehavior(.basedOnSize)
+    }
+
+    private func name(of member: Member) -> String {
+        member.nickname ?? member.name ?? "Someone"
+    }
+
+    /// Finish the name being typed, and remember who it was.
+    private func complete(with member: Member) {
+        let display = name(of: member)
+        draft = MentionDraft.completing(draft, with: display)
+        named.append(MentionDraft.Named(userID: member.identity, name: display))
     }
 
     /// What this message will be answering, with a way out.
@@ -1026,11 +1091,18 @@ struct ChatView: View {
         // transcript draws from here on, and leaving the tray populated would
         // show the same photo twice.
         let parent = replyingTo
+        // Located against the trimmed text, which is what actually goes out. A
+        // locus measured against the untrimmed draft would be off by however
+        // much leading whitespace was typed.
+        let mentions = MentionDraft.attachment(for: text, naming: named)
         draft = ""
         staged = []
         replyingTo = nil
+        named = []
         bottomRequest += 1
-        Task { await model.send(text, media: media, replyingTo: parent) }
+        Task {
+            await model.send(text, media: media, replyingTo: parent, mentioning: mentions)
+        }
     }
 
     /// A tapped chip or glyph. The model works out whether that adds, swaps or

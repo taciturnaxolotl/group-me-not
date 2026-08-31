@@ -357,9 +357,14 @@ final class AppModel {
     // MARK: - Sending
 
     /// Queue a message for the open conversation.
-    func send(_ text: String, media: [PickedMedia] = [], replyingTo parent: Message? = nil) async {
+    func send(
+        _ text: String, media: [PickedMedia] = [], replyingTo parent: Message? = nil,
+        mentioning mentions: Message.Attachment? = nil
+    ) async {
         guard let conversation = openConversationID else { return }
-        await send(text: text, media: media, to: conversation, replyingTo: parent)
+        await send(
+            text: text, media: media, to: conversation,
+            replyingTo: parent, mentioning: mentions)
     }
 
     /// Queue a message. Returns as soon as it is durable, which is immediately.
@@ -370,14 +375,15 @@ final class AppModel {
     /// already safe; the bytes go up whenever the network next allows.
     func send(
         text: String, media: [PickedMedia] = [], to conversation: ConversationID,
-        replyingTo parent: Message? = nil
+        replyingTo parent: Message? = nil, mentioning mentions: Message.Attachment? = nil
     ) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !media.isEmpty else { return }
         // A reply is an ordinary message with one more attachment on it. Nothing
         // else in the queue, the retry or the idempotency guarantee has to know
         // that this one answers another.
-        let attachments = parent.map { [Message.replyAttachment(to: $0)] } ?? []
+        var attachments = parent.map { [Message.replyAttachment(to: $0)] } ?? []
+        if let mentions { attachments.append(mentions) }
         do {
             try await sends.send(
                 text: trimmed.isEmpty ? nil : trimmed, attachments: attachments,
