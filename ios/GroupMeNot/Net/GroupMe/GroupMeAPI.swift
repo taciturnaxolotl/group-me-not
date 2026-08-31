@@ -163,7 +163,7 @@ actor GroupMeAPI {
 
     // MARK: - Polls
 
-    /// One poll, with its current tallies.
+    /// One poll.
     ///
     /// Polls live on their own routes rather than inside the message, so a
     /// message carrying `poll_id` is an invitation to fetch rather than the
@@ -171,9 +171,9 @@ actor GroupMeAPI {
     /// decode, because the caller's fallback — the chip that was there before —
     /// is a perfectly good thing to keep showing.
     func poll(_ pollID: String, in groupID: String) async -> Poll? {
-        let response: PollEnvelope? = try? await client.get(
+        let response: SinglePollResponse? = try? await client.get(
             .v3, "/poll/\(groupID)/\(pollID)", retry: .background)
-        return response?.poll
+        return response?.poll?.data
     }
 
     /// Vote, or change a vote.
@@ -181,44 +181,25 @@ actor GroupMeAPI {
     /// One option goes to the single route; several go to the multi route as a
     /// body, which is also how a vote is *withdrawn*: an empty list means no
     /// choice at all.
+    ///
+    /// The multi body's key is the one part of this not measured against a live
+    /// call, since the only way to measure it is to vote in somebody's poll.
     @discardableResult
-    func vote(
-        _ optionIDs: [String], in pollID: String, groupID: String
-    ) async -> Poll? {
+    func vote(_ optionIDs: [String], in pollID: String, groupID: String) async -> Poll? {
         if optionIDs.count == 1, let only = optionIDs.first {
-            let response: PollEnvelope? = try? await client.post(
+            let response: SinglePollResponse? = try? await client.post(
                 .v3, "/poll/\(groupID)/\(pollID)/\(only)",
                 body: Optional<Discard>.none, retry: .interactive)
-            return response?.poll
+            return response?.poll?.data
         }
-        let response: PollEnvelope? = try? await client.post(
+        let response: SinglePollResponse? = try? await client.post(
             .v3, "/poll/\(groupID)/\(pollID)",
             body: MultiVote(optionIds: optionIDs), retry: .interactive)
-        return response?.poll
+        return response?.poll?.data
     }
 
     private nonisolated struct MultiVote: Encodable, Sendable {
         var optionIds: [String]
-    }
-
-    /// The response wraps the poll under one of two keys depending on the route,
-    /// so both are read and whichever answered wins.
-    private nonisolated struct PollEnvelope: Decodable, Sendable {
-        var poll: Poll?
-        var data: Poll?
-
-        enum Key: String, CodingKey { case poll, data }
-
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: Key.self)
-            poll = try? container.decodeIfPresent(Poll.self, forKey: .poll)
-            data = try? container.decodeIfPresent(Poll.self, forKey: .data)
-            // A route that returns the poll unwrapped is the third possibility,
-            // and costs one more attempt to cover.
-            if poll == nil, data == nil {
-                poll = try? Poll(from: decoder)
-            }
-        }
     }
 
     // MARK: - Requests

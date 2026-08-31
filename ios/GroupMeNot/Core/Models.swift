@@ -655,32 +655,40 @@ nonisolated struct Chat: Codable, Hashable, Sendable {
 
 /// A poll, as `GET /v3/poll/{groupId}/{pollId}` returns it.
 ///
-/// Every field optional, and that is not laziness. The endpoints are documented
-/// from the client's own classes and no poll was available to read at the time
-/// this was written, so the safe assumption is that some of these names are
-/// close rather than exact. A poll that decodes thinly draws a thin card; a
-/// poll that decodes strictly and fails draws nothing at all.
+/// Measured against a live poll on 2026-08-31. Two things about it are worth
+/// stating, because both were guessed wrong first time:
+///
+/// - **The body is wrapped twice.** `response.poll.data` for one poll, and
+///   `response.polls[].data` for the list. Not `response.poll`.
+/// - **Options carry no vote counts** on an anonymous poll. `visibility` is
+///   `anonymous` by default and the tallies simply are not in the payload, so a
+///   card that draws bars is drawing zeroes it invented.
 nonisolated struct Poll: Codable, Identifiable, Hashable, Sendable {
     var id: String?
     var subject: String?
     var ownerId: String?
-    var created_at: Int?
+    var conversationId: String?
+    var createdAt: Int?
+    var lastModified: Int?
     var expiration: Int?
-    /// `active` while it is open, and something else once it is not. Compared
-    /// loosely, because the closed spelling is the uncertain one.
+    /// `active` while it is open. Compared loosely, since the closed spelling
+    /// is the one that has not been seen.
     var status: String?
-    /// `single` or `multi`. Anything unrecognised is treated as single, which is
-    /// the safer of the two: offering one vote where many were allowed is a
+    /// `single` or `multi`. Anything unrecognised is treated as single, which
+    /// is the safer of the two: offering one vote where many were allowed is a
     /// smaller wrong than the reverse.
     var type: String?
+    /// `anonymous` or, presumably, something else. Anonymous means the counts
+    /// are absent, not zero.
+    var visibility: String?
     var options: [Option]?
 
     nonisolated struct Option: Codable, Identifiable, Hashable, Sendable {
         var id: String?
         var title: String?
+        /// Absent on an anonymous poll. Nil and zero are different answers and
+        /// this keeps them apart.
         var votes: Int?
-        /// Present once the poll is visible to the reader, which is how "did I
-        /// vote for this" is answered without a second request.
         var voterIds: [String]?
 
         var identity: String { id ?? title ?? UUID().uuidString }
@@ -689,6 +697,13 @@ nonisolated struct Poll: Codable, Identifiable, Hashable, Sendable {
     var identity: String { id ?? subject ?? UUID().uuidString }
     var isOpen: Bool { (status ?? "active") == "active" }
     var allowsMultiple: Bool { type == "multi" }
+
+    /// Whether the server told us where the votes went. False for every
+    /// anonymous poll, which is the default.
+    var showsResults: Bool {
+        (options ?? []).contains { $0.votes != nil }
+    }
+
     var totalVotes: Int { (options ?? []).reduce(0) { $0 + ($1.votes ?? 0) } }
 
     func chose(_ option: Option, as userID: String?) -> Bool {
@@ -697,6 +712,20 @@ nonisolated struct Poll: Codable, Identifiable, Hashable, Sendable {
     }
 
     var closesAt: Date? { expiration.map { Date(timeIntervalSince1970: TimeInterval($0)) } }
+}
+
+/// The two shapes a poll arrives in, both of which nest it under `data`.
+nonisolated struct PollBox: Decodable, Sendable {
+    var data: Poll?
+}
+
+nonisolated struct SinglePollResponse: Decodable, Sendable {
+    var poll: PollBox?
+}
+
+nonisolated struct PollListResponse: Decodable, Sendable {
+    var polls: [PollBox]?
+    var continuationToken: String?
 }
 
 /// Somebody waiting to be let into a group.

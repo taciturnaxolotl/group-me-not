@@ -253,3 +253,36 @@ reading *about*, but it is a group for reading *from*.
 
 Observed on a live group with `children_count: 6` — three `announcement` topics (rules,
 announcements, confirmed kills) and three `private` ones.
+
+
+## Polls
+
+A `poll` attachment carries `poll_id` and nothing else. The poll itself is fetched:
+
+```
+GET  https://api.groupme.com/v3/poll/{groupId}/{pollId}
+GET  https://api.groupme.com/v3/poll/{groupId}                    # all, + continuation_token
+POST https://api.groupme.com/v3/poll/{groupId}/{pollId}/{optionId} # vote, single
+POST https://api.groupme.com/v3/poll/{groupId}/{pollId}            # vote, multi
+POST https://api.groupme.com/v3/poll/{groupId}/{pollId}/end
+```
+
+**The body is wrapped twice.** One poll is `response.poll.data`; the list is
+`response.polls[].data`. Not `response.poll`.
+
+```json
+{ "id": "1788215981340302", "subject": "…", "owner_id": "…", "conversation_id": "…",
+  "created_at": 1788215981, "expiration": 1788302700, "last_modified": 1788215981,
+  "status": "active", "type": "multi", "visibility": "anonymous",
+  "options": [ { "id": "1", "title": "…" }, { "id": "2", "title": "…" } ] }
+```
+
+**Options carry no vote counts when `visibility` is `anonymous`,** which is the default. The
+fields are absent rather than zero, and a client that reads them as zero draws a result the
+server deliberately withheld. There is also no way to tell which option *you* picked on such a
+poll: the server does not attribute votes, so a vote cast has to be remembered locally or not
+known at all.
+
+`type` is `single` or `multi`. `status` is `active` while open.
+
+Measured 2026-08-31 against a live poll.
