@@ -233,6 +233,34 @@ actor GroupMeAPI {
             .v3, "/messages/\(convID)/\(messageID)/unlike", body: Optional<Empty>.none)
     }
 
+    /// Put this user's reaction on a message into an exact state.
+    ///
+    /// A person holds at most one reaction per message, so changing glyph is
+    /// two calls: drop the old one, then add the new. Pass `nil` for `glyph` to
+    /// clear. Deciding that tapping your own glyph means "clear" is the UI's
+    /// call, not this one's; this method sets what it is told.
+    ///
+    /// The unlike runs first and its result is honoured, because a like that
+    /// lands on top of an existing reaction is silently ignored by the server
+    /// and the two sides would disagree from then on.
+    func setReaction(
+        _ glyph: String?,
+        onMessage messageID: String,
+        in conversation: ConversationID,
+        replacing current: String? = nil
+    ) async throws {
+        if glyph == current { return }
+        if current != nil {
+            try await unlike(message: messageID, in: conversation)
+        }
+        if let glyph {
+            try await like(
+                message: messageID,
+                in: conversation,
+                icon: ReactionCatalog.icon(for: glyph))
+        }
+    }
+
     // MARK: - Read receipts
 
     /// One conversation's read cursor. Serves as both the response row from

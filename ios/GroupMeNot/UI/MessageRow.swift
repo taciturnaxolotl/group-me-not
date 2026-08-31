@@ -5,9 +5,10 @@ import SwiftUI
 /// One message, already resolved into everything the row needs to draw itself.
 ///
 /// The row does no lookups: whether the message is mine, what the sender is
-/// called, whether it opens or closes a run, and how far along delivery is are
-/// all decided once when the transcript is built. A view that has to ask
-/// questions during layout is a view that scrolls badly.
+/// called, whether it opens or closes a run, how far along delivery is, which
+/// reactions it carries and how its text is styled are all decided once when
+/// the transcript is built. A view that has to ask questions during layout is a
+/// view that scrolls badly.
 nonisolated struct MessageDisplay: Identifiable, Hashable, Sendable {
 
     /// How far a message has got towards the server.
@@ -35,6 +36,13 @@ nonisolated struct MessageDisplay: Identifiable, Hashable, Sendable {
     /// squared-off corner.
     var isRunTail: Bool
     var delivery: Delivery
+    /// Links, mentions and the emoji-only verdict, parsed once.
+    var text: MessageText
+    /// The same text with the palette applied. Handed straight to `Text`.
+    var styledText: AttributedString
+    /// Reaction buckets, plain likes already folded into the heart, with our
+    /// own membership resolved.
+    var reactions: [Message.ReactionSummary]
 
     var isPending: Bool { delivery == .pending }
 
@@ -48,6 +56,24 @@ nonisolated struct MessageDisplay: Identifiable, Hashable, Sendable {
         if case .failed(let reason) = delivery { return reason }
         return nil
     }
+
+    /// A reaction needs a server id to name the message and a message that
+    /// still exists to put it on, so queued and deleted rows do not offer one.
+    var canReact: Bool {
+        delivery == .sent && !message.isDeleted && !message.isSystem
+    }
+
+    /// The link worth a card. Only the first: past that the message is a link
+    /// dump and cards stop helping.
+    var previewLink: URL? {
+        message.isDeleted ? nil : text.previewLink
+    }
+
+    /// True for the one case that renders bigger and without a bubble tint.
+    /// Attachments veto it: a photo with a thumbs-up under it is still a photo.
+    var isEmojiOnly: Bool {
+        text.isEmojiOnly && (message.attachments ?? []).allSatisfy { $0.type == "mentions" }
+    }
 }
 
 // MARK: - Row
@@ -60,6 +86,13 @@ nonisolated struct MessageDisplay: Identifiable, Hashable, Sendable {
 /// everything else is a bubble.
 struct MessageRow: View {
     let item: MessageDisplay
+    /// The glyphs the long-press bar offers.
+    var catalog: ReactionCatalog = .default
+    /// Link previews, or nil where there is no model to ask.
+    var previews: LinkPreviewService?
+    /// Called with the tapped glyph. The model decides whether that adds,
+    /// swaps or clears; the row only reports the tap.
+    var onReact: (String) -> Void = { _ in }
     /// Called when the user asks to send a failed message again.
     var onRetry: () -> Void = {}
     /// Called when the user gives up on a failed message.
@@ -69,7 +102,13 @@ struct MessageRow: View {
         if item.message.isSystem {
             SystemNotice(text: item.message.text ?? "")
         } else {
-            BubbleRow(item: item, onRetry: onRetry, onDiscard: onDiscard)
+            BubbleRow(
+                item: item,
+                catalog: catalog,
+                previews: previews,
+                onReact: onReact,
+                onRetry: onRetry,
+                onDiscard: onDiscard)
         }
     }
 }
@@ -95,11 +134,21 @@ private struct SystemNotice: View {
 
 private struct BubbleRow: View {
     let item: MessageDisplay
+    let catalog: ReactionCatalog
+    let previews: LinkPreviewService?
+    let onReact: (String) -> Void
     let onRetry: () -> Void
     let onDiscard: () -> Void
 
     @ScaledMetric(relativeTo: .body) private var avatarSize: CGFloat = 28
     @ScaledMetric(relativeTo: .body) private var gutter: CGFloat = 56
+    @ScaledMetric(relativeTo: .caption) private var chipHeight: CGFloat = 26
+
+    /// How far a chip sits inside the bubble it hangs off. The rest of its
+    /// height is reserved below, so the next row never has to move over.
+    private let chipOverlap: CGFloat = 9
+
+    @State private var isPickerPresented = false
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
@@ -120,7 +169,7 @@ private struct BubbleRow: View {
                         .padding(.top, 4)
                 }
 
-                bubble
+                messageBody
 
                 footer
             }
@@ -128,9 +177,11 @@ private struct BubbleRow: View {
             if !item.isOwn { Spacer(minLength: gutter) }
         }
         .padding(.vertical, item.isRunTail ? 3 : 1)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityLabel)
-        .contextMenu { contextMenu }
+        // `.contain` rather than `.combine`: the chips, the links and the
+        // preview card are all things to act on, and flattening the row would
+        // read them out and then hide them.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(accessibilityContext)
     }
 
     /// Reserved even when empty, so a run of messages stays in one column.
@@ -142,19 +193,82 @@ private struct BubbleRow: View {
         }
     }
 
+    // MARK: The bubble and everything hanging off it
+
+    /// Bubble, preview card, and the reaction chips that straddle the bottom of
+    /// whichever of those two ends up last.
+    private var messageBody: some View {
+        VStack(alignment: item.isOwn ? .trailing : .leading, spacing: 4) {
+            bubble
+            if let link = item.previewLink {
+                LinkPreviewCard(url: link, isOwn: item.isOwn, service: previews)
+            }
+        }
+        .overlay(alignment: item.isOwn ? .bottomTrailing : .bottomLeading) { chips }
+        // The overlay draws outside the layout, so the overhang is paid for
+        // here. Without this the row below would be sat on.
+        .padding(.bottom, item.reactions.isEmpty ? 0 : chipHeight - chipOverlap)
+        // A chip appearing is the entire feedback for a tap, so it is the one
+        // thing in this row worth animating. Driven from out here rather than
+        // from the chips themselves, because a transition only animates when
+        // the animation is attached above the view being inserted.
+        .animation(.snappy(duration: 0.2), value: item.reactions)
+        .contentShape(.rect)
+        .onLongPressGesture(minimumDuration: 0.32) { isPickerPresented = true }
+        // On the way up only. A haptic for the dismissal would be a second
+        // tap the user did not make.
+        .sensoryFeedback(trigger: isPickerPresented) { _, shown in
+            shown ? .impact(weight: .light) : nil
+        }
+        .popover(isPresented: $isPickerPresented) {
+            ReactionPicker(
+                glyphs: catalog.glyphs,
+                selected: mine,
+                onPick: { glyph in
+                    isPickerPresented = false
+                    onReact(glyph)
+                },
+                actions: pickerActions)
+                .presentationCompactAdaptation(.popover)
+        }
+    }
+
+    @ViewBuilder private var chips: some View {
+        if !item.reactions.isEmpty {
+            ReactionChips(
+                summaries: item.reactions,
+                isOwn: item.isOwn,
+                height: chipHeight,
+                onTap: onReact
+            )
+            .offset(x: item.isOwn ? -10 : 10, y: chipHeight - chipOverlap)
+            .transition(.scale(scale: 0.8).combined(with: .opacity))
+        }
+    }
+
     @ViewBuilder private var bubble: some View {
         SwiftUI.Group {
             if item.message.isDeleted {
                 Tombstone()
+            } else if item.isEmojiOnly {
+                // No tint, no padding worth speaking of: a lone emoji is its
+                // own bubble.
+                Text(item.text.plain)
+                    .font(.system(size: MessageStyling.emojiFontSize))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
             } else {
                 VStack(alignment: item.isOwn ? .trailing : .leading, spacing: 6) {
                     AttachmentStack(attachments: displayableAttachments, isOwn: item.isOwn)
-                    if let text = item.message.text, !text.isEmpty {
-                        Text(text)
+                    if !item.text.isEmpty {
+                        Text(item.styledText)
                             .font(.body)
-                            .textSelection(.enabled)
                             .multilineTextAlignment(.leading)
                             .fixedSize(horizontal: false, vertical: true)
+                            // Links come out of the parser as `.link` runs, so
+                            // `Text` makes them tappable for free. The tint is
+                            // already baked in per side.
+                            .tint(item.isOwn ? .white : .accentColor)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -188,8 +302,9 @@ private struct BubbleRow: View {
         )
     }
 
-    /// Timestamp, likes, and the failure affordance. Only on the tail of a run,
-    /// so a burst of five messages does not carry five clocks.
+    /// Timestamp and the failure affordance. Only on the tail of a run, so a
+    /// burst of five messages does not carry five clocks. Likes used to live
+    /// here and now live in the chips, where they belong.
     @ViewBuilder private var footer: some View {
         if item.isFailed {
             let reason = item.failureReason ?? "Not delivered"
@@ -209,35 +324,43 @@ private struct BubbleRow: View {
             .accessibilityLabel(reason)
             .accessibilityHint("Double tap Try Again to send it again")
         } else if item.isRunTail {
-            HStack(spacing: 5) {
-                if item.message.likeCount > 0 {
-                    Label("\(item.message.likeCount)", systemImage: "heart.fill")
-                        .labelStyle(.titleAndIcon)
-                        .imageScale(.small)
-                        .accessibilityLabel("\(item.message.likeCount) like\(item.message.likeCount == 1 ? "" : "s")")
-                }
-                Text(Formatters.messageTime(item.message.date))
-                    .accessibilityHidden(true)
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 6)
-            .padding(.top, 1)
+            Text(Formatters.messageTime(item.message.date))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.top, 1)
+                .accessibilityHidden(true)
         }
     }
 
-    @ViewBuilder private var contextMenu: some View {
-        if let text = item.message.text, !text.isEmpty, !item.message.isDeleted {
-            Button {
-                UIPasteboard.general.string = text
-            } label: {
-                Label("Copy", systemImage: "doc.on.doc")
-            }
+    // MARK: The long-press bar
+
+    /// The glyph shown as selected, which is also the one a second tap clears.
+    private var mine: String? {
+        item.reactions.first { $0.reactedByMe }?.glyph
+    }
+
+    /// Everything the context menu used to carry. The reaction bar above it is
+    /// unconditional; these are not.
+    private var pickerActions: [ReactionPicker.Action] {
+        var actions: [ReactionPicker.Action] = []
+        if !item.text.isEmpty, !item.message.isDeleted {
+            actions.append(.init("Copy", symbol: "doc.on.doc") {
+                UIPasteboard.general.string = item.text.plain
+                isPickerPresented = false
+            })
         }
         if item.isFailed {
-            Button(action: onRetry) { Label("Try Again", systemImage: "arrow.clockwise") }
-            Button(role: .destructive, action: onDiscard) { Label("Delete", systemImage: "trash") }
+            actions.append(.init("Try Again", symbol: "arrow.clockwise") {
+                isPickerPresented = false
+                onRetry()
+            })
+            actions.append(.init("Delete", symbol: "trash", isDestructive: true) {
+                isPickerPresented = false
+                onDiscard()
+            })
         }
+        return actions
     }
 
     /// Replies and mentions are structure, not content: they have nothing to
@@ -246,24 +369,17 @@ private struct BubbleRow: View {
         (item.message.attachments ?? []).filter { $0.type != "mentions" && $0.type != "reply" }
     }
 
-    private var accessibilityLabel: String {
+    /// Who and when, and nothing else: the text, the attachments and the chips
+    /// are all children now and speak for themselves. Repeating them here would
+    /// make VoiceOver read every message twice.
+    private var accessibilityContext: String {
         var parts: [String] = []
         parts.append(item.isOwn ? "You said" : "\(item.senderName) said")
-        if item.message.isDeleted {
-            parts.append("this message was deleted")
-        } else if let text = item.message.text, !text.isEmpty {
-            parts.append(text)
-        }
-        if !displayableAttachments.isEmpty {
-            parts.append(displayableAttachments.map { AttachmentStack.noun(for: $0.type) }.joined(separator: ", "))
-        }
+        if item.message.isDeleted { parts.append("this message was deleted") }
         switch item.delivery {
         case .sent: parts.append(Formatters.spokenTimestamp(item.message.date))
         case .pending: parts.append("sending")
         case .failed(let reason): parts.append(reason ?? "not delivered")
-        }
-        if item.message.likeCount > 0 {
-            parts.append("\(item.message.likeCount) like\(item.message.likeCount == 1 ? "" : "s")")
         }
         return parts.joined(separator: ", ")
     }

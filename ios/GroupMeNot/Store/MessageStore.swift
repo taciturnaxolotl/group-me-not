@@ -49,6 +49,7 @@ actor MessageStore {
                     SQLValue(message.pinnedAt),
                     SQLValue(message.parentId),
                     SQLValue(payload),
+                    SQLValue(StoreCoding.encodeIfPresent(message.reactions)),
                 ])
                 written += db.changes
             }
@@ -65,6 +66,71 @@ actor MessageStore {
     @discardableResult
     func upsert(_ message: Message, in conversation: ConversationID) throws -> Int {
         try upsert([message], in: conversation)
+    }
+
+    /// Applies one person's reaction locally, so a tap redraws now and the
+    /// network call becomes a background detail.
+    ///
+    /// Sets `userID`'s reaction on the message to `glyph`, or clears it when
+    /// `glyph` is nil. Whatever they held before is removed first, because
+    /// GroupMe allows one reaction per person per message. The heart is written
+    /// into `favorited_by` rather than the reactions array, matching what the
+    /// server does with the bodyless like this glyph sends.
+    ///
+    /// Deliberately bypasses the freshness guard on ``upsert(_:in:)``: the
+    /// message's `updated_at` does not move when a reaction lands, so a guarded
+    /// write would refuse its own edit. A later server copy overwrites this,
+    /// which is the right outcome.
+    ///
+    /// - Returns: the stored message, or nil if we do not have it.
+    @discardableResult
+    func setReaction(
+        _ glyph: String?,
+        by userID: String,
+        onMessage messageID: String,
+        in conversation: ConversationID
+    ) throws -> Message? {
+        try db.transaction {
+            guard var message = try loadMessage(id: messageID, in: conversation) else { return nil }
+
+            // Clear whatever this person held, in both places it can live.
+            message.favoritedBy = message.favoritedBy?.filter { $0 != userID }
+            message.reactions = message.reactions?.compactMap { reaction in
+                guard let users = reaction.userIds, users.contains(userID) else { return reaction }
+                var updated = reaction
+                updated.userIds = users.filter { $0 != userID }
+                return (updated.userIds?.isEmpty ?? true) ? nil : updated
+            }
+
+            switch glyph {
+            case .none:
+                break
+            case .some(Message.ReactionSummary.heart):
+                message.favoritedBy = (message.favoritedBy ?? []) + [userID]
+            case .some(let glyph):
+                var reactions = message.reactions ?? []
+                if let index = reactions.firstIndex(where: { $0.glyph == glyph }) {
+                    reactions[index].userIds = (reactions[index].userIds ?? []) + [userID]
+                } else {
+                    reactions.append(Message.Reaction(
+                        type: "unicode", code: glyph, userIds: [userID]))
+                }
+                message.reactions = reactions
+            }
+
+            try db.run(
+                """
+                UPDATE messages SET payload = ?, reactions = ?
+                 WHERE conversation_key = ? AND id = ?
+                """,
+                [
+                    SQLValue(try StoreCoding.encode(message)),
+                    SQLValue(StoreCoding.encodeIfPresent(message.reactions)),
+                    SQLValue(conversation.storageKey),
+                    SQLValue(messageID),
+                ])
+            return message
+        }
     }
 
     // MARK: - Reading
@@ -149,8 +215,8 @@ actor MessageStore {
     nonisolated private static let upsertSQL = """
     INSERT INTO messages
         (conversation_key, id, sort_key, source_guid, created_at, updated_at,
-         sender_id, text, system, deleted_at, pinned_at, parent_id, payload)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         sender_id, text, system, deleted_at, pinned_at, parent_id, payload, reactions)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(conversation_key, id) DO UPDATE SET
         source_guid = COALESCE(excluded.source_guid, messages.source_guid),
         updated_at  = excluded.updated_at,
@@ -160,7 +226,8 @@ actor MessageStore {
         deleted_at  = excluded.deleted_at,
         pinned_at   = excluded.pinned_at,
         parent_id   = excluded.parent_id,
-        payload     = excluded.payload
+        payload     = excluded.payload,
+        reactions   = excluded.reactions
      WHERE COALESCE(excluded.updated_at, 0) >= COALESCE(messages.updated_at, 0)
     """
 }

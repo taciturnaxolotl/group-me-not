@@ -39,6 +39,23 @@ final class AppModel {
     /// Network and socket state, for the offline banner.
     let realtime = RealtimeMonitor()
 
+    /// The glyphs the reaction picker offers.
+    ///
+    /// A constant today. The official client refreshes this from a CDN
+    /// document, and `ReactionCatalog.decode(_:)` is ready for the day we do
+    /// too, but a picker must never be empty because a request has not come
+    /// back, so the local list is the source and a refresh would only ever be
+    /// an improvement on it.
+    let reactionCatalog = ReactionCatalog.default
+
+    /// Link previews for the open transcript.
+    ///
+    /// Owned here so the whole app shares one cache and one in-flight table: a
+    /// link quoted in three conversations is fetched once. Memory-only and
+    /// entirely cosmetic, which is why it is the one thing in this class that
+    /// the UI may talk to directly.
+    let previews: LinkPreviewService
+
     // MARK: - The machinery
 
     let store: Store
@@ -91,6 +108,7 @@ final class AppModel {
 
         self.store = resolved
         self.tokens = tokens
+        self.previews = LinkPreviewService(tokenProvider: provider)
         self.client = client
         self.api = api
         self.sends = outbox
@@ -284,6 +302,95 @@ final class AppModel {
         await bayeux.sendTyping(in: conversation)
     }
 
+
+    // MARK: - Reactions
+
+    /// What a tap on a chip or a glyph means.
+    ///
+    /// GroupMe stores one reaction per person per message, so tapping the glyph
+    /// you already hold clears it and tapping a different one swaps it. That
+    /// rule is the UI's to make, which is why it lives here rather than in
+    /// ``GroupMeAPI/setReaction(_:onMessage:in:replacing:)``.
+    func toggleReaction(_ glyph: String, on message: Message) async {
+        guard let me = currentUser?.id, let live = live(message) else { return }
+        await setReaction(live.reaction(by: me) == glyph ? nil : glyph, on: live)
+    }
+
+    /// Put `glyph` on a message, replacing whatever was there.
+    func react(to message: Message, with glyph: String) async {
+        guard let live = live(message) else { return }
+        await setReaction(glyph, on: live)
+    }
+
+    /// Take `glyph` off a message, if that is the one we are holding. Passing a
+    /// glyph somebody else used is a no-op rather than a surprise.
+    func removeReaction(from message: Message, with glyph: String) async {
+        guard let me = currentUser?.id, let live = live(message),
+              live.reaction(by: me) == glyph
+        else { return }
+        await setReaction(nil, on: live)
+    }
+
+    /// Set this user's reaction on a message to exactly `glyph`.
+    ///
+    /// Optimistic, in the order that matters:
+    ///
+    /// 1. The published array, synchronously, before this function ever
+    ///    suspends. The chip is drawn on the next frame, which is the whole
+    ///    point: a tapback that waits for a round trip is a tapback that feels
+    ///    broken.
+    /// 2. The database, so a scroll, a reload or a relaunch agrees with what
+    ///    was just drawn.
+    /// 3. The server, last, and only then.
+    ///
+    /// A failure at step three puts both local copies back. The rollback is
+    /// deliberately to what the user saw before rather than to what the server
+    /// now holds: `setReaction` unlikes before it likes, so a half-failed swap
+    /// can leave the server empty, and guessing at that would be inventing
+    /// state. The next catch-up settles it with the server's own copy, which is
+    /// the only authority worth trusting.
+    private func setReaction(_ glyph: String?, on message: Message) async {
+        guard let conversation = openConversationID, let me = currentUser?.id else { return }
+        guard !message.isDeleted, !message.isSystem else { return }
+
+        let previous = message.reaction(by: me)
+        guard glyph != previous else { return }
+
+        apply(glyph, by: me, to: message.id)
+        _ = try? await store.messages.setReaction(
+            glyph, by: me, onMessage: message.id, in: conversation)
+
+        do {
+            try await api.setReaction(
+                glyph, onMessage: message.id, in: conversation, replacing: previous)
+        } catch {
+            log.notice("""
+                reaction on \(message.id, privacy: .public) did not stick: \
+                \(failureText(error), privacy: .public)
+                """)
+            apply(previous, by: me, to: message.id)
+            _ = try? await store.messages.setReaction(
+                previous, by: me, onMessage: message.id, in: conversation)
+        }
+    }
+
+    /// The transcript's copy of a message, which is the one worth acting on.
+    ///
+    /// The view hands back whatever it drew, and a push may have landed since.
+    /// A miss means the row is a queued send with no server id yet, or the
+    /// conversation moved on, and either way there is nothing to react to.
+    private func live(_ message: Message) -> Message? {
+        messages.first { $0.id == message.id }
+    }
+
+    /// Rewrite one message in the published array. A miss is normal: the
+    /// conversation may have been closed, or the message scrolled out of the
+    /// window, while the request was in the air.
+    private func apply(_ glyph: String?, by userID: String, to messageID: String) {
+        guard let index = messages.firstIndex(where: { $0.id == messageID }) else { return }
+        messages[index] = messages[index].settingReaction(glyph, by: userID)
+    }
+
     // MARK: - Session
 
     /// Adopt a token and prove it works.
@@ -331,6 +438,7 @@ final class AppModel {
             try? await store.conversations.delete(row.id)
         }
         UserDefaults.standard.removeObject(forKey: Self.currentUserKey)
+        await previews.clear()
 
         isSignedIn = false
         currentUser = nil

@@ -72,17 +72,26 @@ nonisolated enum Transcript {
             let opensRun = previous.map { !continuesRun(from: $0, to: message, calendar: calendar) } ?? true
             let closesRun = next.map { !continuesRun(from: message, to: $0, calendar: calendar) } ?? true
 
+            // Parsing and reaction folding happen here, once, and never in a
+            // `body`. This whole function runs off the main actor; see
+            // `ChatView.rebuild()`.
+            let own = isOwn(message, myID: myID)
+            let text = MessageTextParser.parse(message)
+
             rows.append(.message(MessageDisplay(
                 // Already unique: history carries a server id, and an echo
                 // carries its guid until the server assigns one.
                 id: message.id,
                 message: message,
-                isOwn: isOwn(message, myID: myID),
+                isOwn: own,
                 senderName: message.name ?? "Someone",
                 senderAvatarURL: message.avatarUrl,
                 showsSender: opensRun,
                 isRunTail: closesRun,
-                delivery: delivery
+                delivery: delivery,
+                text: text,
+                styledText: MessageStyling.style(text, isOwn: own),
+                reactions: message.reactionSummaries(currentUserID: myID)
             )))
         }
         return rows
@@ -125,6 +134,7 @@ struct ChatView: View {
     @Environment(AppModel.self) private var model
 
     @State private var rows: [TranscriptRow] = []
+    @State private var rebuildTask: Task<Void, Never>?
     @State private var draft = ""
     @State private var isLoadingOlder = false
     @FocusState private var composerFocused: Bool
@@ -146,6 +156,9 @@ struct ChatView: View {
                         case .message(let item):
                             MessageRow(
                                 item: item,
+                                catalog: model.reactionCatalog,
+                                previews: model.previews,
+                                onReact: { glyph in react(glyph, on: item) },
                                 onRetry: { retry(item) },
                                 onDiscard: { discard(item) }
                             )
@@ -183,7 +196,10 @@ struct ChatView: View {
         // `openConversation` already clears the badge; opening a conversation is
         // reading it.
         .task { await model.openConversation(conversation.id) }
-        .onDisappear { model.closeConversation() }
+        .onDisappear {
+            rebuildTask?.cancel()
+            model.closeConversation()
+        }
         .onChange(of: model.messages, initial: true) {
             rebuild()
             // Anything that lands while the conversation is on screen has, by
@@ -303,6 +319,14 @@ struct ChatView: View {
         Task { await model.send(text) }
     }
 
+    /// A tapped chip or glyph. The model works out whether that adds, swaps or
+    /// clears, and it does so optimistically, so the chip is redrawn from the
+    /// next `model.messages` change rather than from anything this view keeps.
+    private func react(_ glyph: String, on item: MessageDisplay) {
+        guard item.canReact else { return }
+        Task { await model.toggleReaction(glyph, on: item.message) }
+    }
+
     private func retry(_ item: MessageDisplay) {
         guard let entry = outboxEntry(for: item) else { return }
         Task { await model.retry(entry) }
@@ -358,12 +382,27 @@ struct ChatView: View {
 
     /// Rebuilt on change rather than computed in `body`, so scrolling never
     /// pays for the grouping pass.
+    ///
+    /// And rebuilt *off* the main actor, because the pass now parses every
+    /// message's links and mentions. Two hundred rows of `NSDataDetector` is
+    /// not something to run between two frames. The inputs are all value types
+    /// and the output is one array, so the hop costs a copy and nothing else.
+    ///
+    /// Cancelling the previous build matters more than it looks: a catch-up
+    /// writes several times a second, and only the last answer is wanted.
     private func rebuild() {
-        rows = Transcript.rows(
-            messages: model.messages,
-            outbox: model.outbox,
-            currentUser: model.currentUser
-        )
+        let messages = model.messages
+        let outbox = model.outbox
+        let currentUser = model.currentUser
+
+        rebuildTask?.cancel()
+        rebuildTask = Task {
+            let built = await Task.detached(priority: .userInitiated) {
+                Transcript.rows(messages: messages, outbox: outbox, currentUser: currentUser)
+            }.value
+            guard !Task.isCancelled else { return }
+            rows = built
+        }
     }
 }
 

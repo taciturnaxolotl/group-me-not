@@ -10,7 +10,7 @@ import OSLog
 /// `Message` never needs a migration.
 nonisolated enum Schema {
     /// Bump this and add a `case` to `apply(step:)` for every change.
-    static let version: Int32 = 1
+    static let version: Int32 = 2
 
     private static let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "schema")
 
@@ -48,6 +48,7 @@ nonisolated enum Schema {
     private static func apply(step: Int32, to db: Database) throws {
         switch step {
         case 1: try db.execute(initial)
+        case 2: try db.execute(addReactions)
         default:
             throw SQLError(code: 1, message: "no migration defined for schema \(step)", sql: nil)
         }
@@ -154,6 +155,20 @@ nonisolated enum Schema {
 
     -- The composer's query: what is still in flight in this conversation.
     CREATE INDEX outbox_conversation ON outbox(conversation_key, created_at);
+    """
+
+    // MARK: - Version 2
+
+    /// Reactions, as the JSON array the wire sends.
+    ///
+    /// A column rather than a table: a message's reactions are only ever read
+    /// with the message, never joined or aggregated across one, so a side table
+    /// would buy a join and nothing else. `payload` already carries the same
+    /// array; this column exists so a reaction can be rewritten in place when a
+    /// push event or a local toggle changes one, without decoding and
+    /// re-encoding the whole message.
+    private static let addReactions = """
+    ALTER TABLE messages ADD COLUMN reactions BLOB;
     """
 }
 
