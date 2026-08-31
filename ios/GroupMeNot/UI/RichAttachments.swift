@@ -173,9 +173,11 @@ struct PollCard: View {
 
     @Environment(AppModel.self) private var model
 
-    private var poll: Poll? {
+    private var box: PollBox? {
         attachment.pollId.flatMap { model.polls[$0] }
     }
+
+    private var poll: Poll? { box?.data }
 
     var body: some View {
         SwiftUI.Group {
@@ -216,9 +218,9 @@ struct PollCard: View {
     }
 
     private func optionRow(_ option: Poll.Option, in poll: Poll) -> some View {
-        let mine = isMine(option, in: poll)
-        let votes = option.votes
-        let share = poll.totalVotes > 0 ? Double(votes ?? 0) / Double(poll.totalVotes) : 0
+        let mine = isMine(option)
+        let votes = option.tally
+        let share = poll.totalVotes > 0 ? Double(votes) / Double(poll.totalVotes) : 0
         return Button {
             choose(option, in: poll)
         } label: {
@@ -230,32 +232,25 @@ struct PollCard: View {
                         .font(.caption)
                         .lineLimit(2)
                     Spacer(minLength: 4)
-                    // Only where there is a number. An anonymous poll sends no
-                    // counts, and drawing "0" against every option would be
-                    // reporting a result rather than withholding one.
-                    if let votes {
-                        Text("\(votes)")
-                            .font(.caption.monospacedDigit())
-                    }
+                    Text("\(votes)")
+                        .font(.caption.monospacedDigit())
                 }
-                if poll.showsResults {
-                    // A bar rather than a percentage. The question a poll answers
-                    // is which one is winning, and a row of numbers makes the
-                    // reader work that out for themselves.
-                    GeometryReader { geo in
-                        Capsule()
-                            .fill(ink.opacity(mine ? 0.55 : 0.25))
-                            .frame(width: max(2, geo.size.width * share))
-                    }
-                    .frame(height: 4)
+                // A bar rather than a percentage. The question a poll answers is
+                // which one is winning, and a row of numbers makes the reader
+                // work that out for themselves.
+                GeometryReader { geo in
+                    Capsule()
+                        .fill(ink.opacity(mine ? 0.55 : 0.25))
+                        .frame(width: max(2, geo.size.width * share))
                 }
+                .frame(height: 4)
             }
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
         .disabled(!poll.isOpen)
         .accessibilityLabel(option.title ?? "Option")
-        .accessibilityValue(votes.map { "\($0) vote\($0 == 1 ? "" : "s")" } ?? "")
+        .accessibilityValue("\(votes) vote\(votes == 1 ? "" : "s")")
         .accessibilityAddTraits(mine ? [.isButton, .isSelected] : .isButton)
     }
 
@@ -265,20 +260,24 @@ struct PollCard: View {
     /// remembered by the model and answers for it. That is the whole truth
     /// available: nothing can show a vote cast from another device on a poll the
     /// server declines to attribute.
-    private func isMine(_ option: Poll.Option, in poll: Poll) -> Bool {
-        if poll.chose(option, as: model.currentUser?.id) { return true }
-        guard let pollID = attachment.pollId, let id = option.id else { return false }
-        return model.myVotes[pollID]?.contains(id) ?? false
+    /// Whether this option is one of ours.
+    ///
+    /// Straight from `user_votes`, which the server sends for every poll
+    /// including the anonymous ones. An earlier version of this remembered votes
+    /// locally because the poll body appeared not to say — it does say, one
+    /// level up from where the poll itself lives.
+    private func isMine(_ option: Poll.Option) -> Bool {
+        guard let id = option.id else { return false }
+        return box?.chosen.contains(id) ?? false
     }
 
     private func footnote(for poll: Poll) -> String {
-        var parts: [String] = []
-        if poll.showsResults {
-            let total = poll.totalVotes
-            parts.append(total == 1 ? "1 vote" : "\(total) votes")
-        } else {
-            parts.append(poll.isOpen ? "Results hidden" : "Anonymous")
-        }
+        let total = poll.totalVotes
+        var parts = [total == 1 ? "1 vote" : "\(total) votes"]
+        // Worth saying, because it changes what a vote means to the person
+        // casting it. It does not change what is shown: anonymous hides who
+        // voted, never how many did.
+        if poll.isAnonymous { parts.append("Anonymous") }
         if !poll.isOpen {
             parts.append("Closed")
         } else if let closes = poll.closesAt, closes > .now {
@@ -298,7 +297,7 @@ struct PollCard: View {
         var chosen: [String]
         if poll.allowsMultiple {
             chosen = (poll.options ?? [])
-                .filter { isMine($0, in: poll) }
+                .filter { isMine($0) }
                 .compactMap(\.id)
             if let index = chosen.firstIndex(of: optionID) {
                 chosen.remove(at: index)
@@ -306,7 +305,7 @@ struct PollCard: View {
                 chosen.append(optionID)
             }
         } else {
-            chosen = isMine(option, in: poll) ? [] : [optionID]
+            chosen = isMine(option) ? [] : [optionID]
         }
         Task { await model.vote(chosen, in: pollID) }
     }

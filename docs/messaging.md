@@ -261,28 +261,42 @@ A `poll` attachment carries `poll_id` and nothing else. The poll itself is fetch
 
 ```
 GET  https://api.groupme.com/v3/poll/{groupId}/{pollId}
-GET  https://api.groupme.com/v3/poll/{groupId}                    # all, + continuation_token
-POST https://api.groupme.com/v3/poll/{groupId}/{pollId}/{optionId} # vote, single
-POST https://api.groupme.com/v3/poll/{groupId}/{pollId}            # vote, multi
+GET  https://api.groupme.com/v3/poll/{groupId}                     # all, + continuation_token
+POST https://api.groupme.com/v3/poll/{groupId}                     # create
+POST https://api.groupme.com/v3/poll/{groupId}/{pollId}/{optionId} # vote, single-type only
+POST https://api.groupme.com/v3/poll/{groupId}/{pollId}            # vote, multi-type; { "votes": [...] }
 POST https://api.groupme.com/v3/poll/{groupId}/{pollId}/end
 ```
 
 **The body is wrapped twice.** One poll is `response.poll.data`; the list is
-`response.polls[].data`. Not `response.poll`.
+`response.polls[].data`.
 
 ```json
-{ "id": "1788215981340302", "subject": "…", "owner_id": "…", "conversation_id": "…",
-  "created_at": 1788215981, "expiration": 1788302700, "last_modified": 1788215981,
-  "status": "active", "type": "multi", "visibility": "anonymous",
-  "options": [ { "id": "1", "title": "…" }, { "id": "2", "title": "…" } ] }
+{ "id": "1788217171418764", "subject": "…", "owner_id": "…", "conversation_id": "…",
+  "created_at": 1788217171, "expiration": 1788220771, "last_modified": 1788217193,
+  "status": "active", "type": "multi", "visibility": "public",
+  "options": [ { "id": "1", "title": "alpha", "votes": 1, "voter_ids": ["131883422"] },
+               { "id": "2", "title": "beta" } ] }
 ```
 
-**Options carry no vote counts when `visibility` is `anonymous`,** which is the default. The
-fields are absent rather than zero, and a client that reads them as zero draws a result the
-server deliberately withheld. There is also no way to tell which option *you* picked on such a
-poll: the server does not attribute votes, so a vote cast has to be remembered locally or not
-known at all.
+Four things a client has to get right:
 
-`type` is `single` or `multi`. `status` is `active` while open.
+- **`user_votes` is a sibling of `data`, not a field of it** — `response.poll.user_votes`. It is
+  what this account chose, it is present on anonymous polls too, and it means a client never
+  has to remember its own vote.
+- **A missing `votes` means zero.** An option nobody picked omits the field entirely.
+- **`anonymous` hides *who*, not *how many*.** `voter_ids` is what disappears; the counts stay.
+- **The two vote routes are not interchangeable.** The per-option route answers `500 Cast vote
+  error` on a `multi` poll. Choose by the poll's `type`, not by how many options are being sent.
 
-Measured 2026-08-31 against a live poll.
+The multi body key is `votes`. Sending `option_ids` earns `400` with
+`{"errors": {"votes": "is required"}}`, which is the server naming it for you.
+
+`status` is `active` while open and `past` once ended. `expiration` is epoch seconds; a
+ten-minute window was rejected with `400` and an hour was accepted, so there is a minimum
+somewhere between.
+
+Create takes `{subject, options: [{title}], expiration, type, visibility}` and answers `201`
+with the poll *and* the announcing message.
+
+Measured 2026-08-31 against polls created, voted in, and ended for the purpose.

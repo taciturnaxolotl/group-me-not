@@ -163,43 +163,44 @@ actor GroupMeAPI {
 
     // MARK: - Polls
 
-    /// One poll.
+    /// One poll, with what this account voted for.
     ///
     /// Polls live on their own routes rather than inside the message, so a
     /// message carrying `poll_id` is an invitation to fetch rather than the
-    /// thing itself. Answers nil rather than throwing when the shape does not
-    /// decode, because the caller's fallback — the chip that was there before —
-    /// is a perfectly good thing to keep showing.
-    func poll(_ pollID: String, in groupID: String) async -> Poll? {
+    /// thing itself.
+    func poll(_ pollID: String, in groupID: String) async -> PollBox? {
         let response: SinglePollResponse? = try? await client.get(
             .v3, "/poll/\(groupID)/\(pollID)", retry: .background)
-        return response?.poll?.data
+        return response?.poll
     }
 
-    /// Vote, or change a vote.
+    /// Vote, change a vote, or withdraw one.
     ///
-    /// One option goes to the single route; several go to the multi route as a
-    /// body, which is also how a vote is *withdrawn*: an empty list means no
-    /// choice at all.
+    /// Two routes, and which one depends on the poll rather than on how many
+    /// options are being sent. A `single` poll takes the option in the path; a
+    /// `multi` poll takes a `votes` array in the body and answers `500` to the
+    /// per-option route. Both measured, including the body key, which the server
+    /// named itself by refusing `option_ids` with `{"votes": "is required"}`.
     ///
-    /// The multi body's key is the one part of this not measured against a live
-    /// call, since the only way to measure it is to vote in somebody's poll.
+    /// An empty array withdraws.
     @discardableResult
-    func vote(_ optionIDs: [String], in pollID: String, groupID: String) async -> Poll? {
-        if optionIDs.count == 1, let only = optionIDs.first {
+    func vote(
+        _ optionIDs: [String], in pollID: String, groupID: String, multiple: Bool
+    ) async -> PollBox? {
+        if !multiple, let only = optionIDs.first, optionIDs.count == 1 {
             let response: SinglePollResponse? = try? await client.post(
                 .v3, "/poll/\(groupID)/\(pollID)/\(only)",
                 body: Optional<Discard>.none, retry: .interactive)
-            return response?.poll?.data
+            return response?.poll
         }
         let response: SinglePollResponse? = try? await client.post(
             .v3, "/poll/\(groupID)/\(pollID)",
-            body: MultiVote(optionIds: optionIDs), retry: .interactive)
-        return response?.poll?.data
+            body: MultiVote(votes: optionIDs), retry: .interactive)
+        return response?.poll
     }
 
     private nonisolated struct MultiVote: Encodable, Sendable {
-        var optionIds: [String]
+        var votes: [String]
     }
 
     // MARK: - Requests

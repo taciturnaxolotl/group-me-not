@@ -627,13 +627,7 @@ final class AppModel {
     /// In memory, like quoted originals and for the same reason: a tally is true
     /// for as long as nobody votes, which is not long enough to be worth a
     /// column.
-    private(set) var polls: [String: Poll] = [:]
-    /// What this device voted for, by poll id.
-    ///
-    /// An anonymous poll does not report who chose what, so this is the only
-    /// record that a vote was cast at all. In memory and only in memory: it is a
-    /// note about what just happened, not a claim about the poll.
-    private(set) var myVotes: [String: Set<String>] = [:]
+    private(set) var polls: [String: PollBox] = [:]
 
     /// Fetch a poll the transcript is about to draw. Once per poll per session
     /// unless a vote refreshes it.
@@ -641,8 +635,8 @@ final class AppModel {
         guard polls[pollID] == nil,
               case .group(let groupID)? = openConversationID
         else { return }
-        guard let poll = await api.poll(pollID, in: groupID) else { return }
-        polls[pollID] = poll
+        guard let box = await api.poll(pollID, in: groupID) else { return }
+        polls[pollID] = box
     }
 
     /// Cast, change, or withdraw a vote.
@@ -652,11 +646,10 @@ final class AppModel {
     /// time, and merging two views of it would invent a number nobody holds.
     func vote(_ optionIDs: [String], in pollID: String) async {
         guard case .group(let groupID)? = openConversationID else { return }
-        // Recorded before the round trip, because the tick beside an option is
-        // the entire feedback for the tap and an anonymous poll will never tell
-        // us afterwards.
-        myVotes[pollID] = Set(optionIDs)
-        guard let updated = await api.vote(optionIDs, in: pollID, groupID: groupID) else { return }
+        let multiple = polls[pollID]?.data?.allowsMultiple ?? false
+        guard let updated = await api.vote(
+            optionIDs, in: pollID, groupID: groupID, multiple: multiple)
+        else { return }
         polls[pollID] = updated
     }
 
