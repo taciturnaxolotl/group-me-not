@@ -138,16 +138,25 @@ actor GroupMeAPI {
         ]
 
         let page: [Message]
-        switch conversation {
-        case .group(let groupID):
-            let response: GroupMessagesPage = try await client.get(
-                .v3, "/groups/\(groupID)/messages", query: query, retry: retry)
-            page = response.messages ?? []
-        case .direct(let otherUserID):
-            query["other_user_id"] = .some(otherUserID)
-            let response: DirectMessagesPage = try await client.get(
-                .v3, "/direct_messages", query: query, retry: retry)
-            page = response.directMessages ?? []
+        do {
+            switch conversation {
+            case .group(let groupID):
+                let response: GroupMessagesPage = try await client.get(
+                    .v3, "/groups/\(groupID)/messages", query: query, retry: retry)
+                page = response.messages ?? []
+            case .direct(let otherUserID):
+                query["other_user_id"] = .some(otherUserID)
+                let response: DirectMessagesPage = try await client.get(
+                    .v3, "/direct_messages", query: query, retry: retry)
+                page = response.directMessages ?? []
+            }
+        } catch APIError.noContent {
+            // "There are no messages in that range", which is the answer every
+            // caller here is already prepared for. Paging forward stops; paging
+            // back has reached the beginning. Neither is a failure, and treating
+            // it as one is what left a freshly-emptied app with no history at
+            // all: every conversation's first page threw before it stored a row.
+            return []
         }
         return page.sorted { Message.isNewer($1.id, than: $0.id) }
     }

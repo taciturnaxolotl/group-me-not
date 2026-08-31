@@ -157,6 +157,19 @@ actor APIClient {
         }
 
         let http = response as! HTTPURLResponse
+        // Answered, with nothing in it. GroupMe signals "no results" this way
+        // rather than with an empty collection: a page of messages past either
+        // end of a conversation is a `304`, and some endpoints use `204`. Both
+        // arrive with no body, so this has to be settled before either the
+        // status check or the decoder gets a look, or an ordinary answer is
+        // reported as a failure.
+        // An empty body only means "nothing" when the request succeeded. A 500
+        // with no body is still a 500, and calling it "no content" would make it
+        // unretryable.
+        if http.statusCode == 304 || http.statusCode == 204
+            || ((200...299).contains(http.statusCode) && data.isEmpty) {
+            throw APIError.noContent(status: http.statusCode)
+        }
         guard (200...299).contains(http.statusCode) else {
             let meta = (try? decoder.decode(Envelope<Discard>.self, from: data))?.meta
             let after = (http.value(forHTTPHeaderField: "Retry-After")).flatMap(Self.parseRetryAfter)

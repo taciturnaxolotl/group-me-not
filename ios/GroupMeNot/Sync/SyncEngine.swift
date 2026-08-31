@@ -239,7 +239,7 @@ actor SyncEngine {
             let anchor = try await healableAnchor(conversation)
             try await fetchHistory(conversation, after: anchor, retry: .interactive)
         } catch {
-            log.error("catch-up for \(conversation.storageKey, privacy: .public) failed: \(failureText(error), privacy: .public)")
+            log.error("catch-up for \(conversation.storageKey, privacy: .public) failed: \(diagnosticText(error), privacy: .public)")
         }
         await roster
     }
@@ -262,7 +262,7 @@ actor SyncEngine {
             try await store.conversations.replaceMembers(roster, in: conversation)
             continuation.yield(.conversations)
         } catch {
-            log.notice("roster for \(groupID, privacy: .public) unavailable: \(failureText(error), privacy: .public)")
+            log.notice("roster for \(groupID, privacy: .public) unavailable: \(diagnosticText(error), privacy: .public)")
         }
     }
 
@@ -463,7 +463,7 @@ actor SyncEngine {
         } catch {
             // One conversation failing is not the sync failing. The others still
             // land, and this one is picked up by the next loop.
-            log.error("catch-up for \(plan.conversation.storageKey, privacy: .public) failed: \(failureText(error), privacy: .public)")
+            log.error("catch-up for \(plan.conversation.storageKey, privacy: .public) failed: \(diagnosticText(error), privacy: .public)")
         }
     }
 
@@ -578,7 +578,7 @@ actor SyncEngine {
             }
             continuation.yield(.conversations)
         } catch {
-            log.notice("read receipts unavailable: \(failureText(error), privacy: .public)")
+            log.notice("read receipts unavailable: \(diagnosticText(error), privacy: .public)")
         }
     }
 
@@ -655,7 +655,7 @@ actor SyncEngine {
                 continuation.yield(.messages(conversation))
                 continuation.yield(.conversations)
             } catch {
-                log.error("could not store pushed message: \(failureText(error), privacy: .public)")
+                log.error("could not store pushed message: \(diagnosticText(error), privacy: .public)")
             }
 
         case .liked(let like), .unliked(let like):
@@ -685,7 +685,7 @@ actor SyncEngine {
                 else { return }
                 continuation.yield(.messages(conversation))
             } catch {
-                log.error("could not store reaction: \(failureText(error), privacy: .public)")
+                log.error("could not store reaction: \(diagnosticText(error), privacy: .public)")
             }
 
         case .typing, .unrecognised:
@@ -720,7 +720,7 @@ actor SyncEngine {
             try await store.conversations.setLikeIcon(icon, for: conversation)
             continuation.yield(.conversations)
         } catch {
-            log.error("could not store like icon: \(failureText(error), privacy: .public)")
+            log.error("could not store like icon: \(diagnosticText(error), privacy: .public)")
         }
     }
 

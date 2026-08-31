@@ -411,6 +411,11 @@ actor Outbox {
         case .decoding:
             // The message may well have landed; a resend is a 409, which is free.
             return .retry
+        case .noContent:
+            // The server took it and said nothing back. Same reasoning as a
+            // decoding failure: the safe move is to resend, because the guid
+            // makes a duplicate impossible.
+            return .retry
         case .http(let status, _, _):
             switch status {
             case 401, 403: return .waitForCredentials

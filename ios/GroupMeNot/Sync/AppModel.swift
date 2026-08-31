@@ -259,7 +259,7 @@ final class AppModel {
             // window is put back and the next scroll tries again.
             window -= Self.transcriptPage
             olderPageFailed = true
-            log.notice("could not page back in \(conversation.storageKey, privacy: .public): \(failureText(error), privacy: .public)")
+            log.notice("could not page back in \(conversation.storageKey, privacy: .public): \(diagnosticText(error), privacy: .public)")
             return
         }
 
@@ -388,7 +388,7 @@ final class AppModel {
         } catch {
             log.notice("""
                 edit of \(message.id, privacy: .public) did not stick: \
-                \(failureText(error), privacy: .public)
+                \(diagnosticText(error), privacy: .public)
                 """)
             await applyEdit(text: originalText, stamp: originalStamp,
                             to: message.id, in: conversation)
@@ -495,14 +495,14 @@ final class AppModel {
         } catch let error as APIError where error.isRetryable {
             log.notice("""
                 reaction on \(message.id, privacy: .public) queued: \
-                \(failureText(error), privacy: .public)
+                \(diagnosticText(error), privacy: .public)
                 """)
             _ = try? await store.pendingReactions.upsert(
                 glyph, onMessage: message.id, in: conversation, replacing: serverHolds)
         } catch {
             log.notice("""
                 reaction on \(message.id, privacy: .public) refused: \
-                \(failureText(error), privacy: .public)
+                \(diagnosticText(error), privacy: .public)
                 """)
             try? await store.pendingReactions.remove(message.id)
             apply(serverHolds, by: me, to: message.id)
@@ -545,7 +545,7 @@ final class AppModel {
                     row.messageID, retryAt: Date().addingTimeInterval(max(wait, 1)))
                 log.notice("""
                     queued reaction on \(row.messageID, privacy: .public) still waiting: \
-                    \(failureText(error), privacy: .public)
+                    \(diagnosticText(error), privacy: .public)
                     """)
 
             } catch {
@@ -556,7 +556,7 @@ final class AppModel {
                 await commit(row.previous, by: me, to: row.messageID, in: row.conversation)
                 log.error("""
                     queued reaction on \(row.messageID, privacy: .public) rejected: \
-                    \(failureText(error), privacy: .public)
+                    \(diagnosticText(error), privacy: .public)
                     """)
             }
         }

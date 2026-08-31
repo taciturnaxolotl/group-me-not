@@ -25,6 +25,14 @@ nonisolated enum APIError: Error, Sendable {
     case http(status: Int, meta: Meta?, retryAfter: TimeInterval?)
     /// 2xx but the body did not decode.
     case decoding(String)
+    /// The request succeeded and there is nothing in it.
+    ///
+    /// Not a failure, and the reason it needs a case of its own: GroupMe says
+    /// "no results" with a status rather than with an empty collection. A page
+    /// of messages past either end of a conversation comes back `304`, and some
+    /// endpoints answer `204`. Both carry no body, so the decoder would throw
+    /// and the caller would log a failure over an ordinary, correct answer.
+    case noContent(status: Int)
     /// The caller has no token.
     case unauthenticated
 
@@ -32,7 +40,7 @@ nonisolated enum APIError: Error, Sendable {
         switch self {
         case .transport: true
         case .http(let status, _, _): status == 408 || status == 429 || (500...599).contains(status)
-        case .decoding, .unauthenticated: false
+        case .decoding, .noContent, .unauthenticated: false
         }
     }
 
@@ -70,6 +78,25 @@ nonisolated func failureText(_ error: Error) -> String {
     case .transport: return "offline"
     case .http(let status, _, _): return api.serverMessage ?? "HTTP \(status)"
     case .decoding: return "unreadable response"
+    case .noContent: return "nothing there"
     case .unauthenticated: return "signed out"
+    }
+}
+
+/// The same failure, with the detail a log wants and a banner does not.
+///
+/// ``failureText(_:)`` deliberately throws away a decoding error's contents,
+/// which is right in front of a person and wrong in a log: "unreadable
+/// response" names the symptom and hides the one fact that would explain it.
+nonisolated func diagnosticText(_ error: Error) -> String {
+    guard let api = error as? APIError else { return "\(error)" }
+    switch api {
+    case .transport(let urlError): return "transport \(urlError.code.rawValue): \(urlError.localizedDescription)"
+    case .http(let status, let meta, _):
+        let detail = meta?.errors?.joined(separator: ", ") ?? "no meta"
+        return "HTTP \(status) (\(detail))"
+    case .decoding(let detail): return "undecodable: \(detail)"
+    case .noContent(let status): return "no content (HTTP \(status))"
+    case .unauthenticated: return "no token"
     }
 }
