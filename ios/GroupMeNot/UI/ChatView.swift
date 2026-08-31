@@ -250,8 +250,10 @@ struct ChatView: View {
     /// and it gives the several callers one place to land.
     @State private var bottomRequest = 0
 
-    /// The scroll view's position, held so this view can move it.
-    @State private var scrollPosition = ScrollPosition()
+    /// The view every "take me back down" scrolls to. Deliberately not part of
+    /// the lazy stack; see ``transcript``.
+    private let bottomAnchor = "transcript.bottom"
+
     @State private var isAttachmentPickerPresented = false
     /// Media the user picked but has not sent yet, shown above the field.
     @State private var staged: [PickedMedia] = []
@@ -307,29 +309,27 @@ struct ChatView: View {
     // MARK: Transcript
 
     private var transcript: some View {
-        // Two mechanisms, because they are good at different things. The reader
-        // scrolls to a *view*, which is what the opening jump needs: it lands on
-        // a specific message. The position scrolls to an *edge*, which is what
-        // the way back down needs, and is the only one of the two that works
-        // when the foot of a `LazyVStack` has not been realised.
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 0) {
-                    olderHeader
-                    messageRows
-                    typingRow
+                // The foot lives outside the lazy stack, and that placement is
+                // the whole reason the way back down works. A `LazyVStack` only
+                // builds what is near the viewport, so its last child does not
+                // exist while the reader is up in the history, and
+                // `proxy.scrollTo` on a view that is not in the tree does
+                // nothing at all. Which is exactly when the jump button is on
+                // screen. A plain `VStack` builds both its children immediately,
+                // so the anchor is always there to be scrolled to, and the rows
+                // above it stay as lazy as they ever were.
+                VStack(spacing: 0) {
+                    LazyVStack(spacing: 0) {
+                        olderHeader
+                        messageRows
+                        typingRow
+                    }
                     bottomSpacer
                 }
                 .padding(.horizontal, 10)
             }
-            // The way back down. This used to be `proxy.scrollTo(bottomAnchor)`,
-            // and the anchor was the foot of a `LazyVStack`, which does not exist
-            // while the reader is up in the history. Which is exactly when the jump
-            // button is on screen: the one control whose whole job is "take me back
-            // down" was the one that could never do it. An edge asks the scroll view
-            // about its content rather than about its children, so there is nothing
-            // left to be unrealised.
-            .scrollPosition($scrollPosition)
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             // Deliberately optional, and `nil` nearly all the time. See
             // `sizeChangeAnchor`.
@@ -363,7 +363,7 @@ struct ChatView: View {
             // these can overlap during a catch-up.
             .onChange(of: bottomRequest) {
                 withAnimation(.easeOut(duration: 0.22)) {
-                    scrollPosition.scrollTo(edge: .bottom)
+                    proxy.scrollTo(bottomAnchor, anchor: .bottom)
                 }
             }
             // Not animated: this is where the conversation opens, not a
@@ -480,6 +480,7 @@ struct ChatView: View {
         Color.clear
             .frame(height: Self.footHeight)
             .allowsHitTesting(false)
+            .id(bottomAnchor)
             .onScrollVisibilityChange(threshold: 0.01, footVisibilityChanged)
     }
 
