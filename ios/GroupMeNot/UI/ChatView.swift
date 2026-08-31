@@ -976,8 +976,8 @@ struct ChatView: View {
                     .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 3)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 5)
             .glassEffect(.regular.interactive(), in: .capsule)
         }
         // On the pieces, not on the whole stack. The gap between the face and
