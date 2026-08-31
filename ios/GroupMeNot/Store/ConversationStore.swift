@@ -45,6 +45,17 @@ nonisolated struct ConversationRow: Identifiable, Hashable, Sendable {
     var postingPolicy: PostingPolicy = .everyone
     /// The group's join link, for the share sheet and the code.
     var shareURL: String?
+    /// What the group says about itself.
+    var summary: String?
+    /// The ceiling on membership, beside `memberCount`.
+    var maxMembers: Int?
+    /// Who made it, for marking the owner when roles are missing.
+    var creatorUserID: String?
+    var createdAt: Date?
+    /// Nil when the server has not said. Different from false.
+    var requiresApproval: Bool?
+    /// Asked of anyone joining through the link.
+    var joinQuestion: String?
 
     var isGroup: Bool { id.isGroup }
 
@@ -153,6 +164,12 @@ actor ConversationStore {
             SQLValue(row.parentID),
             SQLValue(row.postingPolicy.rawValue),
             SQLValue(row.shareURL),
+            SQLValue(row.summary),
+            SQLValue(row.maxMembers),
+            SQLValue(row.creatorUserID),
+            SQLValue(row.createdAt.map { Int64($0.timeIntervalSince1970) }),
+            SQLValue(row.requiresApproval.map { $0 ? 1 : 0 }),
+            SQLValue(row.joinQuestion),
         ])
     }
 
@@ -237,17 +254,41 @@ actor ConversationStore {
         )
     }
 
-    /// Records a group's join link without touching anything else on the row.
+    /// Records what a group says about itself, and nothing else on the row.
     ///
     /// Targeted for the same reason ``setLikeIcon(_:for:)`` is: the caller is a
     /// single-group fetch made while a conversation is open, and writing the
     /// whole row from there would also write the server's `unread_count`, which
-    /// is stale by definition at that moment.
-    func setShareURL(_ url: String?, for conversation: ConversationID) throws {
-        guard let url, !url.isEmpty else { return }
+    /// is stale by definition at that moment and would relight a badge the
+    /// reader has just cleared.
+    ///
+    /// Every column is `COALESCE`d, so a fetch that omits a field leaves what
+    /// was already known rather than erasing it.
+    func setProfile(from group: Group, for conversation: ConversationID) throws {
         try db.run(
-            "UPDATE conversations SET share_url = ? WHERE key = ?",
-            [SQLValue(url), SQLValue(conversation.storageKey)]
+            """
+            UPDATE conversations
+               SET share_url        = COALESCE(?, share_url),
+                   description      = COALESCE(?, description),
+                   max_members      = COALESCE(?, max_members),
+                   creator_user_id  = COALESCE(?, creator_user_id),
+                   created_at       = COALESCE(?, created_at),
+                   requires_approval = COALESCE(?, requires_approval),
+                   join_question    = COALESCE(?, join_question),
+                   member_count     = COALESCE(?, member_count)
+             WHERE key = ?
+            """,
+            [
+                SQLValue(group.shareUrl),
+                SQLValue(group.description?.isEmpty == true ? nil : group.description),
+                SQLValue(group.maxMembers),
+                SQLValue(group.creatorUserId),
+                SQLValue(group.createdAt.map { Int64($0) }),
+                SQLValue(group.requiresApproval.map { $0 ? 1 : 0 }),
+                SQLValue(group.showJoinQuestion == true ? group.joinQuestion?.text : nil),
+                SQLValue(group.membersCount ?? group.members?.count),
+                SQLValue(conversation.storageKey),
+            ]
         )
     }
 
@@ -391,7 +432,8 @@ actor ConversationStore {
     kind, remote_id, name, avatar_url, last_message_id, last_message_at,
     last_message_preview, last_message_sender, unread_count, last_read_message_id,
     muted_until, member_count, placeholder, message_edit_period, message_deletion_period,
-    like_icon, parent_id, posting_policy, share_url
+    like_icon, parent_id, posting_policy, share_url,
+    description, max_members, creator_user_id, created_at, requires_approval, join_question
     """
 
     nonisolated private static func decode(_ row: Row) throws -> ConversationRow {
@@ -417,7 +459,13 @@ actor ConversationStore {
             isPlaceholder: row.bool(12),
             parentID: row.stringOrNil(16),
             postingPolicy: PostingPolicy(rawValue: row.int(17)) ?? .everyone,
-            shareURL: row.stringOrNil(18)
+            shareURL: row.stringOrNil(18),
+            summary: row.stringOrNil(19),
+            maxMembers: row.intOrNil(20),
+            creatorUserID: row.stringOrNil(21),
+            createdAt: row.dateOrNil(22),
+            requiresApproval: row.intOrNil(23).map { $0 != 0 },
+            joinQuestion: row.stringOrNil(24)
         )
     }
 
@@ -485,8 +533,9 @@ actor ConversationStore {
          last_message_at, last_message_preview, last_message_sender, unread_count,
          last_read_message_id, muted_until, member_count, placeholder, synced_at,
          message_edit_period, message_deletion_period, like_icon, parent_id, posting_policy,
-         share_url)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         share_url, description, max_members, creator_user_id, created_at,
+         requires_approval, join_question)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(key) DO UPDATE SET
         name       = COALESCE(excluded.name, conversations.name),
         avatar_url = COALESCE(excluded.avatar_url, conversations.avatar_url),
@@ -538,7 +587,13 @@ actor ConversationStore {
         like_icon = COALESCE(excluded.like_icon, conversations.like_icon),
         parent_id = COALESCE(excluded.parent_id, conversations.parent_id),
         posting_policy = excluded.posting_policy,
-        share_url = COALESCE(excluded.share_url, conversations.share_url)
+        share_url = COALESCE(excluded.share_url, conversations.share_url),
+        description = COALESCE(excluded.description, conversations.description),
+        max_members = COALESCE(excluded.max_members, conversations.max_members),
+        creator_user_id = COALESCE(excluded.creator_user_id, conversations.creator_user_id),
+        created_at = COALESCE(excluded.created_at, conversations.created_at),
+        requires_approval = COALESCE(excluded.requires_approval, conversations.requires_approval),
+        join_question = COALESCE(excluded.join_question, conversations.join_question)
     """
 
     // MARK: - Wire model to row
@@ -564,7 +619,13 @@ actor ConversationStore {
             messageDeletionPeriod: group.messageDeletionPeriod,
             likeIcon: group.likeIcon,
             isPlaceholder: false,
-            shareURL: group.shareUrl
+            shareURL: group.shareUrl,
+            summary: group.description?.isEmpty == true ? nil : group.description,
+            maxMembers: group.maxMembers,
+            creatorUserID: group.creatorUserId,
+            createdAt: group.createdAt.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+            requiresApproval: group.requiresApproval,
+            joinQuestion: group.showJoinQuestion == true ? group.joinQuestion?.text : nil
         )
     }
 

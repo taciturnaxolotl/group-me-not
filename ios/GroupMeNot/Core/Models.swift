@@ -523,6 +523,21 @@ nonisolated struct Group: Codable, Identifiable, Hashable, Sendable {
     var membersCount: Int?
     var parentId: String?
     var childrenCount: Int?
+    /// The ceiling GroupMe puts on this group, so a roster can say how much room
+    /// is left rather than only how many are here.
+    var maxMembers: Int?
+    /// Whether joining through the share link waits on an admin.
+    var requiresApproval: Bool?
+    var showJoinQuestion: Bool?
+    /// Asked of anyone joining, when the group set one.
+    var joinQuestion: JoinQuestion?
+
+    /// The wire shape is an object rather than a string, and the field it is
+    /// under is the same word, so it is spelled out rather than guessed at.
+    nonisolated struct JoinQuestion: Codable, Hashable, Sendable {
+        var type: String?
+        var text: String?
+    }
 
     /// The reaction this group chose for itself, if it has one.
     ///

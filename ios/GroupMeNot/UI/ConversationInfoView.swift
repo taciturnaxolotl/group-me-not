@@ -16,7 +16,19 @@ struct ConversationInfoView: View {
         NavigationStack {
             List {
                 Section { header.listRowSeparator(.hidden) }
+                if let summary = conversation.summary, !summary.isEmpty {
+                    Section("About") {
+                        Text(summary)
+                            .font(.subheadline)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 if let invite { share(invite) }
+                if let created = conversation.createdAt {
+                    Section {
+                        LabeledContent("Created", value: created.formatted(date: .abbreviated, time: .omitted))
+                    }
+                }
                 if !people.isEmpty { roster }
             }
             .listStyle(.insetGrouped)
@@ -66,10 +78,31 @@ struct ConversationInfoView: View {
             } label: {
                 Label("Copy Link", systemImage: "link")
             }
+            if conversation.requiresApproval == true {
+                Label("New members need approval", systemImage: "checkmark.shield")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            if let question = conversation.joinQuestion, !question.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Joining asks")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(question)
+                        .font(.subheadline)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .accessibilityElement(children: .combine)
+            }
         } header: {
             Text("Share")
         } footer: {
-            Text("Anyone with this link can join.")
+            // The promise the link actually makes, which is not the same one in
+            // a group that vets arrivals. Saying "anyone can join" of a group
+            // that queues them for an admin would be plainly untrue.
+            Text(conversation.requiresApproval == true
+                 ? "Anyone with this link can ask to join."
+                 : "Anyone with this link can join.")
         }
     }
 
@@ -123,12 +156,19 @@ struct ConversationInfoView: View {
 
     @ViewBuilder private var roster: some View {
         Section(conversation.isGroup ? "Members" : "Conversation") {
-            ForEach(people, id: \.identity) { member in
+            ForEach(orderedPeople, id: \.identity) { member in
                 HStack(spacing: 12) {
                     Avatar(url: member.imageUrl, name: displayName(member), size: 34)
                     Text(displayName(member))
                         .lineLimit(1)
-                        .lineLimit(1)
+                    if let badge = role(of: member) {
+                        Text(badge)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.quaternary, in: .capsule)
+                    }
                 }
                 .accessibilityElement(children: .combine)
             }
@@ -147,7 +187,41 @@ struct ConversationInfoView: View {
     private var subtitle: String? {
         guard conversation.isGroup else { return "Direct message" }
         guard let count = memberCount else { return "Group" }
+        // With a ceiling, the interesting number is how much room is left, and
+        // a group at 4,998 of 5,000 is a group that needs to know.
+        if let max = conversation.maxMembers, max > 0 {
+            return "\(count.formatted()) of \(max.formatted()) members"
+        }
         return count == 1 ? "1 member" : "\(count) members"
+    }
+
+    /// Owner and admin, and nothing for everybody else. A badge on every row is
+    /// a badge on no row.
+    ///
+    /// Roles first, because they are what the server actually maintains;
+    /// `creator_user_id` is the fallback for a roster that arrived without them.
+    private func role(of member: Member) -> String? {
+        if let roles = member.roles {
+            if roles.contains("owner") { return "Owner" }
+            if roles.contains("admin") { return "Admin" }
+            return nil
+        }
+        return member.identity == conversation.creatorUserID ? "Owner" : nil
+    }
+
+    /// Sorted so the people running the group are at the top of it.
+    private var orderedPeople: [Member] {
+        people.sorted { a, b in
+            let rank = { (m: Member) -> Int in
+                switch self.role(of: m) {
+                case "Owner": 0
+                case "Admin": 1
+                default: 2
+                }
+            }
+            guard rank(a) == rank(b) else { return rank(a) < rank(b) }
+            return displayName(a).localizedCaseInsensitiveCompare(displayName(b)) == .orderedAscending
+        }
     }
 
     private var memberCount: Int? {

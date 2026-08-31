@@ -10,7 +10,7 @@ import OSLog
 /// `Message` never needs a migration.
 nonisolated enum Schema {
     /// Bump this and add a `case` to `apply(step:)` for every change.
-    static let version: Int32 = 9
+    static let version: Int32 = 10
 
     private static let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "schema")
 
@@ -56,6 +56,7 @@ nonisolated enum Schema {
         case 7: try db.execute(addLikeIcon)
         case 8: try db.execute(addSubgroups)
         case 9: try db.execute(addShareURL)
+        case 10: try db.execute(addGroupProfile)
         default:
             throw SQLError(code: 1, message: "no migration defined for schema \(step)", sql: nil)
         }
@@ -96,6 +97,27 @@ nonisolated enum Schema {
     /// two of them are somewhere with no signal.
     private static let addShareURL = """
     ALTER TABLE conversations ADD COLUMN share_url TEXT;
+    """
+
+    // MARK: - Version 10
+
+    /// The rest of what a group says about itself.
+    ///
+    /// All of it arrives on fetches the app already makes and was being dropped
+    /// on the floor. Stored rather than re-fetched for the usual reason: the
+    /// info sheet is meant to draw on the frame it is presented, and a sheet
+    /// that fills in a second later is a sheet that was not ready.
+    ///
+    /// `requires_approval` is an INTEGER rather than a boolean column so NULL
+    /// can mean "not told", which is different from "no" and is what lets the
+    /// list fetch omit a field without erasing what the single-group fetch knew.
+    private static let addGroupProfile = """
+    ALTER TABLE conversations ADD COLUMN description TEXT;
+    ALTER TABLE conversations ADD COLUMN max_members INTEGER;
+    ALTER TABLE conversations ADD COLUMN creator_user_id TEXT;
+    ALTER TABLE conversations ADD COLUMN created_at INTEGER;
+    ALTER TABLE conversations ADD COLUMN requires_approval INTEGER;
+    ALTER TABLE conversations ADD COLUMN join_question TEXT;
     """
 
     // MARK: - Version 1
