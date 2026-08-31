@@ -389,15 +389,17 @@ actor SyncEngine {
             guard let summary = topic.messages, let remoteHead = summary.lastMessageId
             else { continue }
             let localHead = heads[id]
-            let tip = RemoteTip(messageID: remoteHead, count: summary.count)
-            let previous = lastSeenTips[id]
-            lastSeenTips[id] = tip
 
             guard moved(remote: remoteHead, local: localHead) else { continue }
             noteGap(id)
-            // No embedded shortcut. A topic's list entry carries a preview with
-            // no sender, same as a group's, and the placeholder that produces is
-            // a bug this file has already had once.
+            // No embedded shortcut, so no tip to remember either: `lastSeenTips`
+            // exists only to answer `advancedByOne`, and topics do not ask.
+            //
+            // They do not ask because a topic's list entry carries a preview
+            // with no sender, exactly like a group's, and writing that in as a
+            // stand-in message is a bug this file has already had once: it made
+            // messages you had sent yourself appear as somebody else's. One
+            // request per moved topic is the right price for not repeating it.
             plans.append(Plan(conversation: id, localHead: localHead, embedded: nil))
         }
 
