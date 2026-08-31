@@ -190,15 +190,11 @@ struct ChatView: View {
     @State private var isInfoPresented = false
     @FocusState private var composerFocused: Bool
 
-    /// The anchor we scroll to after sending, so a fresh bubble is always
-    /// visible even if the user had drifted up the history.
-    private let bottomAnchor = "transcript.bottom"
-
     // MARK: Scroll state
 
-    /// The clear strip that closes the transcript. It is the scroll anchor and
-    /// also the thing whose visibility answers "is the reader at the foot", so
-    /// it needs enough height to be a tolerance rather than a hairline.
+    /// The clear strip that closes the transcript. Its visibility is what
+    /// answers "is the reader at the foot", so it needs enough height to be a
+    /// tolerance rather than a hairline.
     private static let footHeight: CGFloat = 24
 
     /// Whether the foot of the transcript is on screen.
@@ -253,6 +249,9 @@ struct ChatView: View {
     /// message on screen. Cheaper and more reliable than watching row counts,
     /// and it gives the several callers one place to land.
     @State private var bottomRequest = 0
+
+    /// The scroll view's position, held so this view can move it.
+    @State private var scrollPosition = ScrollPosition()
     @State private var isAttachmentPickerPresented = false
     /// Media the user picked but has not sent yet, shown above the field.
     @State private var staged: [PickedMedia] = []
@@ -308,6 +307,11 @@ struct ChatView: View {
     // MARK: Transcript
 
     private var transcript: some View {
+        // Two mechanisms, because they are good at different things. The reader
+        // scrolls to a *view*, which is what the opening jump needs: it lands on
+        // a specific message. The position scrolls to an *edge*, which is what
+        // the way back down needs, and is the only one of the two that works
+        // when the foot of a `LazyVStack` has not been realised.
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
@@ -318,6 +322,14 @@ struct ChatView: View {
                 }
                 .padding(.horizontal, 10)
             }
+            // The way back down. This used to be `proxy.scrollTo(bottomAnchor)`,
+            // and the anchor was the foot of a `LazyVStack`, which does not exist
+            // while the reader is up in the history. Which is exactly when the jump
+            // button is on screen: the one control whose whole job is "take me back
+            // down" was the one that could never do it. An edge asks the scroll view
+            // about its content rather than about its children, so there is nothing
+            // left to be unrealised.
+            .scrollPosition($scrollPosition)
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             // Deliberately optional, and `nil` nearly all the time. See
             // `sizeChangeAnchor`.
@@ -351,7 +363,7 @@ struct ChatView: View {
             // these can overlap during a catch-up.
             .onChange(of: bottomRequest) {
                 withAnimation(.easeOut(duration: 0.22)) {
-                    proxy.scrollTo(bottomAnchor, anchor: .bottom)
+                    scrollPosition.scrollTo(edge: .bottom)
                 }
             }
             // Not animated: this is where the conversation opens, not a
@@ -458,9 +470,8 @@ struct ChatView: View {
         }
     }
 
-    /// The foot of the transcript: real room under the last bubble, the anchor
-    /// everything scrolls to, and the sentinel the whole scroll state is read
-    /// from. Flush against the composer, the last row's long press competes
+    /// The foot of the transcript: real room under the last bubble, and the
+    /// sentinel the whole scroll state is read from. Flush against the composer, the last row's long press competes
     /// with the bar for the same few points and loses about as often as it
     /// wins, so the room is not decoration.
     ///
@@ -469,7 +480,6 @@ struct ChatView: View {
         Color.clear
             .frame(height: Self.footHeight)
             .allowsHitTesting(false)
-            .id(bottomAnchor)
             .onScrollVisibilityChange(threshold: 0.01, footVisibilityChanged)
     }
 
