@@ -33,17 +33,6 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
     var isDeleted: Bool { (deletedAt ?? 0) > 0 }
     var likeCount: Int { favoritedBy?.count ?? 0 }
 
-    /// Everyone who reacted at all, plain likers included, deduplicated.
-    var reactionUserIDs: [String] {
-        var seen = Set<String>()
-        var ordered: [String] = []
-        for id in (favoritedBy ?? []) + (reactions ?? []).flatMap({ $0.userIds ?? [] })
-        where seen.insert(id).inserted {
-            ordered.append(id)
-        }
-        return ordered
-    }
-
     /// The one list a bubble draws.
     ///
     /// A plain like and a `❤️` reaction are the same thing to a reader, so they
@@ -85,6 +74,44 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
         reactionSummaries(currentUserID: userID).first { $0.reactedByMe }?.glyph
     }
 
+    /// This message with `userID`'s reaction set to `glyph`, or cleared when
+    /// `glyph` is nil. Whatever they held before goes first, because GroupMe
+    /// allows one reaction per person per message.
+    ///
+    /// The single definition of that rule. ``AppModel`` applies it to the
+    /// published array before it suspends, so a tapback draws on the next
+    /// frame, and ``MessageStore/setReaction(_:by:onMessage:in:)`` applies the
+    /// same function to the stored copy inside its transaction. One rule, two
+    /// callers, no chance of them drifting apart.
+    func settingReaction(_ glyph: String?, by userID: String) -> Message {
+        var copy = self
+
+        copy.favoritedBy = copy.favoritedBy?.filter { $0 != userID }
+        copy.reactions = copy.reactions?.compactMap { reaction in
+            guard let users = reaction.userIds, users.contains(userID) else { return reaction }
+            var updated = reaction
+            updated.userIds = users.filter { $0 != userID }
+            return (updated.userIds?.isEmpty ?? true) ? nil : updated
+        }
+
+        switch glyph {
+        case .none:
+            break
+        // The heart is a plain like on the wire, so it goes where a like goes.
+        case .some(ReactionSummary.heart):
+            copy.favoritedBy = (copy.favoritedBy ?? []) + [userID]
+        case .some(let glyph):
+            var reactions = copy.reactions ?? []
+            if let index = reactions.firstIndex(where: { $0.glyph == glyph }) {
+                reactions[index].userIds = (reactions[index].userIds ?? []) + [userID]
+            } else {
+                reactions.append(Reaction(type: "unicode", code: glyph, userIds: [userID]))
+            }
+            copy.reactions = reactions
+        }
+        return copy
+    }
+
     /// Message ids sort chronologically as big integers, never lexically.
     static func isNewer(_ lhs: String, than rhs: String) -> Bool {
         if let a = UInt64(lhs), let b = UInt64(rhs) { return a > b }
@@ -110,8 +137,6 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
             guard let code, !code.isEmpty else { return nil }
             return code
         }
-
-        var count: Int { userIds?.count ?? 0 }
     }
 
     /// A reaction bucket after plain likes have been folded in. This is the

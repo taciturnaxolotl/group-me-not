@@ -52,8 +52,6 @@ nonisolated struct MessageText: Hashable, Sendable {
     /// A preview card is worth showing for the first one. Beyond that the
     /// message is a link dump and cards stop helping.
     var links: [URL]
-    /// User ids mentioned, in reading order, deduplicated.
-    var mentionedUserIDs: [String]
     /// True when the message is a handful of emoji and nothing else, which is
     /// the one case that renders bigger and without a bubble tint.
     var isEmojiOnly: Bool
@@ -64,8 +62,7 @@ nonisolated struct MessageText: Hashable, Sendable {
     var previewLink: URL? { links.first }
 
     static let empty = MessageText(
-        attributed: AttributedString(), plain: "", links: [], mentionedUserIDs: [],
-        isEmojiOnly: false)
+        attributed: AttributedString(), plain: "", links: [], isEmojiOnly: false)
 }
 
 // MARK: - Parsing
@@ -89,7 +86,6 @@ nonisolated enum MessageTextParser {
 
         var attributed = AttributedString(text)
         var links: [URL] = []
-        var mentionedUserIDs: [String] = []
 
         // Links first. A mention never contains a URL, so ordering only matters
         // for the pathological case of a link inside a display name, where the
@@ -109,14 +105,12 @@ nonisolated enum MessageTextParser {
                                               text: text, attributed: attributed)
             else { continue }
             attributed[range].mentionUserID = mention.userID
-            if !mentionedUserIDs.contains(mention.userID) { mentionedUserIDs.append(mention.userID) }
         }
 
         return MessageText(
             attributed: attributed,
             plain: text,
             links: links,
-            mentionedUserIDs: mentionedUserIDs,
             isEmojiOnly: isEmojiOnly(text))
     }
 

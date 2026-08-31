@@ -42,10 +42,9 @@ final class AppModel {
     /// The glyphs the reaction picker offers.
     ///
     /// A constant today. The official client refreshes this from a CDN
-    /// document, and `ReactionCatalog.decode(_:)` is ready for the day we do
-    /// too, but a picker must never be empty because a request has not come
-    /// back, so the local list is the source and a refresh would only ever be
-    /// an improvement on it.
+    /// document, but a picker must never be empty because a request has not
+    /// come back, so the local list is the source and a refresh would only ever
+    /// be an improvement on it.
     let reactionCatalog = ReactionCatalog.default
 
     /// Link previews for the open transcript.
@@ -69,7 +68,7 @@ final class AppModel {
 
     /// How many messages the transcript holds. Grows as the user scrolls back.
     @ObservationIgnored private var window = AppModel.transcriptPage
-    private static let transcriptPage = 50
+    private static let transcriptPage = 200
 
     @ObservationIgnored private var didBootstrap = false
     @ObservationIgnored private var observers: [Task<Void, Never>] = []
@@ -220,7 +219,9 @@ final class AppModel {
 
         let page: [Message]
         do {
-            page = try await api.messages(in: conversation, before: oldest, limit: Self.transcriptPage)
+            // No `limit:`. The client's default is the verified server cap,
+            // and asking for less than the cap is asking for more round trips.
+            page = try await api.messages(in: conversation, before: oldest)
         } catch {
             // A request that failed says nothing about whether history exists.
             // Treating a dead radio as "you have reached the beginning" would
@@ -357,8 +358,7 @@ final class AppModel {
         guard glyph != previous else { return }
 
         apply(glyph, by: me, to: message.id)
-        _ = try? await store.messages.setReaction(
-            glyph, by: me, onMessage: message.id, in: conversation)
+        await commit(glyph, by: me, to: message.id, in: conversation)
 
         do {
             try await api.setReaction(
@@ -369,9 +369,24 @@ final class AppModel {
                 \(failureText(error), privacy: .public)
                 """)
             apply(previous, by: me, to: message.id)
-            _ = try? await store.messages.setReaction(
-                previous, by: me, onMessage: message.id, in: conversation)
+            await commit(previous, by: me, to: message.id, in: conversation)
         }
+    }
+
+    /// Write the reaction to disk, then adopt the row the store hands back.
+    ///
+    /// Adopting it matters: a coalesced reload can read the transcript in the
+    /// window between the optimistic edit and this write landing, which would
+    /// put the chip back the way it was. The store's answer is the same message
+    /// with the edit already in it, so replaying it here settles that race
+    /// instead of leaving the screen a revision behind.
+    private func commit(
+        _ glyph: String?, by userID: String, to messageID: String, in conversation: ConversationID
+    ) async {
+        guard let stored = try? await store.messages.setReaction(
+            glyph, by: userID, onMessage: messageID, in: conversation) else { return }
+        guard let index = messages.firstIndex(where: { $0.id == messageID }) else { return }
+        messages[index] = stored
     }
 
     /// The transcript's copy of a message, which is the one worth acting on.

@@ -101,14 +101,6 @@ actor LinkPreviewService {
         return preview
     }
 
-    /// Warm the cache for links a row is about to show. Fire and forget: the
-    /// caller does not wait and does not learn whether it worked.
-    func prefetch(_ urls: [URL], dark: Bool = false) {
-        for url in urls where cached(for: url, dark: dark) == nil {
-            Task { [weak self] in _ = await self?.preview(for: url, dark: dark) }
-        }
-    }
-
     func clear() {
         cache.removeAll(keepingCapacity: false)
     }

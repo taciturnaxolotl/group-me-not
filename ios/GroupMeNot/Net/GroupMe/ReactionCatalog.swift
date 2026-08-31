@@ -6,9 +6,8 @@ import Foundation
 /// `https://cdn.groupme.com/assets/reactions.json?version=<ecs version>` and
 /// caches it. We ship the current list as a static default instead, because a
 /// picker that is empty until the network answers is a picker that fails on the
-/// subway. Refreshing from the CDN is a strict improvement, never a
-/// prerequisite: ``decode(_:)`` turns that document into the same
-/// ``ReactionCatalog`` this file already returns.
+/// subway. Refreshing from the CDN would be a strict improvement and never a
+/// prerequisite, which is why nothing here reaches for it yet.
 nonisolated struct ReactionCatalog: Sendable, Hashable {
     /// Unicode glyphs, in the order the picker draws them.
     var glyphs: [String]
@@ -42,10 +41,6 @@ nonisolated struct ReactionCatalog: Sendable, Hashable {
     /// `Message.reactionSummaries(currentUserID:)`.
     static let plainLike = Message.ReactionSummary.heart
 
-    /// Whether this glyph is one the servers and other clients know about.
-    /// Tapping an unknown glyph would post a reaction nobody else can render.
-    func contains(_ glyph: String) -> Bool { glyphs.contains(glyph) }
-
     /// What to send for a glyph.
     ///
     /// The heart is deliberately a plain like rather than a `unicode` reaction:
@@ -54,32 +49,5 @@ nonisolated struct ReactionCatalog: Sendable, Hashable {
     /// read, in agreement with what we drew.
     static func icon(for glyph: String) -> GroupMeAPI.LikeIcon? {
         glyph == plainLike ? nil : .unicode(glyph)
-    }
-
-    // MARK: - The CDN document
-
-    /// `GET https://cdn.groupme.com/assets/reactions.json`.
-    ///
-    /// The document is an object of named groups, each an ordered array of
-    /// entries. Only unicode entries are usable here; pack entries point at art
-    /// we do not fetch.
-    nonisolated struct Document: Decodable, Sendable {
-        var reactions: [Entry]?
-
-        nonisolated struct Entry: Decodable, Sendable {
-            var type: String?
-            var code: String?
-        }
-    }
-
-    /// Folds a CDN document into a catalog, keeping the defaults if it turns up
-    /// empty. A malformed refresh must never leave the picker blank.
-    static func decode(_ document: Document) -> ReactionCatalog {
-        let glyphs = (document.reactions ?? []).compactMap { entry -> String? in
-            guard entry.type == nil || entry.type == "unicode" else { return nil }
-            guard let code = entry.code, !code.isEmpty else { return nil }
-            return code
-        }
-        return glyphs.isEmpty ? .default : ReactionCatalog(glyphs: glyphs)
     }
 }

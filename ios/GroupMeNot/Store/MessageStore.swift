@@ -68,14 +68,13 @@ actor MessageStore {
         try upsert([message], in: conversation)
     }
 
-    /// Applies one person's reaction locally, so a tap redraws now and the
-    /// network call becomes a background detail.
+    /// Applies one person's reaction to the stored copy, so a scroll, a reload
+    /// or a relaunch agrees with the chip the tap already drew.
     ///
-    /// Sets `userID`'s reaction on the message to `glyph`, or clears it when
-    /// `glyph` is nil. Whatever they held before is removed first, because
-    /// GroupMe allows one reaction per person per message. The heart is written
-    /// into `favorited_by` rather than the reactions array, matching what the
-    /// server does with the bodyless like this glyph sends.
+    /// The edit itself is ``Message/settingReaction(_:by:)``, which is the same
+    /// function ``AppModel`` applies to the published array. Sharing it is the
+    /// point: two hand-written copies of "one reaction per person, and the
+    /// heart lives in `favorited_by`" would drift the first time either changed.
     ///
     /// Deliberately bypasses the freshness guard on ``upsert(_:in:)``: the
     /// message's `updated_at` does not move when a reaction lands, so a guarded
@@ -91,32 +90,8 @@ actor MessageStore {
         in conversation: ConversationID
     ) throws -> Message? {
         try db.transaction {
-            guard var message = try loadMessage(id: messageID, in: conversation) else { return nil }
-
-            // Clear whatever this person held, in both places it can live.
-            message.favoritedBy = message.favoritedBy?.filter { $0 != userID }
-            message.reactions = message.reactions?.compactMap { reaction in
-                guard let users = reaction.userIds, users.contains(userID) else { return reaction }
-                var updated = reaction
-                updated.userIds = users.filter { $0 != userID }
-                return (updated.userIds?.isEmpty ?? true) ? nil : updated
-            }
-
-            switch glyph {
-            case .none:
-                break
-            case .some(Message.ReactionSummary.heart):
-                message.favoritedBy = (message.favoritedBy ?? []) + [userID]
-            case .some(let glyph):
-                var reactions = message.reactions ?? []
-                if let index = reactions.firstIndex(where: { $0.glyph == glyph }) {
-                    reactions[index].userIds = (reactions[index].userIds ?? []) + [userID]
-                } else {
-                    reactions.append(Message.Reaction(
-                        type: "unicode", code: glyph, userIds: [userID]))
-                }
-                message.reactions = reactions
-            }
+            guard let stored = try loadMessage(id: messageID, in: conversation) else { return nil }
+            let message = stored.settingReaction(glyph, by: userID)
 
             try db.run(
                 """

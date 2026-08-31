@@ -17,16 +17,16 @@ struct ConversationListView: View {
     var body: some View {
         NavigationStack(path: $path) {
             content
-                .navigationTitle("Chats")
+                // The title lives in the content, not the bar. A large
+                // navigation title always renders on its own row *below* the
+                // toolbar, so an avatar in the toolbar can never sit beside it.
+                // Drawing both in one header row is what the App Store does for
+                // exactly this reason.
+                .navigationTitle("")
+                .navigationBarTitleDisplayMode(.inline)
                 .navigationDestination(for: ConversationRow.self) { row in
                     ChatView(conversation: row)
                 }
-                .toolbar { accountMenu }
-                .searchable(
-                    text: $query,
-                    placement: .navigationBarDrawer(displayMode: .automatic),
-                    prompt: "Search"
-                )
                 .refreshable { await model.refresh() }
                 .safeAreaInset(edge: .top, spacing: 0) {
                     NetworkStatusBanner(state: model.syncState)
@@ -46,6 +46,8 @@ struct ConversationListView: View {
 
     private var list: some View {
         List {
+            titleHeader
+            searchField
             ForEach(visibleRows) { row in
                 NavigationLink(value: row) {
                     ConversationCell(row: row)
@@ -114,8 +116,62 @@ struct ConversationListView: View {
         }
     }
 
-    @ToolbarContentBuilder private var accountMenu: some ToolbarContent {
-        ToolbarItem(placement: .topBarTrailing) {
+    /// Large title and account avatar on one line, scrolling with the list.
+    var titleHeader: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("Chats")
+                .font(.largeTitle.bold())
+            Spacer(minLength: 12)
+            accountMenu
+                // Pulled back to the cap line so the avatar centres against the
+                // title rather than hanging off its baseline.
+                .alignmentGuide(.firstTextBaseline) { $0.height * 0.78 }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 4)
+        .padding(.bottom, 8)
+        .listRowInsets(EdgeInsets())
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+    }
+
+    /// Search lives in the content rather than the navigation bar's drawer.
+    ///
+    /// `.searchable` renders its drawer directly under the bar, which would put
+    /// it *above* the title row, inverting the order. Since the title already
+    /// had to move into the content to sit beside the avatar, the field follows
+    /// it, and the two stay in the order a reader expects.
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Search", text: $query)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 12, style: .continuous))
+        .padding(.horizontal, 16)
+        .padding(.bottom, 6)
+        .listRowInsets(EdgeInsets())
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+    }
+
+    private var accountMenu: some View {
+        SwiftUI.Group {
             Menu {
                 if let name = model.currentUser?.name {
                     Text(name)
