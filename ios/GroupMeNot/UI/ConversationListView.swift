@@ -17,7 +17,6 @@ struct ConversationListView: View {
     @State private var isSettingsPresented = false
     /// Groups whose topics are showing, by group id. Not persisted: which
     /// branches of a list are open is the shape of one visit to it.
-    @State private var expanded: Set<String> = []
     @State private var isRequestsPresented = false
     /// The tile a long press landed on, named in the sheet that follows so
     /// there is no doubt which one is about to change.
@@ -90,36 +89,13 @@ struct ConversationListView: View {
             if model.waitingRequests > 0 && query.isEmpty { requestsRow }
             if !pinnedRows.isEmpty && query.isEmpty { pinnedStrip }
             ForEach(entries) { entry in
-                SwiftUI.Group {
-                    if entry.isGrid {
-                        topicGrid(entry)
-                    } else if entry.isExpandable {
-                        // A header, not a destination. Its children include the
-                        // main conversation, so sending the tap there as well
-                        // would give one row two meanings.
-                        Button {
-                            toggle(entry.row)
-                        } label: {
-                            ConversationCell(entry: entry)
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        NavigationLink(value: Route.chat(entry.row)) {
-                            ConversationCell(entry: entry)
-                        }
-                    }
+                NavigationLink(value: destination(for: entry.row)) {
+                    ConversationCell(entry: entry)
                 }
-                .listRowInsets(entry.isGrid
-                    ? EdgeInsets()
-                    : .init(top: 8, leading: 16, bottom: 8, trailing: 16))
-                .listRowSeparator(entry.isGrid ? .hidden : .visible)
-                // Long press to pin, on every row that is a conversation. The
-                // swipe is still there; this is the gesture people reach for.
-                .contextMenu {
-                    if !entry.isGrid {
-                        pinButton(for: entry.row)
-                    }
-                }
+                .listRowInsets(.init(top: 8, leading: 16, bottom: 8, trailing: 16))
+                // Long press to pin. The swipe is still there; this is the
+                // gesture people reach for.
+                .contextMenu { pinButton(for: entry.row) }
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
                     if entry.row.hasUnread {
                         Button {
@@ -141,7 +117,7 @@ struct ConversationListView: View {
                     }
                     .tint(.indigo)
 
-                    if !entry.isGrid { pinButton(for: entry.row).tint(.orange) }
+                    pinButton(for: entry.row).tint(.orange)
                 }
             }
         }
@@ -203,36 +179,6 @@ struct ConversationListView: View {
         // Silently doing nothing at the limit would read as broken, so at the
         // limit the action is simply not offered.
         .disabled(!isPinned && !settings.canPinMore)
-    }
-
-    /// A group's conversations as tiles, in the same shape the pinned strip
-    /// uses.
-    ///
-    /// Rows with a rule down their left edge were decoration pretending to be
-    /// structure: eight of them read as a list that had gone wrong. Tiles say
-    /// "these belong together" by being a block, which is what an expanded group
-    /// actually is.
-    private func topicGrid(_ entry: Entry) -> some View {
-        LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3),
-            spacing: 14
-        ) {
-            ForEach(entry.members) { member in
-                ConversationTile(
-                    row: member,
-                    name: member.id == entry.row.id ? "Main" : member.name,
-                    unread: member.unreadCount,
-                    size: 52,
-                    onLongPress: { pinTarget = member }
-                ) {
-                    path.append(.chat(member))
-                }
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 4)
-        .padding(.bottom, 16)
-        .listRowBackground(Color.clear)
     }
 
     /// The pinned conversations, in the order they were pinned.
@@ -319,51 +265,28 @@ struct ConversationListView: View {
         hasTopics(row) ? .topics(row) : .chat(row)
     }
 
-    private func toggle(_ row: ConversationRow) {
-        let id = row.id.remoteID
-        if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) }
-    }
-
-    /// The list as drawn: groups, and beneath an expanded one its main
-    /// conversation and each of its topics.
+    /// The list as drawn: one row per conversation, topics excluded.
     ///
-    /// Collapsed by default, because a group's topics are its business and six
-    /// extra rows in everybody's list is the tail wagging the dog. Sorting them
-    /// in by recency, which is what the list did briefly, scattered rows named
-    /// "RULES" and "GRAVEYARD" through it with nothing to say what they belonged
-    /// to.
+    /// A group with topics is a row like any other; it just leads to a page
+    /// offering the choice rather than straight into a transcript. Expanding in
+    /// place was the alternative and it read badly however it was drawn: eight
+    /// extra rows under one group is a list that has lost its shape, and the
+    /// same choice on its own page is a page.
     private var entries: [Entry] {
         let rows = matching
-        let byParent = Dictionary(grouping: rows.filter(\.isTopic)) { $0.parentID ?? "" }
-        guard !byParent.isEmpty else { return rows.map { Entry(row: $0) } }
+        let topicUnread = Dictionary(grouping: rows.filter(\.isTopic)) { $0.parentID ?? "" }
+            .mapValues { $0.reduce(0) { $0 + $1.unreadCount } }
 
-        var out: [Entry] = []
-        for row in rows where !row.isTopic && !isPinnedAndShown(row) {
-            guard case .group(let id) = row.id, let topics = byParent[id], !topics.isEmpty else {
-                out.append(Entry(row: row))
-                continue
+        return rows
+            .filter { !$0.isTopic && !isPinnedAndShown($0) }
+            .map { row in
+                guard case .group(let id) = row.id, let waiting = topicUnread[id] else {
+                    return Entry(row: row)
+                }
+                // The group answers for its topics, which are not on screen to
+                // answer for themselves.
+                return Entry(row: row, badge: row.unreadCount + waiting)
             }
-            let isOpen = expanded.contains(id)
-            out.append(Entry(
-                row: row,
-                isExpandable: true,
-                isExpanded: isOpen,
-                // Collapsed, the group has to answer for its topics: hiding a
-                // row must not hide the fact that something is waiting in it.
-                badge: row.unreadCount + topics.reduce(0) { $0 + $1.unreadCount }))
-            guard isOpen else { continue }
-            // One entry holding the whole set, drawn as a grid. Main first,
-            // because it is the conversation that existed before anybody added
-            // topics.
-            out.append(Entry(row: row, members: [row] + topics))
-        }
-        // A topic whose group is filtered out by the search term keeps its own
-        // place rather than disappearing with it.
-        let shown = Set(out.map(\.row.id))
-        out.append(contentsOf: rows.filter(\.isTopic)
-            .filter { !shown.contains($0.id) }
-            .map { Entry(row: $0) })
-        return out
     }
 
     /// A pinned conversation is drawn in the strip instead of in the list, but
@@ -378,18 +301,12 @@ struct ConversationListView: View {
     /// of the conversation with its role, not the conversation alone.
     struct Entry: Identifiable, Hashable {
         let row: ConversationRow
-        var isExpandable = false
-        var isExpanded = false
-        var label: String?
+        /// Set where the row has to answer for conversations that are not on
+        /// screen: a group's topics.
         var badge: Int?
-        /// When this is non-empty the entry is not a conversation but the set of
-        /// them belonging to the group above it, drawn as tiles. The group's own
-        /// row is the first member.
-        var members: [ConversationRow] = []
 
-        var isGrid: Bool { !members.isEmpty }
-        var id: String { "\(row.id.storageKey)#\(isGrid ? "grid" : "row")" }
-        var name: String { label ?? row.name }
+        var id: ConversationID { row.id }
+        var name: String { row.name }
         var unread: Int { badge ?? row.unreadCount }
     }
 
@@ -538,15 +455,6 @@ struct ConversationCell: View {
                         .font(.headline)
                         .lineLimit(1)
 
-                    if entry.isExpandable {
-                        Image(systemName: "chevron.right")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(.tertiary)
-                            .rotationEffect(.degrees(entry.isExpanded ? 90 : 0))
-                            .animation(.snappy(duration: 0.2), value: entry.isExpanded)
-                            .accessibilityHidden(true)
-                    }
-
                     if row.postingPolicy == .adminsOnly {
                         Image(systemName: "megaphone.fill")
                             .font(.caption2)
@@ -605,9 +513,6 @@ struct ConversationCell: View {
         var parts: [String] = [entry.name]
         if entry.unread > 0 {
             parts.append("\(entry.unread) unread message\(entry.unread == 1 ? "" : "s")")
-        }
-        if entry.isExpandable {
-            parts.append(entry.isExpanded ? "topics showing" : "has topics")
         }
         if row.isMuted { parts.append("muted") }
         parts.append(preview)
