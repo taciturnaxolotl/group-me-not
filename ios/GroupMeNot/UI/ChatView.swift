@@ -435,6 +435,7 @@ struct ChatView: View {
                     bottomSpacer
                 }
                 .padding(.horizontal, 10)
+                .background(NoScrollToTop().allowsHitTesting(false))
             }
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             // Deliberately optional, and `nil` nearly all the time. See
@@ -445,6 +446,11 @@ struct ChatView: View {
             // a hard edge. This is the other half of `safeAreaBar`; without it
             // the bar floats over a transcript that is plainly still there.
             .scrollEdgeEffectStyle(.soft, for: .bottom)
+            // The same treatment at the head. Content dissolving into the bar
+            // rather than sliding under a hard edge is what makes the bar read
+            // as part of the same sheet of paper; it is the effect Safari and
+            // Messages use, and it is why the toolbar's own material is hidden.
+            .scrollEdgeEffectStyle(.soft, for: .top)
             .onScrollPhaseChange { _, phase in
                 // `.animating` is us, not them, and must not lock out the
                 // follow that started it.
@@ -950,25 +956,37 @@ struct ChatView: View {
         }
     }
 
+    /// The face, then the name in a capsule of its own.
+    ///
+    /// The capsule is not decoration. Without it the name is loose text on a
+    /// transparent bar, sitting over whatever happens to be scrolling behind it,
+    /// and there is no telling where the tappable part ends. A bordered pill
+    /// says "this is a control, and it is exactly this big", which is what a
+    /// transparent bar takes away and has to give back some other way.
     private var titleLabel: some View {
-        VStack(spacing: 2) {
+        VStack(spacing: 3) {
             Avatar(
                 url: conversation.avatarURL,
                 name: conversation.name,
-                size: 30,
+                size: 34,
                 isGroup: conversation.isGroup
             )
             HStack(spacing: 3) {
                 Text(conversation.name)
-                    .font(.caption.weight(.medium))
+                    .font(.caption.weight(.semibold))
                     .lineLimit(1)
                     .foregroundStyle(.primary)
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.secondary)
             }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 3)
+            .glassEffect(.regular.interactive(), in: .capsule)
         }
-        .contentShape(.rect)
+        // On the pieces, not on the whole stack. The gap between the face and
+        // the name is not part of either, and a hit area that covers it is a hit
+        // area covering the bar itself.
         .accessibilityElement(children: .combine)
     }
 
@@ -1338,4 +1356,48 @@ private struct TypingDots: View {
 
     private func scale(_ index: Int) -> Double { 0.75 + 0.35 * wave(index) }
     private func opacity(_ index: Int) -> Double { 0.4 + 0.6 * wave(index) }
+}
+
+/// Switches off the status bar's scroll-to-top gesture for the scroll view it
+/// is placed inside.
+///
+/// The gesture means "go to the beginning of the content", which in almost every
+/// app is helpful and in a transcript is the least useful place there is: the
+/// beginning of a chat is the oldest message anybody has ever sent in it. Worse,
+/// the target is the whole status bar, so it fires on a tap near the header that
+/// was meant for the header, and a year of history goes past in one frame.
+///
+/// A probe rather than a modifier because SwiftUI exposes no way to say this. It
+/// walks up from its own position in the view tree to the enclosing
+/// `UIScrollView`, which is one hop in practice.
+private struct NoScrollToTop: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let probe = Probe()
+        // It is a background spanning the whole transcript. Left interactive it
+        // would quietly swallow every tap that lands between two bubbles.
+        probe.isUserInteractionEnabled = false
+        return probe
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        (uiView as? Probe)?.disable()
+    }
+
+    final class Probe: UIView {
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            disable()
+        }
+
+        func disable() {
+            var ancestor: UIView? = superview
+            while let current = ancestor {
+                if let scrollView = current as? UIScrollView {
+                    scrollView.scrollsToTop = false
+                    return
+                }
+                ancestor = current.superview
+            }
+        }
+    }
 }
