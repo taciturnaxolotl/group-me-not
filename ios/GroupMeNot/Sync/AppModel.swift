@@ -65,7 +65,15 @@ final class AppModel {
         case signedIn
     }
 
-    private(set) var session: Session = .unknown
+    /// Seeded from the stored identity, which is a synchronous `UserDefaults`
+    /// read and therefore true on the very first frame.
+    ///
+    /// A guess, but not a loose one: signing out clears the identity in the same
+    /// breath as the token, so the two are only ever out of step if the keychain
+    /// item is removed from underneath the app. The authoritative read runs a
+    /// moment later in `bootstrap` and corrects it either way.
+    private(set) var session: Session = UserDefaults.standard
+        .data(forKey: AppModel.currentUserKey) == nil ? .unknown : .signedIn
 
     var isSignedIn: Bool { session == .signedIn }
     private(set) var syncState = SyncState()
@@ -187,6 +195,16 @@ final class AppModel {
         guard !didBootstrap else { return }
         didBootstrap = true
 
+        // First, before anything that can wait.
+        //
+        // Which screen to draw depends on one keychain read and nothing else,
+        // and it used to be decided after two hops onto the outbox actor and a
+        // database open that runs migrations. All of that is quick and none of
+        // it is instant, and for as long as it ran the root view had no answer
+        // to give — which is the flash of the wrong screen at launch.
+        restoreIdentity()
+        session = await tokens.isSignedIn ? .signedIn : .signedOut
+
         realtime.start()
         realtime.attach(to: bayeux)
         startObserving()
@@ -208,9 +226,7 @@ final class AppModel {
         }
 
         // 1. The screen, from disk. This is the part that must never wait.
-        restoreIdentity()
         await reloadConversations()
-        session = await tokens.isSignedIn ? .signedIn : .signedOut
 
         guard isSignedIn else { return }
 
