@@ -172,9 +172,27 @@ struct SignInView: View {
 
     private var instructions: some View {
         VStack(alignment: .leading, spacing: 12) {
-            step(1, "Open dev.groupme.com and sign in with your usual GroupMe account.")
+            step(1, "Open dev.groupme.com and sign in.")
             step(2, "Choose Access Token at the top right. A dialog shows a long string of letters and numbers.")
             step(3, "Copy it, come back here, and paste it above.")
+
+            Divider().padding(.vertical, 2)
+
+            // dev.groupme.com only accepts email or phone plus a password. An
+            // account created through Sign in with Apple has no password, so
+            // that route is closed to it and this one is the only way in.
+            Label {
+                Text("Signed up with Apple?")
+                    .font(.subheadline.weight(.semibold))
+            } icon: {
+                Image(systemName: "apple.logo")
+            }
+
+            Text("dev.groupme.com only takes an email and password, so it will not let you in. "
+                 + "Open web.groupme.com in Safari instead, sign in with Apple, and read "
+                 + "`localStorage.access_token` from the Web Inspector. It is the same token.")
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.vertical, 4)
     }
