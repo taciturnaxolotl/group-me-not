@@ -389,6 +389,25 @@ final class AppModel {
         await sends.discard(entry.id)
     }
 
+    /// Whether this account may post in the open conversation.
+    ///
+    /// Only ever false for an announcement topic, which GroupMe uses for a rules
+    /// or announcements channel: everyone reads it, admins and the owner write
+    /// it. The roster the roles come from is the *parent* group's, because a
+    /// topic has no membership of its own.
+    ///
+    /// Optimistic while the roster is still loading. A composer that appears
+    /// once the members arrive is a composer that flickered; one that is there
+    /// and whose send is refused is a mistake the user can see and understand.
+    var canPostInOpenConversation: Bool {
+        guard let openConversationID,
+              let row = conversations.first(where: { $0.id == openConversationID }),
+              row.postingPolicy == .adminsOnly
+        else { return true }
+        guard let me = currentUser?.id, !members.isEmpty else { return true }
+        return members.first { $0.identity == me }?.canPostInAnnouncements ?? true
+    }
+
     /// Publish a typing notice. Throttled inside the socket client, so calling
     /// this on every keystroke is fine.
     func userIsTyping() async {

@@ -348,7 +348,13 @@ struct ChatView: View {
             // the same way, but it also tells the scroll view that what sits
             // there is a *bar*, which is what lets the edge effect dissolve
             // content under it instead of stopping it dead against a slab.
-            .safeAreaBar(edge: .bottom, spacing: 0) { composer }
+            .safeAreaBar(edge: .bottom, spacing: 0) {
+                if model.canPostInOpenConversation {
+                    composer
+                } else {
+                    readOnlyNotice
+                }
+            }
             .navigationTitle(conversation.name)
             .navigationBarTitleDisplayMode(.inline)
             // The header belongs to the same sheet of paper as the transcript.
@@ -735,6 +741,24 @@ struct ChatView: View {
             staged.append(contentsOf: picked)
             composerFocused = true
         }
+    }
+
+    /// What sits where the composer would, in a topic only admins may post in.
+    ///
+    /// A bar rather than nothing at all. Removing the composer leaves a screen
+    /// that looks like it is still loading one; saying why is the difference
+    /// between a restriction and a bug.
+    private var readOnlyNotice: some View {
+        Label("Only admins can post here", systemImage: "megaphone.fill")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 11)
+            .frame(maxWidth: .infinity)
+            .glassEffect(.regular, in: .capsule)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .accessibilityElement(children: .combine)
     }
 
     private var attachButton: some View {

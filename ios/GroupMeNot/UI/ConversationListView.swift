@@ -92,6 +92,10 @@ struct ConversationListView: View {
     /// hundreds, so filtering it in memory is a fraction of a millisecond and
     /// spares us a round trip to an actor on every keystroke.
     private var visibleRows: [ConversationRow] {
+        nested(matching)
+    }
+
+    private var matching: [ConversationRow] {
         let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !term.isEmpty else { return model.conversations }
         return model.conversations.filter { row in
@@ -99,6 +103,38 @@ struct ConversationListView: View {
                 || (row.lastMessagePreview?.localizedStandardContains(term) ?? false)
                 || (row.lastMessageSender?.localizedStandardContains(term) ?? false)
         }
+    }
+
+    /// Topics gathered under the group they belong to.
+    ///
+    /// Sorting the whole list by recency would scatter a group's six topics
+    /// through it, each one a row named "RULES" or "GRAVEYARD" with nothing to
+    /// say which conversation it is part of. Keeping them with their parent is
+    /// what makes the name enough.
+    ///
+    /// A topic whose parent is not in the list keeps its place in the ordinary
+    /// order rather than disappearing. That happens while searching, when the
+    /// term matches the topic and not the group, and losing the row would be a
+    /// search that hides its own results.
+    private func nested(_ rows: [ConversationRow]) -> [ConversationRow] {
+        let topics = rows.filter(\.isTopic)
+        guard !topics.isEmpty else { return rows }
+
+        let byParent = Dictionary(grouping: topics) { $0.parentID ?? "" }
+        var placed: Set<ConversationID> = []
+        var ordered: [ConversationRow] = []
+
+        for row in rows where !row.isTopic {
+            ordered.append(row)
+            guard case .group(let id) = row.id else { continue }
+            for topic in byParent[id, default: []] {
+                ordered.append(topic)
+                placed.insert(topic.id)
+            }
+        }
+        // Whatever had no parent above it, in the order it already had.
+        ordered.append(contentsOf: topics.filter { !placed.contains($0.id) })
+        return ordered
     }
 
     /// Shown before the first sync finishes, and for the rare account with
@@ -208,13 +244,25 @@ struct ConversationCell: View {
     let row: ConversationRow
 
     @ScaledMetric(relativeTo: .body) private var avatarSize: CGFloat = 50
+    @ScaledMetric(relativeTo: .body) private var topicAvatarSize: CGFloat = 34
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
+            // Indented and smaller, so a run of topics reads as belonging to the
+            // group above rather than as six more conversations.
+            if row.isTopic {
+                Rectangle()
+                    .fill(.quaternary)
+                    .frame(width: 2)
+                    .padding(.leading, 10)
+                    .padding(.vertical, 2)
+                    .accessibilityHidden(true)
+            }
+
             Avatar(
                 url: row.avatarURL,
                 name: row.name,
-                size: avatarSize,
+                size: row.isTopic ? topicAvatarSize : avatarSize,
                 isGroup: row.isGroup
             )
 
@@ -223,6 +271,13 @@ struct ConversationCell: View {
                     Text(row.name.isEmpty ? "Conversation" : row.name)
                         .font(.headline)
                         .lineLimit(1)
+
+                    if row.postingPolicy == .adminsOnly {
+                        Image(systemName: "megaphone.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .accessibilityLabel("Announcements only")
+                    }
 
                     if row.isMuted {
                         Image(systemName: "bell.slash.fill")

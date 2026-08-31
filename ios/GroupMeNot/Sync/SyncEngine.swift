@@ -179,6 +179,12 @@ actor SyncEngine {
             try await store.conversations.upsert(chats: chats)
             continuation.yield(.conversations)
 
+            let topics = await subgroups(of: groups)
+            if !topics.isEmpty {
+                try await store.conversations.upsert(subgroups: topics)
+                continuation.yield(.conversations)
+            }
+
             // 3. Diff against local heads and close the gaps.
             // Two different questions, and the difference between them is the
             // whole point. `historyHeads` is how far we have *paged*;
@@ -244,6 +250,30 @@ actor SyncEngine {
         await roster
     }
 
+    /// The topics inside every group that has any.
+    ///
+    /// `children_count` is the gate, and it is what makes this cheap: almost no
+    /// group has topics, so almost no group costs a request. Without the gate
+    /// this would be one call per conversation on every sync to discover that
+    /// nineteen out of twenty have nothing.
+    ///
+    /// A group whose topics fail to load is a group without topics for this
+    /// cycle. They are conversations, not corrections, and nothing in the
+    /// history diff depends on them.
+    private func subgroups(of groups: [Group]) async -> [Subgroup] {
+        let parents = groups.filter { ($0.childrenCount ?? 0) > 0 }
+        guard !parents.isEmpty else { return [] }
+
+        var found: [Subgroup] = []
+        await withTaskGroup(of: [Subgroup].self) { tasks in
+            for parent in parents {
+                tasks.addTask { (try? await self.api.subgroups(of: parent.id)) ?? [] }
+            }
+            for await batch in tasks { found.append(contentsOf: batch) }
+        }
+        return found
+    }
+
     /// Fetch a group's membership, which the list step deliberately does without.
     ///
     /// `GET /v3/groups` is asked for `omit=memberships` because a member list
@@ -251,7 +281,12 @@ actor SyncEngine {
     /// `GET /v3/groups/{id}` does include them, so opening a conversation is
     /// where the roster gets filled in and the member count becomes true.
     private func refreshRoster(of conversation: ConversationID) async {
-        guard case .group(let groupID) = conversation else { return }
+        // A topic has no roster of its own. `GET /v3/groups/{topicID}` is a 404,
+        // and its membership is simply its parent's, so the parent is what gets
+        // asked and the members are written against the topic.
+        let source = (try? await store.conversations.conversation(conversation))?
+            .rosterSource ?? conversation
+        guard case .group(let groupID) = source else { return }
         do {
             let group = try await api.group(id: groupID)
             // Only the roster. Writing the whole row here would also write the

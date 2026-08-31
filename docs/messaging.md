@@ -203,3 +203,35 @@ GET  https://api.groupme.com/v3/pinned/direct_messages?other_user_id={userId}
 ```
 
 Pinned state also rides on the message object itself as `pinned_at` and `pinned_by`.
+
+
+## Subgroups (topics)
+
+A group may contain topics, which the API calls subgroups. They are conversations in every
+way that matters, and they are close to invisible unless you go looking:
+
+- They never appear in `GET /v3/groups`. Sampled across 20 groups, 0 of 6 topics showed up.
+- `GET /v3/groups/{topicId}` answers **404**. A topic is not readable as a group.
+- `GET /v3/groups/{parentId}/subgroups` is the only listing. `?include=unread_count` works.
+- Their messages *are* read and written at the ordinary group routes:
+  `GET /v3/groups/{topicId}/messages` answers 200.
+
+`children_count` on the parent group is how you know to ask, and it is worth honouring: almost
+no group has topics, so gating on it turns one request per conversation into one request per
+account.
+
+A topic carries its own `unread_count`, `last_read_message_id`, `muted_until`, `like_icon` and
+`message_edit_period`, plus:
+
+| field | meaning |
+| ----- | ------- |
+| `id`, `parent_id` | **numbers**, not strings, unlike every other id in this API |
+| `topic` | the name. There is no `name` field |
+| `type` | `announcement` or `private` |
+
+`type` is the posting rule. `announcement` means admins and the owner only; `private` means
+anybody in the parent group. Roles live on the *parent's* member list (`owner`, `admin`,
+`user`), since a topic has no membership of its own.
+
+Observed on a live group with `children_count: 6` — three `announcement` topics (rules,
+announcements, confirmed kills) and three `private` ones.
