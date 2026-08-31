@@ -223,37 +223,63 @@ struct ChatView: View {
 
     // MARK: Composer
 
+    /// Messages-shaped: a round attach button, then a capsule that grows with
+    /// the text and carries its own send button once there is something to send.
+    ///
+    /// The send control lives *inside* the capsule rather than beside it so the
+    /// field keeps its full width while empty, which is the detail that makes
+    /// the whole bar read as native rather than approximately native.
     private var composer: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            TextField("Message", text: $draft, axis: .vertical)
-                .textInputAutocapitalization(.sentences)
-                .lineLimit(1...6)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(.quaternary, in: .capsule)
-                .focused($composerFocused)
-                .accessibilityLabel("Message")
-                .onChange(of: draft) { _, text in
-                    // Throttled inside the socket client, so every keystroke
-                    // calling this is the intended usage.
-                    guard !text.isEmpty else { return }
-                    Task { await model.userIsTyping() }
-                }
-
-            Button(action: send) {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 30))
-                    .symbolRenderingMode(.hierarchical)
+            Button(action: {}) {
+                Image(systemName: "plus")
+                    .font(.system(size: 21, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, height: 34)
+                    .background(.quaternary, in: .circle)
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.tint)
-            .disabled(!canSend)
-            .opacity(canSend ? 1 : 0.35)
-            .animation(.easeOut(duration: 0.15), value: canSend)
-            .accessibilityLabel("Send")
+            .accessibilityLabel("Add attachment")
+
+            HStack(alignment: .bottom, spacing: 4) {
+                TextField("Message", text: $draft, axis: .vertical)
+                    .textInputAutocapitalization(.sentences)
+                    .lineLimit(1...6)
+                    .padding(.leading, 14)
+                    .padding(.vertical, 7)
+                    .focused($composerFocused)
+                    .accessibilityLabel("Message")
+                    .onChange(of: draft) { _, text in
+                        // Throttled inside the socket client, so every keystroke
+                        // calling this is the intended usage.
+                        guard !text.isEmpty else { return }
+                        Task { await model.userIsTyping() }
+                    }
+
+                if canSend {
+                    Button(action: send) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 27))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(Color(.systemBackground), Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 3)
+                    .padding(.bottom, 2)
+                    .transition(.scale.combined(with: .opacity))
+                    .accessibilityLabel("Send")
+                } else {
+                    Color.clear.frame(width: 10, height: 1)
+                }
+            }
+            .background {
+                Capsule().fill(.quaternary.opacity(0.5))
+                Capsule().strokeBorder(.quaternary, lineWidth: 0.75)
+            }
+            .animation(.snappy(duration: 0.18), value: canSend)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.vertical, 7)
         // `.bar` keeps the composer legible over whatever scrolls beneath it,
         // and `safeAreaInset` puts it above the keyboard for free.
         .background(.bar)
@@ -296,26 +322,28 @@ struct ChatView: View {
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .principal) {
-            HStack(spacing: 8) {
+            VStack(spacing: 2) {
                 Avatar(
                     url: conversation.avatarURL,
                     name: conversation.name,
-                    size: 28,
+                    size: 30,
                     isGroup: conversation.isGroup
                 )
-                VStack(spacing: 0) {
+                HStack(spacing: 3) {
                     Text(conversation.name)
-                        .font(.headline)
+                        .font(.caption.weight(.medium))
                         .lineLimit(1)
-                    if conversation.isGroup, let count = memberCount {
-                        Text("\(count) members")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
                 }
             }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel(conversation.name)
+            .accessibilityLabel(
+                conversation.isGroup && memberCount != nil
+                    ? "\(conversation.name), \(memberCount!) members"
+                    : conversation.name
+            )
         }
     }
 
