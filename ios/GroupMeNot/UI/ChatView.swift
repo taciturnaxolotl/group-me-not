@@ -474,7 +474,7 @@ struct ChatView: View {
                     bottomSpacer
                 }
                 .padding(.horizontal, 10)
-                .background(NoScrollToTop().allowsHitTesting(false))
+                .background(TranscriptScrollTuning().allowsHitTesting(false))
             }
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             // Deliberately optional, and `nil` nearly all the time. See
@@ -1505,19 +1505,13 @@ private struct TypingDots: View {
     }
 }
 
-/// Switches off the status bar's scroll-to-top gesture for the scroll view it
-/// is placed inside.
+/// Two corrections to the `UIScrollView` behind the transcript, neither of
+/// which SwiftUI exposes a way to make.
 ///
-/// The gesture means "go to the beginning of the content", which in almost every
-/// app is helpful and in a transcript is the least useful place there is: the
-/// beginning of a chat is the oldest message anybody has ever sent in it. Worse,
-/// the target is the whole status bar, so it fires on a tap near the header that
-/// was meant for the header, and a year of history goes past in one frame.
-///
-/// A probe rather than a modifier because SwiftUI exposes no way to say this. It
-/// walks up from its own position in the view tree to the enclosing
-/// `UIScrollView`, which is one hop in practice.
-private struct NoScrollToTop: UIViewRepresentable {
+/// A probe rather than a modifier because there is no other handle on that
+/// scroll view. It walks up from its own place in the view tree to the enclosing
+/// one, which is a hop or two, and is otherwise inert.
+private struct TranscriptScrollTuning: UIViewRepresentable {
     func makeUIView(context: Context) -> UIView {
         let probe = Probe()
         // It is a background spanning the whole transcript. Left interactive it
@@ -1527,24 +1521,80 @@ private struct NoScrollToTop: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        (uiView as? Probe)?.disable()
+        (uiView as? Probe)?.attach()
     }
 
     final class Probe: UIView {
+        private weak var scrollView: UIScrollView?
+        private var observation: NSKeyValueObservation?
+        private var lastBottomInset: CGFloat?
+
         override func didMoveToWindow() {
             super.didMoveToWindow()
-            disable()
+            attach()
         }
 
-        func disable() {
+        func attach() {
+            guard scrollView == nil else { return }
             var ancestor: UIView? = superview
             while let current = ancestor {
-                if let scrollView = current as? UIScrollView {
-                    scrollView.scrollsToTop = false
+                if let scroll = current as? UIScrollView {
+                    bind(scroll)
                     return
                 }
                 ancestor = current.superview
             }
+        }
+
+        private func bind(_ scroll: UIScrollView) {
+            scrollView = scroll
+
+            // 1. No scroll-to-top.
+            //
+            // The status bar gesture means "go to the beginning of the content",
+            // which in almost every app is helpful and in a transcript is the
+            // least useful place there is: the beginning of a chat is the oldest
+            // message anybody ever sent in it. Worse, its target is the whole
+            // status bar, so it fires on a tap near the header that was meant
+            // for the header, and a year of history goes past in one frame.
+            scroll.scrollsToTop = false
+
+            // 2. Keep the view still when the keyboard arrives.
+            lastBottomInset = scroll.adjustedContentInset.bottom
+            observation = scroll.observe(\.adjustedContentInset, options: [.new]) { scroll, _ in
+                MainActor.assumeIsolated { [weak self] in self?.bottomInsetChanged(on: scroll) }
+            }
+        }
+
+        /// The keyboard does not move a scroll view; it inflates the bottom of
+        /// its safe area, and a scroll view answers that by keeping its offset.
+        /// The content therefore stays exactly where it was and the keyboard is
+        /// drawn on top of the part the reader was reading.
+        ///
+        /// Adding the same amount to the offset is what "the view did not move"
+        /// actually requires. It is applied without an animation of its own so
+        /// it inherits the keyboard's, which is what makes the two look like one
+        /// movement rather than a scroll chasing a keyboard.
+        private func bottomInsetChanged(on scroll: UIScrollView) {
+            let bottom = scroll.adjustedContentInset.bottom
+            defer { lastBottomInset = bottom }
+            guard let previous = lastBottomInset else { return }
+
+            // Only growth, and only growth worth the name: this fires for every
+            // inset change, including the ones this very adjustment settles.
+            let delta = bottom - previous
+            guard delta > 1 else { return }
+            // A finger on the glass owns the scroll view. Nothing here outranks
+            // that.
+            guard !scroll.isDragging, !scroll.isDecelerating else { return }
+
+            let furthest = max(
+                -scroll.adjustedContentInset.top,
+                scroll.contentSize.height + bottom - scroll.bounds.height)
+            let target = min(scroll.contentOffset.y + delta, furthest)
+            guard target > scroll.contentOffset.y + 0.5 else { return }
+            scroll.setContentOffset(
+                CGPoint(x: scroll.contentOffset.x, y: target), animated: false)
         }
     }
 }
