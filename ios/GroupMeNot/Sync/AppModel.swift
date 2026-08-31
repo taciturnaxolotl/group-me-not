@@ -99,6 +99,10 @@ final class AppModel {
     /// one is temporary, and the transcript offers to try again rather than
     /// pretending it is still loading.
     private(set) var olderPageFailed = false
+
+    /// Placeholder ids we have already asked the server to resolve, so a row the
+    /// server never replaces cannot spin the catch-up forever.
+    @ObservationIgnored private var attemptedHeals: Set<String> = []
     @ObservationIgnored private var typingSweep: Task<Void, Never>?
 
     /// Where the signed-in user is remembered between launches. Small enough for
@@ -217,6 +221,7 @@ final class AppModel {
         typingUserIDs = [:]
         reachedBeginning = false
         olderPageFailed = false
+        attemptedHeals = []
         Task { [bayeux] in await bayeux.focus(on: nil) }
     }
 
@@ -690,6 +695,46 @@ final class AppModel {
         openConversationID = nil
         totalUnread = 0
         syncState = SyncState(isOnline: realtime.reachability != .offline)
+        attemptedHeals = []
+        await sync.forgetTips()
+    }
+
+    // MARK: - Cache
+
+    /// Throw away everything that can be fetched again, and fetch it again.
+    ///
+    /// Deliberately not a sign-out. The token, the identity and above all the
+    /// outbox stay: a queued message is something the user wrote, and no server
+    /// can give it back. The outbox table carries no foreign key to
+    /// `conversations` precisely so that it survives this.
+    ///
+    /// What goes is history, rosters, sync cursors and link previews, which is
+    /// to say every row whose only author is the server. The list comes back on
+    /// the sync that follows; the open transcript comes back on its catch-up.
+    func clearCache() async {
+        let rows = (try? await store.conversations.list(limit: 5000)) ?? []
+        for row in rows { try? await store.conversations.delete(row.id) }
+        await previews.clear()
+        // The tips are a memory of what the list said a moment ago, and every
+        // head they name has just been deleted. Left in place they would make
+        // the next list read as "advanced by one" and write a placeholder over
+        // the hole instead of paging it back in.
+        await sync.forgetTips()
+
+        conversations = []
+        messages = []
+        members = []
+        totalUnread = 0
+        window = Self.transcriptPage
+        reachedBeginning = false
+        olderPageFailed = false
+        attemptedHeals = []
+
+        guard isSignedIn else { return }
+        await sync.sync(reason: .manual)
+        if let open = openConversationID { await sync.catchUp(open) }
+        await reloadConversations()
+        await reloadMessages()
     }
 
     // MARK: - Identity
@@ -877,5 +922,28 @@ final class AppModel {
         guard let conversation = openConversationID else { return }
         if let stored = await transcript(conversation) { messages = stored }
         outbox = await sends.pending(in: conversation)
+        healPlaceholders()
+    }
+
+    /// Replace any list-preview placeholder on screen with the server's copy.
+    ///
+    /// A group's list preview carries the text and the nickname but no sender
+    /// id, and ``SyncEngine`` writes one as a stand-in when the list proves a
+    /// conversation moved by exactly one message. That saves a request, and it
+    /// costs the one field the transcript needs to know whose bubble this is: a
+    /// message you sent from another device arrives unattributed and draws as
+    /// somebody else's.
+    ///
+    /// Opening a conversation already heals it, because ``SyncEngine/catchUp(_:)``
+    /// anchors behind a placeholder head. The gap is the conversation that was
+    /// *already* open when the stand-in landed, which is exactly the case where
+    /// the wrong bubble is being looked at. So the fetch is paid here, only when
+    /// a placeholder is actually on screen.
+    private func healPlaceholders() {
+        guard let conversation = openConversationID else { return }
+        let unresolved = messages.filter { $0.isListPreview && !attemptedHeals.contains($0.id) }
+        guard !unresolved.isEmpty else { return }
+        attemptedHeals.formUnion(unresolved.map(\.id))
+        Task { await self.sync.catchUp(conversation) }
     }
 }

@@ -213,6 +213,17 @@ actor SyncEngine {
         }
     }
 
+    /// Forget what the last list fetch said.
+    ///
+    /// The shortcut in ``plans(groups:chats:heads:)`` compares this fetch's tip
+    /// against the previous one, so a caller that has just emptied the database
+    /// underneath it has to say so. Otherwise the next list looks like "advanced
+    /// by exactly one" against a head that no longer exists, and writes a
+    /// placeholder instead of paging the history back in.
+    func forgetTips() {
+        lastSeenTips = [:]
+    }
+
     /// Catch one conversation up now. Used when a conversation opens, and when
     /// the outbox needs a server id resolved.
     ///

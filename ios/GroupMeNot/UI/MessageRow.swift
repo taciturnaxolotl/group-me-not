@@ -161,6 +161,8 @@ private struct BubbleRow: View {
     let canEdit: Bool
     let onEdit: (String) -> Void
 
+    @Environment(AppSettings.self) private var settings
+
     @ScaledMetric(relativeTo: .body) private var avatarSize: CGFloat = 28
     @ScaledMetric(relativeTo: .body) private var gutter: CGFloat = 56
     @ScaledMetric(relativeTo: .caption) private var chipHeight: CGFloat = 26
@@ -181,18 +183,30 @@ private struct BubbleRow: View {
     @State private var editWanted = false
     @State private var editDraft = ""
 
+    /// Which edge this bubble hangs off.
+    ///
+    /// Everyone else is always leading; my own messages follow the setting.
+    /// Layout reads this, and only this. Colour still reads `item.isOwn`,
+    /// because who said a thing does not change when you move it.
+    private var isTrailing: Bool {
+        item.isOwn && settings.ownMessageAlignment == .sided
+    }
+
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            if item.isOwn {
+            if isTrailing {
                 // Keeps my bubbles from running the full width, which is what
                 // makes the two sides readable at a glance.
                 Spacer(minLength: gutter)
             } else {
+                // In one-column mode my own messages get a face and a name too.
+                // Without them the column would start at a different x for me
+                // than for everyone else, which reads as a mistake.
                 avatarSlot
             }
 
-            VStack(alignment: item.isOwn ? .trailing : .leading, spacing: 2) {
-                if item.showsSender && !item.isOwn {
+            VStack(alignment: isTrailing ? .trailing : .leading, spacing: 2) {
+                if item.showsSender && !isTrailing {
                     Text(item.senderName)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -205,7 +219,7 @@ private struct BubbleRow: View {
                 footer
             }
 
-            if !item.isOwn { Spacer(minLength: gutter) }
+            if !isTrailing { Spacer(minLength: gutter) }
         }
         .padding(.vertical, item.isRunTail ? 3 : 1)
         // `.contain` rather than `.combine`: the chips, the links and the
@@ -229,13 +243,13 @@ private struct BubbleRow: View {
     /// Bubble, preview card, and the reaction chips that straddle the bottom of
     /// whichever of those two ends up last.
     private var messageBody: some View {
-        VStack(alignment: item.isOwn ? .trailing : .leading, spacing: 4) {
+        VStack(alignment: isTrailing ? .trailing : .leading, spacing: 4) {
             bubble
             if let link = item.previewLink {
                 LinkPreviewCard(url: link, isOwn: item.isOwn, service: previews)
             }
         }
-        .overlay(alignment: item.isOwn ? .bottomTrailing : .bottomLeading) { chips }
+        .overlay(alignment: isTrailing ? .bottomTrailing : .bottomLeading) { chips }
         // The overlay draws outside the layout, so the overhang is paid for
         // here. Without this the row below would be sat on.
         .padding(.bottom, item.reactions.isEmpty ? 0 : chipHeight - chipOverlap)
@@ -309,11 +323,11 @@ private struct BubbleRow: View {
         if !item.reactions.isEmpty {
             ReactionChips(
                 summaries: item.reactions,
-                isOwn: item.isOwn,
+                isOwn: isTrailing,
                 height: chipHeight,
                 onTap: onReact
             )
-            .offset(x: item.isOwn ? -10 : 10, y: chipHeight - chipOverlap)
+            .offset(x: isTrailing ? -10 : 10, y: chipHeight - chipOverlap)
             .transition(.scale(scale: 0.8).combined(with: .opacity))
         }
     }
@@ -330,8 +344,11 @@ private struct BubbleRow: View {
                     .padding(.horizontal, 4)
                     .padding(.vertical, 2)
             } else {
-                VStack(alignment: item.isOwn ? .trailing : .leading, spacing: 6) {
-                    AttachmentStack(attachments: displayableAttachments, isOwn: item.isOwn)
+                VStack(alignment: isTrailing ? .trailing : .leading, spacing: 6) {
+                    AttachmentStack(
+                        attachments: displayableAttachments,
+                        isOwn: item.isOwn,
+                        isTrailing: isTrailing)
                     if !item.text.isEmpty {
                         Text(item.styledText)
                             .font(.body)
@@ -374,14 +391,14 @@ private struct BubbleRow: View {
 
     /// Rounded on three corners, and squared off on the one nearest the sender
     /// when the run ends. Same idea as Messages: the tail points at whoever
-    /// said it.
+    /// said it, which means it follows the alignment rather than the author.
     private var bubbleShape: UnevenRoundedRectangle {
         let big: CGFloat = 18
         let tail: CGFloat = item.isRunTail ? 5 : 18
         return UnevenRoundedRectangle(
             topLeadingRadius: big,
-            bottomLeadingRadius: item.isOwn ? big : tail,
-            bottomTrailingRadius: item.isOwn ? tail : big,
+            bottomLeadingRadius: isTrailing ? big : tail,
+            bottomTrailingRadius: isTrailing ? tail : big,
             topTrailingRadius: big,
             style: .continuous
         )
@@ -498,14 +515,19 @@ private struct Tombstone: View {
 
 // MARK: - Attachments
 
-/// Everything hanging off a message, drawn in a fixed frame.
+/// Everything hanging off a message.
 ///
-/// The frame is fixed on purpose. We do not learn a photo's aspect ratio until
-/// it downloads, and letting the row resize on arrival is exactly the thing
-/// that throws a transcript's scroll position across the screen.
+/// Photos draw at their real shape and still never resize on arrival, because
+/// the shape comes out of the URL rather than out of the pixels. See
+/// `MediaDimensions`. The frame is settled on the first layout pass, so the
+/// transcript's scroll position is safe.
 private struct AttachmentStack: View {
     let attachments: [Message.Attachment]
+    /// Who wrote it, which decides the tint.
     let isOwn: Bool
+    /// Which edge the bubble hangs off, which decides the layout. The two come
+    /// apart once own messages can be drawn on the leading edge.
+    let isTrailing: Bool
 
     /// The one the user tapped, if any. Wrapped rather than used directly
     /// because `Message.Attachment` has no identity of its own and a message can
@@ -514,7 +536,7 @@ private struct AttachmentStack: View {
 
     var body: some View {
         if !attachments.isEmpty {
-            VStack(alignment: isOwn ? .trailing : .leading, spacing: 6) {
+            VStack(alignment: isTrailing ? .trailing : .leading, spacing: 6) {
                 ForEach(Array(attachments.enumerated()), id: \.offset) { index, attachment in
                     view(for: attachment, at: index)
                 }
@@ -528,7 +550,7 @@ private struct AttachmentStack: View {
     @ViewBuilder private func view(for attachment: Message.Attachment, at index: Int) -> some View {
         switch attachment.type {
         case "image", "video", "linked_image":
-            MediaThumbnail(attachment: attachment)
+            MediaThumbnail(attachment: attachment, heightCap: heightCap)
                 .onTapGesture { viewing = ViewableMedia(id: index, attachment: attachment) }
         case "location":
             AttachmentChip(
@@ -549,6 +571,17 @@ private struct AttachmentStack: View {
         default:
             AttachmentChip(symbol: "paperclip", title: Self.noun(for: attachment.type), isOwn: isOwn)
         }
+    }
+
+    /// How tall any one photo here may draw.
+    ///
+    /// A lone portrait shot is allowed real height; a message carrying three of
+    /// them is not, or the reader has to scroll past one message to reach the
+    /// next. Fixed off the count rather than measured, so it is known before
+    /// anything loads.
+    private var heightCap: CGFloat {
+        let pictures = attachments.filter { $0.type == "image" || $0.type == "video" || $0.type == "linked_image" }
+        return pictures.count > 1 ? 200 : 320
     }
 
     /// A word for an attachment the transcript cannot render, used in previews
@@ -575,16 +608,32 @@ private struct ViewableMedia: Identifiable {
 }
 
 /// A photo or video still in a box of known size.
+///
+/// "Known" is the important word. The box is computed from the dimensions
+/// GroupMe puts in the URL, so it is both the picture's true shape and settled
+/// before the first byte arrives. Scaled to fit, never cropped.
 private struct MediaThumbnail: View {
     let attachment: Message.Attachment
+    /// The tallest this photo may draw, decided by how many are in the message.
+    var heightCap: CGFloat = 320
 
-    /// Roughly the 4:3 a phone camera produces, capped so a bubble never runs
-    /// off the side of a small screen.
-    private let width: CGFloat = 232
-    private let height: CGFloat = 174
+    /// The widest a photo draws. A little under half the narrowest phone in
+    /// portrait, which leaves the gutter, the avatar and the padding room on
+    /// every device rather than only on big ones.
+    private static let maxWidth: CGFloat = 240
+    /// Small pictures draw at life size rather than blown up, but not so small
+    /// that they stop being a tap target.
+    private static let minWidth: CGFloat = 96
+
+    /// The box used when the URL declares no dimensions: older messages, other
+    /// hosts, and the local `file://` URL a queued upload points at. Roughly
+    /// the 4:3 a phone camera produces. Guessing a shape would be worse than
+    /// admitting we do not know one, so this stays the fallback and only the
+    /// fallback.
+    private static let fallback = CGSize(width: 232, height: 174)
 
     var body: some View {
-        RemoteImage(url: url, maxPixelSize: width * 3) {
+        RemoteImage(url: url, maxPixelSize: box.width * 3) {
             ZStack {
                 Rectangle().fill(.quaternary)
                 Image(systemName: attachment.type == "video" ? "play.rectangle.fill" : "photo")
@@ -594,7 +643,7 @@ private struct MediaThumbnail: View {
         }
         // The frame is set before anything loads, so the row's height is known
         // from the first layout pass and never changes.
-        .frame(width: width, height: height)
+        .frame(width: box.width, height: box.height)
         .clipShape(.rect(cornerRadius: 12, style: .continuous))
         .overlay {
             if attachment.type == "video" {
@@ -606,6 +655,23 @@ private struct MediaThumbnail: View {
         .accessibilityLabel(attachment.type == "video" ? "Video" : "Photo")
         .accessibilityAddTraits(.isButton)
         .accessibilityHint("Double tap to open")
+    }
+
+    /// The space this photo occupies, in points.
+    ///
+    /// Width first, then height from the true ratio. Doing it in that order is
+    /// what keeps a very tall picture usable: a full-page screenshot fitted on
+    /// both axes would come out a forty-point sliver, so the width is held and
+    /// the height is capped instead. A picture clamped that way is cropped
+    /// rather than squashed, because `RemoteImage` fills its frame and the
+    /// thumbnail clips.
+    private var box: CGSize {
+        guard let declared = MediaDimensions.declared(in: url),
+              declared.width > 0, declared.height > 0
+        else { return Self.fallback }
+        let width = min(max(declared.width, Self.minWidth), Self.maxWidth)
+        let height = width * declared.height / declared.width
+        return CGSize(width: width.rounded(), height: min(height, heightCap).rounded())
     }
 
     /// The still to draw.

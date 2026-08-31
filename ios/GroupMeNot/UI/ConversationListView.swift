@@ -13,6 +13,7 @@ struct ConversationListView: View {
 
     @State private var path: [ConversationRow] = []
     @State private var query = ""
+    @State private var isSettingsPresented = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -30,6 +31,9 @@ struct ConversationListView: View {
                 .refreshable { await model.refresh() }
                 .safeAreaInset(edge: .top, spacing: 0) {
                     NetworkStatusBanner(state: model.syncState)
+                }
+                .sheet(isPresented: $isSettingsPresented) {
+                    SettingsView()
                 }
         }
     }
@@ -170,16 +174,19 @@ struct ConversationListView: View {
         .listRowBackground(Color.clear)
     }
 
+    /// Still a menu rather than a button straight to Settings, because this is
+    /// where account-level actions will keep landing and a menu can grow. Sign
+    /// Out has moved inside Settings, where it sits next to the account it ends.
     private var accountMenu: some View {
         SwiftUI.Group {
             Menu {
                 if let name = model.currentUser?.name {
                     Text(name)
                 }
-                Button(role: .destructive) {
-                    Task { await model.signOut() }
+                Button {
+                    isSettingsPresented = true
                 } label: {
-                    Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
+                    Label("Settings", systemImage: "gearshape")
                 }
             } label: {
                 Avatar(
