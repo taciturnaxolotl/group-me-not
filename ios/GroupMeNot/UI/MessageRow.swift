@@ -248,6 +248,16 @@ private struct BubbleRow: View {
     /// whichever of those two ends up last.
     private var messageBody: some View {
         VStack(alignment: isTrailing ? .trailing : .leading, spacing: 4) {
+            // Outside the bubble, deliberately. A photo is not text with a
+            // picture in it; it is the message. Wrapping it in tinted padding
+            // puts a coloured frame around somebody's holiday snap and makes
+            // every image on screen sit inside a box it does not need. Messages
+            // draws them bare, and a caption underneath becomes its own bubble.
+            if !pictureAttachments.isEmpty, !item.message.isDeleted {
+                PhotoCascade(pictures: pictureAttachments, isTrailing: isTrailing)
+                    .opacity(item.isPending ? 0.55 : 1)
+                    .animation(.easeOut(duration: 0.2), value: item.isPending)
+            }
             bubble
             if let link = item.previewLink {
                 LinkPreviewCard(url: link, isOwn: item.isOwn, service: previews)
@@ -343,9 +353,22 @@ private struct BubbleRow: View {
         }
     }
 
+    /// Whether there is anything left for a bubble to hold.
+    ///
+    /// A message that is only photographs gets no bubble at all: an empty tinted
+    /// rectangle under a picture is a frame around nothing.
+    private var hasBubbleContent: Bool {
+        item.message.isDeleted
+            || !item.text.isEmpty
+            || item.isEdited
+            || !otherAttachments.isEmpty
+    }
+
     @ViewBuilder private var bubble: some View {
         SwiftUI.Group {
-            if item.message.isDeleted {
+            if !hasBubbleContent {
+                EmptyView()
+            } else if item.message.isDeleted {
                 Tombstone()
             } else if item.isEmojiOnly {
                 // No tint, no padding worth speaking of: a lone emoji is its
@@ -356,10 +379,9 @@ private struct BubbleRow: View {
                     .padding(.vertical, 2)
             } else {
                 VStack(alignment: isTrailing ? .trailing : .leading, spacing: 6) {
-                    AttachmentStack(
-                        attachments: displayableAttachments,
-                        isOwn: item.isOwn,
-                        isTrailing: isTrailing)
+                    ForEach(Array(otherAttachments.enumerated()), id: \.offset) { _, attachment in
+                        AttachmentChipFor(attachment: attachment, isOwn: item.isOwn)
+                    }
                     if !item.text.isEmpty {
                         Text(item.styledText)
                             .font(.body)
@@ -499,6 +521,19 @@ private struct BubbleRow: View {
         return actions
     }
 
+    /// The photographs, in order, which is also the order the viewer pages
+    /// through.
+    private var pictureAttachments: [Message.Attachment] {
+        displayableAttachments.filter { PhotoCascade.isPicture($0.type) }
+    }
+
+    /// Everything else: places, files, polls. These stay in the bubble, because
+    /// each is drawn as a chip that reads as part of the message rather than as
+    /// the message.
+    private var otherAttachments: [Message.Attachment] {
+        displayableAttachments.filter { !PhotoCascade.isPicture($0.type) }
+    }
+
     /// Replies and mentions are structure, not content: they have nothing to
     /// draw on their own, so they never reach the attachment stack.
     private var displayableAttachments: [Message.Attachment] {
@@ -540,18 +575,14 @@ private struct Tombstone: View {
 
 // MARK: - Attachments
 
-/// Everything hanging off a message.
+/// The photographs a message carried, drawn bare.
 ///
-/// Photos draw at their real shape and still never resize on arrival, because
-/// the shape comes out of the URL rather than out of the pixels. See
-/// `MediaDimensions`. The frame is settled on the first layout pass, so the
-/// transcript's scroll position is safe.
-private struct AttachmentStack: View {
-    let attachments: [Message.Attachment]
-    /// Who wrote it, which decides the tint.
-    let isOwn: Bool
-    /// Which edge the bubble hangs off, which decides the layout. The two come
-    /// apart once own messages can be drawn on the leading edge.
+/// No tint, no padding, no bubble. Photos draw at their real shape and still
+/// never resize on arrival, because the shape comes out of the URL rather than
+/// out of the pixels. See `MediaDimensions`.
+private struct PhotoCascade: View {
+    let pictures: [Message.Attachment]
+    /// Which edge the message hangs off, which decides which way the pile leans.
     let isTrailing: Bool
 
     /// The one the user tapped, if any. Wrapped rather than used directly
@@ -559,20 +590,17 @@ private struct AttachmentStack: View {
     /// carry two identical ones.
     @State private var viewing: ViewableMedia?
 
+    static func isPicture(_ type: String?) -> Bool {
+        type == "image" || type == "video" || type == "linked_image"
+    }
+
     var body: some View {
-        if !attachments.isEmpty {
-            VStack(alignment: isTrailing ? .trailing : .leading, spacing: 6) {
-                pictureStack
-                ForEach(Array(others.enumerated()), id: \.offset) { _, attachment in
-                    view(for: attachment)
-                }
-            }
+        content
             .fullScreenCover(item: $viewing) { item in
                 // The whole run, not the one that was tapped, so a swipe inside
                 // the viewer reaches the others.
                 MediaViewer(attachments: pictures, initialIndex: item.id)
             }
-        }
     }
 
     /// Several photos are stacked and staggered rather than listed.
@@ -583,7 +611,7 @@ private struct AttachmentStack: View {
     /// than as one thing somebody sent. Overlapping them says "these arrived
     /// together" in a way vertical spacing cannot, and the alternating offset is
     /// what keeps the one underneath legible instead of merely hidden.
-    @ViewBuilder private var pictureStack: some View {
+    @ViewBuilder private var content: some View {
         if pictures.count == 1 {
             MediaThumbnail(attachment: pictures[0], heightCap: heightCap)
                 .onTapGesture { viewing = ViewableMedia(id: 0, attachment: pictures[0]) }
@@ -591,10 +619,8 @@ private struct AttachmentStack: View {
             // Placed by hand, and sized by hand, because both halves of that
             // matter. A `VStack` with negative spacing and `.offset` children
             // leaves the container describing a different rectangle from the one
-            // its contents actually occupy, and the bubble sizes itself to the
-            // description: the photos spill out of the tint and float above the
-            // message they belong to. Here the frame is the arithmetic, so the
-            // bubble cannot disagree with what is drawn inside it.
+            // its contents actually occupy, and whatever lays it out believes
+            // the description. Here the frame is the arithmetic.
             ZStack(alignment: .topLeading) {
                 ForEach(Array(pictures.enumerated()), id: \.offset) { index, attachment in
                     MediaThumbnail(
@@ -612,6 +638,14 @@ private struct AttachmentStack: View {
             .frame(width: stackSize.width, height: stackSize.height, alignment: .topLeading)
         }
     }
+
+    /// How tall any one photo here may draw.
+    ///
+    /// A lone portrait shot is allowed real height; a message carrying three of
+    /// them is not, or the reader has to scroll past one message to reach the
+    /// next. Fixed off the count rather than measured, so it is known before
+    /// anything loads.
+    private var heightCap: CGFloat { pictures.count > 1 ? 240 : 360 }
 
     /// Every picture's box, worked out once so the cascade can place them.
     private var boxes: [CGSize] {
@@ -643,71 +677,12 @@ private struct AttachmentStack: View {
     private static let stagger: CGFloat = 14
     /// How much of the photo above stays covered.
     private static let overlap: CGFloat = 22
-
-    /// The pictures, in order, which is also the order the viewer pages through.
-    private var pictures: [Message.Attachment] {
-        attachments.filter { Self.isPicture($0.type) }
-    }
-
-    private var others: [Message.Attachment] {
-        attachments.filter { !Self.isPicture($0.type) }
-    }
-
-    private static func isPicture(_ type: String?) -> Bool {
-        type == "image" || type == "video" || type == "linked_image"
-    }
-
-    @ViewBuilder private func view(for attachment: Message.Attachment) -> some View {
-        switch attachment.type {
-        case "location":
-            AttachmentChip(
-                symbol: "mappin.and.ellipse",
-                title: attachment.name ?? "Location",
-                isOwn: isOwn
-            )
-        case "file":
-            AttachmentChip(symbol: "doc.fill", title: attachment.name ?? "File", isOwn: isOwn)
-        case "audio":
-            AttachmentChip(symbol: "waveform", title: "Voice message", isOwn: isOwn)
-        case "poll":
-            AttachmentChip(symbol: "chart.bar.fill", title: "Poll", isOwn: isOwn)
-        case "event":
-            AttachmentChip(symbol: "calendar", title: "Event", isOwn: isOwn)
-        case "emoji":
-            EmptyView()
-        default:
-            AttachmentChip(symbol: "paperclip", title: Self.noun(for: attachment.type), isOwn: isOwn)
-        }
-    }
-
-    /// How tall any one photo here may draw.
-    ///
-    /// A lone portrait shot is allowed real height; a message carrying three of
-    /// them is not, or the reader has to scroll past one message to reach the
-    /// next. Fixed off the count rather than measured, so it is known before
-    /// anything loads.
-    private var heightCap: CGFloat {
-        pictures.count > 1 ? 240 : 360
-    }
-
-    /// A word for an attachment the transcript cannot render, used in previews
-    /// and read aloud by VoiceOver.
-    static func noun(for type: String?) -> String {
-        switch type {
-        case "image", "linked_image": "Photo"
-        case "video": "Video"
-        case "audio": "Voice message"
-        case "file": "File"
-        case "location": "Location"
-        case "emoji": "Sticker"
-        case "poll": "Poll"
-        case "event": "Event"
-        default: "Attachment"
-        }
-    }
 }
 
 /// One tapped attachment, given the identity `fullScreenCover(item:)` needs.
+///
+/// The index is the identity: `Message.Attachment` carries none of its own, and
+/// a message can perfectly well hold the same photo twice.
 private struct ViewableMedia: Identifiable {
     let id: Int
     let attachment: Message.Attachment
@@ -829,6 +804,51 @@ private struct MediaThumbnail: View {
     static func url(of attachment: Message.Attachment) -> URL? {
         let candidate = attachment.previewUrl ?? attachment.url ?? attachment.sourceUrl
         return candidate.flatMap(URL.init(string:))
+    }
+}
+
+/// An attachment the transcript cannot draw inline, named rather than rendered.
+/// These stay inside the bubble: a chip is part of a message, not the message.
+private struct AttachmentChipFor: View {
+    let attachment: Message.Attachment
+    let isOwn: Bool
+
+    var body: some View {
+        switch attachment.type {
+        case "location":
+            AttachmentChip(
+                symbol: "mappin.and.ellipse",
+                title: attachment.name ?? "Location",
+                isOwn: isOwn
+            )
+        case "file":
+            AttachmentChip(symbol: "doc.fill", title: attachment.name ?? "File", isOwn: isOwn)
+        case "audio":
+            AttachmentChip(symbol: "waveform", title: "Voice message", isOwn: isOwn)
+        case "poll":
+            AttachmentChip(symbol: "chart.bar.fill", title: "Poll", isOwn: isOwn)
+        case "event":
+            AttachmentChip(symbol: "calendar", title: "Event", isOwn: isOwn)
+        case "emoji":
+            EmptyView()
+        default:
+            AttachmentChip(symbol: "paperclip", title: Self.noun(for: attachment.type), isOwn: isOwn)
+        }
+    }
+
+    /// A word for an attachment the transcript cannot render, used in previews
+    /// and read aloud by VoiceOver.
+    static func noun(for type: String?) -> String {
+        switch type {
+        case "image", "linked_image": "Photo"
+        case "video": "Video"
+        case "audio": "Voice message"
+        case "file": "File"
+        case "location": "Location"
+        case "poll": "Poll"
+        case "event": "Event"
+        default: "Attachment"
+        }
     }
 }
 
