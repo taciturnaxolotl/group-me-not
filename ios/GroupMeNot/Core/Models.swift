@@ -38,15 +38,41 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
     /// client that *can* render it hides the text, and a client that does not is
     /// a client that prints a raw URL under every video.
     ///
-    /// Exact match only, and that is measured rather than cautious: across
-    /// forty media messages, every video's text was precisely its URL and no
-    /// image's text contained one at all. A looser rule would start eating
-    /// captions that happen to mention a link.
+    /// The URL is appended, so only a *trailing* one is removed. That is a
+    /// deliberate limit rather than a half-measure: `loci` on a mention are
+    /// offsets into this exact string, and cutting anything out of the middle
+    /// or off the front would slide every mention after it onto the wrong word.
+    /// Trimming the tail cannot move an offset that precedes it.
+    ///
+    /// Only the message's own attachment URLs, matched in full. A caption that
+    /// happens to end in some other link keeps it, because that link is
+    /// something a person typed.
     var visibleText: String? {
         guard let text, !text.isEmpty else { return text }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let urls = (attachments ?? []).flatMap { [$0.url, $0.previewUrl, $0.sourceUrl] }
-        return urls.contains(trimmed) ? nil : text
+        let urls = (attachments ?? [])
+            .flatMap { [$0.url, $0.previewUrl, $0.sourceUrl] }
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+        guard !urls.isEmpty else { return text }
+
+        var stripped = Substring(text)
+        // A loop, because a message carrying a video and a photo appends both.
+        var removedSomething = true
+        while removedSomething {
+            removedSomething = false
+            let tail = stripped.reversed().prefix { $0.isWhitespace }.count
+            let body = stripped.dropLast(tail)
+            for url in urls where body.hasSuffix(url) {
+                stripped = body.dropLast(url.count)
+                removedSomething = true
+                break
+            }
+        }
+
+        guard stripped.count != text.count else { return text }
+        let remaining = String(stripped).replacingOccurrences(
+            of: "\\s+$", with: "", options: .regularExpression)
+        return remaining.isEmpty ? nil : remaining
     }
 
     /// The message this one is a reply to, if it is one.
