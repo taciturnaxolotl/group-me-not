@@ -531,6 +531,67 @@ final class AppModel {
     }
 
 
+    /// Whether the Delete action should be offered.
+    ///
+    /// Same three conditions as ``canEdit(_:)``, against the group's own
+    /// deletion window. Groups usually set that window to forever, so unlike
+    /// editing this is normally available — but a group that has switched
+    /// deletion off gets no action rather than one the server refuses.
+    func canDelete(_ message: Message) -> Bool {
+        guard let me = currentUser?.id, (message.senderId ?? message.userId) == me else { return false }
+        guard !message.isDeleted, !message.isSystem, !message.isListPreview else { return false }
+        guard let conversation = openConversationID,
+              let row = conversations.first(where: { $0.id == conversation })
+        else { return false }
+        return row.canDelete(message)
+    }
+
+    /// Take one of our own messages back.
+    ///
+    /// Optimistic in the same order as an edit: the published array, then the
+    /// database, then the server. A refusal puts the message back, because the
+    /// alternative is a tombstone over a message that is still there for
+    /// everybody else.
+    func delete(_ message: Message) async {
+        guard let conversation = openConversationID, canDelete(message) else { return }
+        let original = message
+
+        await applyDeletion(to: message.id, in: conversation)
+        do {
+            try await api.delete(message: message.id, in: conversation)
+        } catch {
+            let detail = diagnosticText(error)
+            log.notice("delete of \(message.id, privacy: .public) did not stick: \(detail, privacy: .public)")
+            // Straight back to what it was. There is no half-deleted state to
+            // reason about, so restoring the whole message is both simplest and
+            // exactly right.
+            if let index = messages.firstIndex(where: { $0.id == original.id }) {
+                messages[index] = original
+            }
+            _ = try? await store.messages.upsert(original, in: conversation)
+            await reloadConversations()
+        }
+    }
+
+    private func applyDeletion(to messageID: String, in conversation: ConversationID) async {
+        let me = currentUser?.id
+        if let index = messages.firstIndex(where: { $0.id == messageID }) {
+            var copy = messages[index]
+            copy.deletedAt = Int(Date().timeIntervalSince1970)
+            copy.deletionActor = me
+            copy.text = nil
+            copy.attachments = nil
+            messages[index] = copy
+        }
+        guard let stored = try? await store.messages.markDeleted(
+            messageID, by: me, in: conversation)
+        else { return }
+        if let index = messages.firstIndex(where: { $0.id == messageID }) {
+            messages[index] = stored
+        }
+        await reloadConversations()
+    }
+
     // MARK: - Reactions
 
     /// What a tap on a chip or a glyph means.

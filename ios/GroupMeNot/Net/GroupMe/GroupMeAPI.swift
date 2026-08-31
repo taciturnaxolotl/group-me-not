@@ -307,6 +307,17 @@ actor GroupMeAPI {
     /// Retries default to none. A send is safe to repeat because `source_guid`
     /// dedupes it; an edit has no such key, and a second PUT of the same text is
     /// harmless but a second PUT racing a *later* edit is not.
+    /// Remove one of our own messages.
+    ///
+    /// The server replaces it with a tombstone rather than erasing it: the id
+    /// stays, `deleted_at` is set, and the next catch-up brings it back in that
+    /// form. Which is why the local write is the same shape.
+    func delete(message messageID: String, in conversation: ConversationID) async throws {
+        let convID = try await restID(for: conversation)
+        try await client.deleteIgnoringResponse(
+            .v3, "/conversations/\(convID)/messages/\(messageID)", retry: .none)
+    }
+
     func edit(
         message messageID: String,
         in conversation: ConversationID,

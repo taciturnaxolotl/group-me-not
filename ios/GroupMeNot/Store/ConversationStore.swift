@@ -85,6 +85,16 @@ nonisolated struct ConversationRow: Identifiable, Hashable, Sendable {
         guard let period = messageEditPeriod, period > 0 else { return false }
         return now.timeIntervalSince(message.date) < TimeInterval(period)
     }
+
+    /// The same question for deletion, which has a window of its own.
+    ///
+    /// Groups routinely set this to `Int32.max`, meaning "forever", so unlike
+    /// the edit window it is usually open. A period of zero or absent still
+    /// means the group has switched deletion off.
+    func canDelete(_ message: Message, now: Date = Date()) -> Bool {
+        guard let period = messageDeletionPeriod, period > 0 else { return false }
+        return now.timeIntervalSince(message.date) < TimeInterval(period)
+    }
 }
 
 /// The conversation list, plus membership.

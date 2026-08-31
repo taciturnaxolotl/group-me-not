@@ -105,6 +105,28 @@ actor MessageStore {
     ///
     /// - Returns: the stored message, or nil if we do not have it.
     @discardableResult
+    /// Mark a message deleted, the way the server does.
+    ///
+    /// A tombstone rather than a removal, because that is what comes back: the
+    /// row keeps its id and gains `deleted_at`, so a later catch-up agrees with
+    /// what was drawn instead of resurrecting the text.
+    func markDeleted(
+        _ messageID: String,
+        at stamp: Int = Int(Date().timeIntervalSince1970),
+        by actor: String?,
+        in conversation: ConversationID
+    ) throws -> Message? {
+        try db.transaction {
+            guard var stored = try loadMessage(id: messageID, in: conversation) else { return nil }
+            stored.deletedAt = stamp
+            stored.deletionActor = actor
+            stored.text = nil
+            stored.attachments = nil
+            try writeMerged(stored, in: conversation)
+            return stored
+        }
+    }
+
     func applyEdit(
         text: String?,
         updatedAt: Int = Int(Date().timeIntervalSince1970),

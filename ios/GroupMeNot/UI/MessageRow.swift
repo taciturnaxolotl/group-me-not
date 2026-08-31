@@ -950,6 +950,7 @@ struct MessagePress: Identifiable {
     let item: MessageDisplay
     let frame: CGRect
     let canEdit: Bool
+    let canDelete: Bool
 
     var id: String { item.id }
 

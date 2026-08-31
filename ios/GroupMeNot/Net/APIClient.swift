@@ -93,6 +93,23 @@ actor APIClient {
         return env.meta
     }
 
+    /// A delete has no body going out and nothing worth reading coming back.
+    /// `204` is the usual answer, which `perform` turns into `.noContent`, so
+    /// that is caught here rather than left for every caller to know about.
+    func deleteIgnoringResponse(
+        _ host: Host, _ path: String,
+        query: [String: String?] = [:],
+        retry: RetryPolicy = .interactive
+    ) async throws {
+        do {
+            let _: Envelope<Discard> = try await send(
+                host, path, method: "DELETE", query: query,
+                body: Optional<Discard>.none, retry: retry, unwrap: false)
+        } catch APIError.noContent {
+            return
+        }
+    }
+
     // MARK: - Core
 
     private func send<T: Decodable & Sendable, B: Encodable & Sendable>(

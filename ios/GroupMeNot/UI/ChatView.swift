@@ -319,6 +319,8 @@ struct ChatView: View {
     @State private var emojiTarget: MessagePress?
     @State private var keyboardWasOpen = false
     @State private var editTarget: MessagePress?
+    /// The message a Delete is being confirmed for.
+    @State private var deleteTarget: MessagePress?
     @State private var editDraft = ""
     /// The message being answered, if the composer is in reply mode.
     @State private var replyingTo: Message?
@@ -398,6 +400,23 @@ struct ChatView: View {
                     guard !text.isEmpty, text != target.item.message.text else { return }
                     edit(target.item, to: text)
                 }
+            }
+            .confirmationDialog(
+                "Delete this message?",
+                isPresented: .init(
+                    get: { deleteTarget != nil },
+                    set: { if !$0 { deleteTarget = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Delete", role: .destructive) {
+                    guard let target = deleteTarget else { return }
+                    deleteTarget = nil
+                    Task { await model.delete(target.item.message) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("It is removed for everyone in this conversation.")
             }
             .sheet(isPresented: $isInfoPresented) {
                 ConversationInfoView(conversation: current, members: model.members)
@@ -550,7 +569,9 @@ struct ChatView: View {
             onEdit: { text in edit(item, to: text) },
             onPress: { frame in
                 pressed = MessagePress(
-                    item: item, frame: frame, canEdit: model.canEdit(item.message))
+                    item: item, frame: frame,
+                    canEdit: model.canEdit(item.message),
+                    canDelete: model.canDelete(item.message))
             },
             onOpenReply: { id in openingTarget = id },
             onInspectReaction: { summary in reactionDetail = summary }
@@ -604,6 +625,12 @@ struct ChatView: View {
                 pressed = nil
                 replyingTo = item.message
                 composerFocused = true
+            })
+        }
+        if press.canDelete {
+            actions.append(.init("Delete", symbol: "trash", isDestructive: true) {
+                pressed = nil
+                deleteTarget = press
             })
         }
         if press.canEdit {
