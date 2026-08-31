@@ -474,7 +474,7 @@ actor ConversationStore {
             lastMessageID: last?.id,
             lastMessageAt: last.map { Date(timeIntervalSince1970: TimeInterval($0.createdAt)) },
             lastMessagePreview: last.flatMap {
-                ConversationWrites.previewText(text: $0.text, attachments: $0.attachments)
+                ConversationWrites.previewText(text: $0.visibleText, attachments: $0.attachments)
             },
             lastMessageSender: last?.name,
             unreadCount: chat.unreadCount ?? 0,
@@ -535,7 +535,7 @@ nonisolated enum ConversationWrites {
                 SQLValue(message.id),
                 SQLValue(MessageSortKey.value(for: message.id)),
                 SQLValue(message.createdAt),
-                SQLValue(previewText(text: message.text, attachments: message.attachments)),
+                SQLValue(previewText(text: message.visibleText, attachments: message.attachments)),
                 SQLValue(message.name),
             ]
         )

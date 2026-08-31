@@ -178,6 +178,9 @@ nonisolated enum MediaLoader {
     /// exist until it has finished, which may be minutes away or, offline, not
     /// today.
     static func describe(_ url: URL) async -> PickedMedia? {
+        // Shrink it first, and only then measure it. Everything below describes
+        // whatever file is actually going to be uploaded.
+        let url = await compressed(url) ?? url
         let asset = AVURLAsset(url: url)
         var size: CGSize?
         if let track = try? await asset.loadTracks(withMediaType: .video).first,
@@ -203,6 +206,52 @@ nonisolated enum MediaLoader {
         return PickedMedia(
             kind: .video, fileURL: url, previewURL: preview, mimeType: mime, fileExtension: ext,
             width: size.map { Int($0.width) }, height: size.map { Int($0.height) })
+    }
+
+    /// The longest edge a video is allowed to keep. GroupMe transcodes on its
+    /// own side anyway, so anything above this is detail we pay to upload and
+    /// the server then throws away.
+    private static let videoPreset = AVAssetExportPreset1280x720
+
+    /// Videos small enough already are left alone; there is no sense re-encoding
+    /// a clip that somebody else already compressed.
+    private static let videoPassthroughBytes = 8 * 1024 * 1024
+
+    /// Re-encode a video down to something a phone can actually send.
+    ///
+    /// This is the single biggest thing standing between this app and a video
+    /// message that arrives. A modern iPhone records 4K at around 50 Mbit/s, so
+    /// half a minute of footage is the better part of two hundred megabytes, and
+    /// the app was uploading that byte for byte: pictures were being resized on
+    /// the way out and video was not. At 720p the same clip is a tenth the size,
+    /// and GroupMe's transcoder was going to reduce it regardless.
+    ///
+    /// Returns nil rather than throwing, and every caller falls back to the
+    /// original. A clip that will not export is still a clip worth sending
+    /// slowly.
+    private static func compressed(_ url: URL) async -> URL? {
+        let asset = AVURLAsset(url: url)
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard size > videoPassthroughBytes else { return nil }
+
+        guard let session = AVAssetExportSession(asset: asset, presetName: videoPreset)
+        else { return nil }
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).mp4")
+        do {
+            try await session.export(to: output, as: .mp4)
+        } catch {
+            log.notice("could not compress a video, sending it as it came: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+        let after = (try? output.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        // A re-encode that made the file bigger is a re-encode worth discarding.
+        guard after > 0, after < size else {
+            try? FileManager.default.removeItem(at: output)
+            return nil
+        }
+        log.debug("compressed video from \(size) to \(after) bytes")
+        return output
     }
 
     static func write(_ data: Data, extension ext: String) throws -> URL {

@@ -71,7 +71,6 @@ nonisolated enum Transcript {
         messages: [Message],
         outbox: [OutboxEntry],
         currentUser: CurrentUser?,
-        progress: [String: Double] = [:],
         quoted: [String: Message] = [:],
         members: [Member] = [],
         unread: UnreadMark? = nil,
@@ -88,7 +87,7 @@ nonisolated enum Transcript {
             .map { entry -> (Message, MessageDisplay.Delivery) in
                 let delivery: MessageDisplay.Delivery = entry.state == .failed
                     ? .failed(friendlyFailure(entry))
-                    : .pending(progress[entry.sourceGuid])
+                    : .pending
                 return (entry.localEcho(sender: currentUser), delivery)
             }
 
@@ -147,7 +146,8 @@ nonisolated enum Transcript {
                 text: text,
                 styledText: MessageStyling.style(text, isOwn: own),
                 reactions: message.reactionSummaries(currentUserID: myID),
-                reply: replyPreview(for: message, in: byID, names: names)
+                reply: replyPreview(for: message, in: byID, names: names),
+                uploadGuid: message.sourceGuid
             )))
         }
         // Last, over finished rows: the fold only has to look at neighbours
@@ -195,7 +195,7 @@ nonisolated enum Transcript {
     /// as a bug.
     static func summarise(_ message: Message) -> String {
         if message.isDeleted { return "Deleted message" }
-        if let text = message.text, !text.isEmpty { return text }
+        if let text = message.visibleText, !text.isEmpty { return text }
         guard let type = message.attachments?.first(where: { $0.type != "mentions" })?.type
         else { return "Message" }
         switch type {
@@ -396,10 +396,6 @@ struct ChatView: View {
             .onDisappear(perform: teardown)
             .onChange(of: model.messages, initial: true) { messagesChanged() }
             .onChange(of: model.outbox, initial: true) { rebuild() }
-            // The ring lives in a built row, so a fraction that moves has to
-            // rebuild to be seen. Cheap because the model coalesces to tenths:
-            // this fires ten times per attachment, not once per packet.
-            .onChange(of: model.uploadProgress) { rebuild() }
             // A fetched original turns "Loading…" into the message itself.
             .onChange(of: model.quotedParents) { rebuild() }
             // The indicator changes the content height by about a bubble. A
@@ -1031,7 +1027,6 @@ struct ChatView: View {
         let messages = model.messages
         let outbox = model.outbox
         let currentUser = model.currentUser
-        let progress = model.uploadProgress
         let quoted = model.quotedParents
         let members = model.members
 
@@ -1046,7 +1041,7 @@ struct ChatView: View {
             let built = await Task.detached(priority: .userInitiated) {
                 Transcript.rows(
                     messages: messages, outbox: outbox, currentUser: currentUser,
-                    progress: progress, quoted: quoted, members: members, unread: unread)
+                    quoted: quoted, members: members, unread: unread)
             }.value
             guard !Task.isCancelled else { return }
             // Only when something actually moved.

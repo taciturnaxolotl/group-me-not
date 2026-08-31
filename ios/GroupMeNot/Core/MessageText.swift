@@ -76,7 +76,7 @@ nonisolated enum MessageTextParser {
     /// Turn a message into styled runs. Pure, cheap, and safe to call off the
     /// main actor.
     static func parse(_ message: Message) -> MessageText {
-        parse(text: message.text ?? "", attachments: message.attachments ?? [])
+        parse(text: message.visibleText ?? "", attachments: message.attachments ?? [])
     }
 
     /// The same, for text that is not attached to a stored `Message` yet: an

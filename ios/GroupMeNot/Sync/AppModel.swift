@@ -883,11 +883,17 @@ final class AppModel {
         }
     }
 
-    /// One tenth is the smallest step worth a redraw: it is a visible movement
-    /// of the ring, and it turns a hundred callbacks a second into ten.
+    /// A fortieth of the way, which for anything big enough to have a visible
+    /// upload is a report every few hundred milliseconds.
+    ///
+    /// This used to be a tenth, back when a report rebuilt the whole transcript
+    /// and the coalescing was protecting against that. It is not any more: the
+    /// ring reads this dictionary itself, so a report redraws one circle. The
+    /// only thing left to balance is smoothness against arithmetic, and ten
+    /// steps across a minute-long video upload is not motion, it is a slideshow.
     private func noteUploadProgress(_ guid: String, _ fraction: Double) {
         let previous = uploadProgress[guid] ?? 0
-        guard fraction >= 1 || fraction - previous >= 0.1 else { return }
+        guard fraction >= 1 || fraction - previous >= 0.025 else { return }
         uploadProgress[guid] = fraction
     }
 

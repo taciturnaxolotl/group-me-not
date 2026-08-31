@@ -15,10 +15,8 @@ nonisolated struct MessageDisplay: Identifiable, Hashable, Sendable {
     enum Delivery: Hashable, Sendable {
         /// GroupMe has it.
         case sent
-        /// Queued locally, on its way or waiting for a network. The fraction is
-        /// how much of its attachments have gone out, and is nil when there are
-        /// none or nothing is in flight yet.
-        case pending(Double?)
+        /// Queued locally, on its way or waiting for a network.
+        case pending
         /// The last attempt failed. The string is what to tell the user.
         case failed(String?)
     }
@@ -47,6 +45,14 @@ nonisolated struct MessageDisplay: Identifiable, Hashable, Sendable {
     var reactions: [Message.ReactionSummary]
     /// The message being answered, resolved once when the transcript is built.
     var reply: ReplyPreview?
+    /// The outbox guid, while this message is still queued.
+    ///
+    /// Carried rather than the upload fraction itself, and that is the whole
+    /// point: a fraction baked into this struct means every step of every upload
+    /// rebuilds the entire transcript, which is both wasteful and exactly why
+    /// the ring moved in visible jerks. The guid is a key the ring can watch on
+    /// its own, so a hundred progress reports redraw one small circle.
+    var uploadGuid: String?
 
     var isPending: Bool {
         if case .pending = delivery { return true }
@@ -342,9 +348,8 @@ private struct BubbleRow: View {
     /// one with nothing to upload, gets the dimmed bubble and no ring: a ring
     /// stuck at zero reads as a failure rather than as a queue.
     @ViewBuilder private var uploadRing: some View {
-        if case .pending(let fraction) = item.delivery, let fraction, fraction < 1 {
-            UploadRing(fraction: fraction)
-                .transition(.opacity)
+        if item.isPending, let guid = item.uploadGuid {
+            UploadRing(guid: guid).transition(.opacity)
         }
     }
 
@@ -877,30 +882,52 @@ private struct AttachmentChip: View {
 /// sent against bytes expected, so there is never a moment where this has to
 /// pretend by spinning.
 private struct UploadRing: View {
-    let fraction: Double
+    /// The outbox guid to watch. Reading the fraction here rather than being
+    /// handed it is what keeps a busy upload from redrawing the transcript: with
+    /// `@Observable`, the only view that touched `uploadProgress` is the only
+    /// view that invalidates.
+    let guid: String
+
+    @Environment(AppModel.self) private var model
 
     private static let side: CGFloat = 44
     private static let lineWidth: CGFloat = 3
+
+    private var fraction: Double? { model.uploadProgress[guid] }
 
     var body: some View {
         ZStack {
             Circle()
                 .stroke(.white.opacity(0.28), lineWidth: Self.lineWidth)
-            Circle()
-                .trim(from: 0, to: max(fraction, 0.02))
-                .stroke(.white, style: StrokeStyle(lineWidth: Self.lineWidth, lineCap: .round))
-                // Twelve o'clock, not three. A ring that starts at the right
-                // edge reads as already part-finished.
-                .rotationEffect(.degrees(-90))
+            if let fraction, fraction < 1 {
+                Circle()
+                    .trim(from: 0, to: max(fraction, 0.02))
+                    .stroke(.white, style: StrokeStyle(lineWidth: Self.lineWidth, lineCap: .round))
+                    // Twelve o'clock, not three. A ring that starts at the right
+                    // edge reads as already part-finished.
+                    .rotationEffect(.degrees(-90))
+            } else {
+                // Either the bytes have not started moving or they have all
+                // gone and the server is still working, which for a video is a
+                // transcode and can be most of the wait. Neither is a fraction
+                // of anything, and a ring parked at 100% claims a progress it
+                // does not have.
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+            }
         }
         .frame(width: Self.side, height: Self.side)
         .padding(10)
         // Its own ground, because the photo underneath is arbitrary and white on
         // white is nothing at all.
         .background(.black.opacity(0.35), in: .circle)
-        .animation(.easeOut(duration: 0.25), value: fraction)
+        // Linear, and just longer than the interval between reports. The ring
+        // then interpolates across each step instead of arriving at it, which is
+        // the difference between motion and a sequence of positions.
+        .animation(.linear(duration: 0.3), value: fraction)
         .accessibilityLabel("Uploading")
-        .accessibilityValue("\(Int(fraction * 100)) percent")
+        .accessibilityValue(fraction.map { "\(Int($0 * 100)) percent" } ?? "in progress")
     }
 }
 

@@ -30,6 +30,25 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
 
     var date: Date { Date(timeIntervalSince1970: TimeInterval(createdAt)) }
 
+    /// The text worth drawing.
+    ///
+    /// Nil for a message whose entire text is one of its own attachment URLs.
+    /// GroupMe's clients set a video message's text to the video's URL, so an
+    /// old client that cannot render the attachment still shows a link. Every
+    /// client that *can* render it hides the text, and a client that does not is
+    /// a client that prints a raw URL under every video.
+    ///
+    /// Exact match only, and that is measured rather than cautious: across
+    /// forty media messages, every video's text was precisely its URL and no
+    /// image's text contained one at all. A looser rule would start eating
+    /// captions that happen to mention a link.
+    var visibleText: String? {
+        guard let text, !text.isEmpty else { return text }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let urls = (attachments ?? []).flatMap { [$0.url, $0.previewUrl, $0.sourceUrl] }
+        return urls.contains(trimmed) ? nil : text
+    }
+
     /// The message this one is a reply to, if it is one.
     ///
     /// Read off the attachment rather than off `parent_id`, because the
