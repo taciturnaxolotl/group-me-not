@@ -172,9 +172,30 @@ nonisolated enum OAuth {
             }
         }
 
-        guard value(named: "state", in: callback) == state else { throw Failure.stateMismatch }
+        // Reject a state that came back *different*, but tolerate one that did
+        // not come back at all. The web client only echoes it when it captured
+        // it on the way in, and a missing echo is not evidence of anything:
+        // ASWebAuthenticationSession already guarantees this callback belongs to
+        // the session we started. A wrong one is worth refusing; a silent one is
+        // worth noting.
+        if let returned = value(named: "state", in: callback) {
+            guard returned == state else { throw Failure.stateMismatch }
+        } else {
+            Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "auth")
+                .notice("sign-in callback carried no state; parameters were \(parameterNames(of: callback).joined(separator: ", "), privacy: .public)")
+        }
         guard let token = token(from: callback) else { throw Failure.noToken }
         return token
+    }
+
+    /// The parameter names a callback carried, for diagnosing a flow that came
+    /// back in an unexpected shape. Names only: one of the values is the token.
+    static func parameterNames(of url: URL) -> [String] {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return [] }
+        var parsed = URLComponents()
+        parsed.percentEncodedQuery = components.percentEncodedFragment
+        let names = (components.queryItems ?? []) + (parsed.queryItems ?? [])
+        return names.map(\.name).sorted()
     }
 
     /// GroupMe's desktop scheme. We only ever intercept it inside an
@@ -189,9 +210,13 @@ nonisolated enum OAuth {
         if let found = components.queryItems?.first(where: { $0.name == name })?.value, !found.isEmpty {
             return found
         }
-        guard let fragment = components.fragment else { return nil }
+        // The fragment is query syntax, so it has to be handed over still
+        // encoded. Reading `.fragment` decodes it, and feeding a decoded string
+        // back in as a query re-parses any `%26` or `%3D` inside a value as
+        // structure, which quietly corrupts tokens.
+        guard let fragment = components.percentEncodedFragment else { return nil }
         var parsed = URLComponents()
-        parsed.query = fragment
+        parsed.percentEncodedQuery = fragment
         return parsed.queryItems?.first(where: { $0.name == name })?.value.flatMap { $0.isEmpty ? nil : $0 }
     }
 
