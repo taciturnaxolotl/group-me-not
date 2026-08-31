@@ -233,5 +233,23 @@ A topic carries its own `unread_count`, `last_read_message_id`, `muted_until`, `
 anybody in the parent group. Roles live on the *parent's* member list (`owner`, `admin`,
 `user`), since a topic has no membership of its own.
 
+### `parent_id` on a topic's messages is a trap
+
+Every message inside a topic carries `parent_id`, and it holds **the parent group's id, not a
+message id**. Measured across all six topics of one group: every message had the field, and
+every value was the group.
+
+Plain group messages omit `parent_id` entirely — 0 of 100 sampled had it — so a client that
+treats it as a reply target looks correct until the first topic arrives, and then draws a
+dangling quote on *every message in every topic*. Replies are `attachments[].reply_id` and
+nothing else.
+
+### Reading one message in a topic
+
+`GET /v4/groups/{topicId}/messages/{messageId}` answers **200**. Note the id: the same route
+addressed to the topic's parent group answers **404**, which is the opposite of what the
+missing `GET /v3/groups/{topicId}` would lead you to expect. A topic is not a group for
+reading *about*, but it is a group for reading *from*.
+
 Observed on a live group with `children_count: 6` — three `announcement` topics (rules,
 announcements, confirmed kills) and three `private` ones.

@@ -77,13 +77,21 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
 
     /// The message this one is a reply to, if it is one.
     ///
-    /// Read off the attachment rather than off `parent_id`, because the
-    /// attachment is what the sender actually said and `parent_id` is only
-    /// sometimes filled in. GroupMe threads are flat: `reply_id` is the message
-    /// being answered and `base_reply_id` is the root of the chain, and a client
-    /// that draws one quote wants the former.
+    /// The attachment, and *only* the attachment.
+    ///
+    /// `parent_id` looks like it belongs here and does not. On a message in a
+    /// topic it holds the id of the group the topic belongs to, not of any
+    /// message, and every message in a topic carries one. Treating it as a
+    /// fallback gave every one of them a quote pointing at an id that is not a
+    /// message, so every message in every topic drew a quote that could never
+    /// resolve. Plain group messages omit the field entirely, which is why the
+    /// mistake stayed invisible until topics arrived.
+    ///
+    /// GroupMe threads are flat: `reply_id` is the message being answered and
+    /// `base_reply_id` is the root of the chain. A client drawing one quote
+    /// wants the former.
     var replyTargetID: String? {
-        attachments?.first { $0.type == "reply" }?.replyId ?? parentId
+        attachments?.first { $0.type == "reply" }?.replyId
     }
 
     /// The pair a reply has to send back. Both, because GroupMe keeps the chain

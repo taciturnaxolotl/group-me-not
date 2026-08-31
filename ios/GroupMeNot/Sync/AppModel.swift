@@ -1046,14 +1046,9 @@ final class AppModel {
 
         let batch = Array(wanted.prefix(Self.maxQuoteFetches))
         attemptedQuotes.formUnion(batch)
-        // A topic's own id does not resolve at the per-message route, so the
-        // parent group is offered as a second address to try.
-        let parentGroup = conversations.first { $0.id == conversation }?.parentID
-
         Task { [api] in
             for id in batch {
-                let parent = try? await api.message(
-                    id: id, in: conversation, fallbackGroupID: parentGroup)
+                let parent = try? await api.message(id: id, in: conversation)
                 guard conversation == self.openConversationID else { return }
                 if let parent {
                     self.quotedParents[id] = parent
