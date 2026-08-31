@@ -10,7 +10,7 @@ import OSLog
 /// `Message` never needs a migration.
 nonisolated enum Schema {
     /// Bump this and add a `case` to `apply(step:)` for every change.
-    static let version: Int32 = 3
+    static let version: Int32 = 4
 
     private static let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "schema")
 
@@ -50,6 +50,7 @@ nonisolated enum Schema {
         case 1: try db.execute(initial)
         case 2: try db.execute(addReactions)
         case 3: try db.execute(addEditPeriods)
+        case 4: try db.execute(addPendingReactions)
         default:
             throw SQLError(code: 1, message: "no migration defined for schema \(step)", sql: nil)
         }
@@ -189,6 +190,50 @@ nonisolated enum Schema {
     ALTER TABLE conversations ADD COLUMN message_edit_period INTEGER;
     ALTER TABLE conversations ADD COLUMN message_deletion_period INTEGER;
     """
+
+    // MARK: - Version 4
+
+    /// Reactions the user has made that the server has not taken yet.
+    ///
+    /// The outbox exists because a message written offline must not be lost. A
+    /// reaction tapped offline deserves the same promise and used to get the
+    /// opposite one: any failed request rolled it back, so with the radio off
+    /// the chip un-tapped itself a moment after the tap.
+    ///
+    /// `message_id` is the whole key on purpose. A reaction is not an event, it
+    /// is a state: one per person per message, last write wins. Five taps while
+    /// offline are one intent, so an upsert replaces whatever was queued and the
+    /// queue replays a single call. There is no sequence and no history here
+    /// because nobody would ever want either replayed.
+    ///
+    /// `previous` is what the server still believes, which is not what the
+    /// screen shows. ``GroupMeAPI/setReaction(_:onMessage:in:replacing:retry:)``
+    /// unlikes before it likes and needs the server's idea of "before" to get
+    /// that order right, so an upsert keeps the original row's value.
+    ///
+    /// No foreign key onto `messages`: a queued reaction that outlives its
+    /// message is one stale row the drain deletes, which is cheaper than
+    /// carrying the cascade.
+    private static let addPendingReactions = """
+    CREATE TABLE pending_reactions (
+        message_id       TEXT    NOT NULL PRIMARY KEY,
+        conversation_key TEXT    NOT NULL,
+        kind             INTEGER NOT NULL,   -- 0 group, 1 direct
+        glyph            TEXT,               -- NULL means "remove my reaction"
+        previous         TEXT,               -- what the server still holds
+        created_at       INTEGER NOT NULL,
+        attempts         INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at  INTEGER NOT NULL DEFAULT 0
+    ) WITHOUT ROWID;
+
+    -- The drain's query: everything runnable, oldest first.
+    CREATE INDEX pending_reactions_ready
+        ON pending_reactions(next_attempt_at, created_at);
+
+    -- The transcript's query: what to overlay on one conversation.
+    CREATE INDEX pending_reactions_conversation
+        ON pending_reactions(conversation_key);
+    """
 }
 
 // MARK: - Sort keys
@@ -228,6 +273,22 @@ nonisolated extension ConversationID {
         switch self {
         case .group(let id): id
         case .direct(let other): other
+        }
+    }
+
+    /// Rebuilds the identity from the pair a row stores when it carries the
+    /// storage key rather than the remote id. The exact inverse of
+    /// ``storageKey``.
+    init?(storageKind: Int64, storageKey: String) {
+        switch storageKind {
+        case 0: self = .group(storageKey)
+        case 1:
+            let prefix = "dm:"
+            self = .direct(
+                otherUserID: storageKey.hasPrefix(prefix)
+                    ? String(storageKey.dropFirst(prefix.count))
+                    : storageKey)
+        default: return nil
         }
     }
 

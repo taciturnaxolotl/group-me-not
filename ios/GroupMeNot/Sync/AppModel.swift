@@ -143,6 +143,7 @@ final class AppModel {
             await adopt(user)
         }
         Task { await self.sends.drain() }
+        Task { await self.drainReactions() }
         Task { await self.sync.sync(reason: .launch) }
         Task { await self.refreshIdentity() }
     }
@@ -171,7 +172,7 @@ final class AppModel {
         typingSweep?.cancel()
         typingUserIDs = [:]
 
-        messages = (try? await store.messages.recent(conversation, limit: window)) ?? []
+        messages = await transcript(conversation) ?? []
         outbox = await sends.pending(in: conversation)
         members = (try? await store.conversations.members(of: conversation)) ?? []
 
@@ -206,8 +207,7 @@ final class AppModel {
         let oldest = messages.first?.id
         window += Self.transcriptPage
 
-        if let stored = try? await store.messages.recent(conversation, limit: window),
-           stored.count > messages.count {
+        if let stored = await transcript(conversation), stored.count > messages.count {
             messages = stored
             return
         }
@@ -237,7 +237,7 @@ final class AppModel {
             return
         }
         _ = try? await store.messages.upsert(page, in: conversation)
-        messages = (try? await store.messages.recent(conversation, limit: window)) ?? messages
+        messages = await transcript(conversation) ?? messages
     }
 
     /// Clear the badge locally, then tell the server whenever it is willing to
@@ -417,12 +417,23 @@ final class AppModel {
     ///    was just drawn.
     /// 3. The server, last, and only then.
     ///
-    /// A failure at step three puts both local copies back. The rollback is
-    /// deliberately to what the user saw before rather than to what the server
-    /// now holds: `setReaction` unlikes before it likes, so a half-failed swap
-    /// can leave the server empty, and guessing at that would be inventing
-    /// state. The next catch-up settles it with the server's own copy, which is
-    /// the only authority worth trusting.
+    /// What happens at step three depends on which kind of failure it was, and
+    /// the two are not close:
+    ///
+    /// - A failure worth retrying, which is every transport failure and so every
+    ///   tap made with the radio off, keeps what was drawn and queues the intent.
+    ///   A message written offline is held and delivered on reconnect; a
+    ///   reaction tapped in the same tunnel gets the same promise, rather than
+    ///   quietly un-tapping itself a second later.
+    /// - A failure the server means, which is anything else, rolls both copies
+    ///   back. It will not succeed on the tenth attempt either, and leaving the
+    ///   chip on screen would be telling the user something untrue.
+    ///
+    /// The rollback is deliberately to what the user saw before rather than to
+    /// what the server now holds: `setReaction` unlikes before it likes, so a
+    /// half-failed swap can leave the server empty, and guessing at that would
+    /// be inventing state. The next catch-up settles it with the server's own
+    /// copy, which is the only authority worth trusting.
     private func setReaction(_ glyph: String?, on message: Message) async {
         guard let conversation = openConversationID, let me = currentUser?.id else { return }
         guard !message.isDeleted, !message.isSystem else { return }
@@ -430,19 +441,124 @@ final class AppModel {
         let previous = message.reaction(by: me)
         guard glyph != previous else { return }
 
+        // What the server holds, which is what an eventual replay has to unlike.
+        // A row already queued knows this better than the screen does: the
+        // screen has been showing intents the server has never seen.
+        let queued = try? await store.pendingReactions.entry(message.id)
+        let serverHolds = queued?.previous ?? previous
+
         apply(glyph, by: me, to: message.id)
         await commit(glyph, by: me, to: message.id, in: conversation)
 
         do {
             try await api.setReaction(
-                glyph, onMessage: message.id, in: conversation, replacing: previous)
-        } catch {
+                glyph, onMessage: message.id, in: conversation, replacing: serverHolds)
+            // The server agrees now, so any earlier intent is spent.
+            try? await store.pendingReactions.remove(message.id)
+        } catch let error as APIError where error.isRetryable {
             log.notice("""
-                reaction on \(message.id, privacy: .public) did not stick: \
+                reaction on \(message.id, privacy: .public) queued: \
                 \(failureText(error), privacy: .public)
                 """)
-            apply(previous, by: me, to: message.id)
-            await commit(previous, by: me, to: message.id, in: conversation)
+            _ = try? await store.pendingReactions.upsert(
+                glyph, onMessage: message.id, in: conversation, replacing: serverHolds)
+        } catch {
+            log.notice("""
+                reaction on \(message.id, privacy: .public) refused: \
+                \(failureText(error), privacy: .public)
+                """)
+            try? await store.pendingReactions.remove(message.id)
+            apply(serverHolds, by: me, to: message.id)
+            await commit(serverHolds, by: me, to: message.id, in: conversation)
+        }
+    }
+
+    /// Send the reactions that are waiting, in the order they were meant.
+    ///
+    /// Runs on the same two triggers the outbox drains on, because it is the
+    /// same promise: a tap the network refused is held, not lost. Each row is
+    /// one call however many times the user tapped, since the queue keeps
+    /// intents rather than events.
+    private func drainReactions() async {
+        guard isSignedIn, let me = currentUser?.id else { return }
+        let due = (try? await store.pendingReactions.ready()) ?? []
+        guard !due.isEmpty else { return }
+
+        for row in due {
+            do {
+                try await api.setReaction(
+                    row.glyph,
+                    onMessage: row.messageID,
+                    in: row.conversation,
+                    replacing: row.previous,
+                    retry: .background)
+                try? await store.pendingReactions.remove(row.messageID)
+                // The server took it, but a catch-up in between may have
+                // written its older copy over ours, so say it once more on
+                // disk. Nothing is overlaying this row any longer.
+                apply(row.glyph, by: me, to: row.messageID)
+                await commit(row.glyph, by: me, to: row.messageID, in: row.conversation)
+
+            } catch let error as APIError where error.isRetryable {
+                // Full jitter, clamped, so a reaction queued overnight retries
+                // every few minutes rather than drifting out to hours.
+                let advised = error.retryAfter ?? 0
+                let wait = max(advised, Self.reactionBackoff.delay(forAttempt: min(row.attempts + 1, 8)))
+                try? await store.pendingReactions.markFailed(
+                    row.messageID, retryAt: Date().addingTimeInterval(max(wait, 1)))
+                log.notice("""
+                    queued reaction on \(row.messageID, privacy: .public) still waiting: \
+                    \(failureText(error), privacy: .public)
+                    """)
+
+            } catch {
+                // Refused rather than missed. Drop the intent and put the
+                // screen back to what the server will actually show.
+                try? await store.pendingReactions.remove(row.messageID)
+                apply(row.previous, by: me, to: row.messageID)
+                await commit(row.previous, by: me, to: row.messageID, in: row.conversation)
+                log.error("""
+                    queued reaction on \(row.messageID, privacy: .public) rejected: \
+                    \(failureText(error), privacy: .public)
+                    """)
+            }
+        }
+    }
+
+    /// Outer backoff for a queued reaction, on top of whatever
+    /// `RetryPolicy.background` already spent inside the request. Unbounded in
+    /// attempts, like the outbox: the intent has nowhere else to be.
+    private static let reactionBackoff = RetryPolicy(maxAttempts: .max, base: 2, cap: 300)
+
+    /// Put queued reactions back on top of messages read from disk.
+    ///
+    /// A catch-up hands back the server's copy of a message, which does not yet
+    /// know about a reaction still sitting in the queue. Without this the chip
+    /// would blink off on every sync and back on when the queue finally drained.
+    /// The queued intent is the newer truth until it is spent, so it wins.
+    /// The transcript as it should be drawn: what is on disk, with anything
+    /// still queued laid over it. Every read of the open conversation goes
+    /// through here, so there is one answer to "what does this look like".
+    private func transcript(_ conversation: ConversationID) async -> [Message]? {
+        guard let stored = try? await store.messages.recent(conversation, limit: window) else {
+            return nil
+        }
+        return await overlayingPendingReactions(stored, in: conversation)
+    }
+
+    private func overlayingPendingReactions(
+        _ stored: [Message], in conversation: ConversationID
+    ) async -> [Message] {
+        guard let me = currentUser?.id,
+              let queued = try? await store.pendingReactions.entries(in: conversation),
+              !queued.isEmpty
+        else { return stored }
+
+        var byID: [String: String?] = [:]
+        for row in queued { byID[row.messageID] = row.glyph }
+        return stored.map { message in
+            guard let glyph = byID[message.id] else { return message }
+            return message.settingReaction(glyph, by: me)
         }
     }
 
@@ -520,6 +636,7 @@ final class AppModel {
         typingSweep?.cancel()
         typingSweep = nil
 
+        try? await store.pendingReactions.removeAll()
         let rows = (try? await store.conversations.list(limit: 5000)) ?? []
         for row in rows {
             try? await store.outbox.removeAll(in: row.id)
@@ -610,6 +727,7 @@ final class AppModel {
                 // The queue first: a message the user wrote while offline should
                 // beat a refresh of things other people wrote.
                 await sends.connectivityDidReturn()
+                await self.drainReactions()
                 await sync.sync(reason: .reconnect)
             }
         })
@@ -722,9 +840,7 @@ final class AppModel {
 
     private func reloadMessages() async {
         guard let conversation = openConversationID else { return }
-        if let stored = try? await store.messages.recent(conversation, limit: window) {
-            messages = stored
-        }
+        if let stored = await transcript(conversation) { messages = stored }
         outbox = await sends.pending(in: conversation)
     }
 }

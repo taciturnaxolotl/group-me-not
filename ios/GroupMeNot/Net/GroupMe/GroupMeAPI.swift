@@ -264,22 +264,30 @@ actor GroupMeAPI {
     func like(
         message messageID: String,
         in conversation: ConversationID,
-        icon: LikeIcon? = nil
+        icon: LikeIcon? = nil,
+        retry: RetryPolicy = .interactive
     ) async throws {
         let convID = try await restID(for: conversation)
         let path = "/messages/\(convID)/\(messageID)/like"
         if let icon {
-            try await client.postIgnoringResponse(.v3, path, body: LikeBody(likeIcon: icon))
+            try await client.postIgnoringResponse(
+                .v3, path, body: LikeBody(likeIcon: icon), retry: retry)
         } else {
-            try await client.postIgnoringResponse(.v3, path, body: Optional<Empty>.none)
+            try await client.postIgnoringResponse(
+                .v3, path, body: Optional<Empty>.none, retry: retry)
         }
     }
 
     /// `POST /v3/messages/{conversationId}/{messageId}/unlike`. Never carries a body.
-    func unlike(message messageID: String, in conversation: ConversationID) async throws {
+    func unlike(
+        message messageID: String,
+        in conversation: ConversationID,
+        retry: RetryPolicy = .interactive
+    ) async throws {
         let convID = try await restID(for: conversation)
         try await client.postIgnoringResponse(
-            .v3, "/messages/\(convID)/\(messageID)/unlike", body: Optional<Empty>.none)
+            .v3, "/messages/\(convID)/\(messageID)/unlike",
+            body: Optional<Empty>.none, retry: retry)
     }
 
     /// Put this user's reaction on a message into an exact state.
@@ -296,17 +304,19 @@ actor GroupMeAPI {
         _ glyph: String?,
         onMessage messageID: String,
         in conversation: ConversationID,
-        replacing current: String? = nil
+        replacing current: String? = nil,
+        retry: RetryPolicy = .interactive
     ) async throws {
         if glyph == current { return }
         if current != nil {
-            try await unlike(message: messageID, in: conversation)
+            try await unlike(message: messageID, in: conversation, retry: retry)
         }
         if let glyph {
             try await like(
                 message: messageID,
                 in: conversation,
-                icon: ReactionCatalog.icon(for: glyph))
+                icon: ReactionCatalog.icon(for: glyph),
+                retry: retry)
         }
     }
 
