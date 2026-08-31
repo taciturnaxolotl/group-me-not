@@ -44,22 +44,17 @@ struct ConversationInfoView: View {
     @ViewBuilder private func share(_ url: URL) -> some View {
         Section {
             if let code = Self.qrCode(for: url) {
-                VStack(spacing: 10) {
-                    Image(uiImage: code)
-                        .interpolation(.none)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 180, height: 180)
-                        .padding(12)
-                        .background(.white, in: .rect(cornerRadius: 14, style: .continuous))
-                        .accessibilityLabel("Join code")
-                    Text("Point a camera at this to join")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 6)
-                .listRowSeparator(.hidden)
+                Image(uiImage: code)
+                    .interpolation(.none)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 180, height: 180)
+                    .padding(12)
+                    .background(.white, in: .rect(cornerRadius: 14, style: .continuous))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .listRowSeparator(.hidden)
+                    .accessibilityLabel("Join code")
             }
 
             ShareLink(item: url) {
