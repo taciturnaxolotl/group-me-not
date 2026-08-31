@@ -620,6 +620,36 @@ final class AppModel {
         await reloadConversations()
     }
 
+    // MARK: - Polls
+
+    /// Polls the transcript has asked for, by poll id.
+    ///
+    /// In memory, like quoted originals and for the same reason: a tally is true
+    /// for as long as nobody votes, which is not long enough to be worth a
+    /// column.
+    private(set) var polls: [String: Poll] = [:]
+
+    /// Fetch a poll the transcript is about to draw. Once per poll per session
+    /// unless a vote refreshes it.
+    func loadPoll(_ pollID: String) async {
+        guard polls[pollID] == nil,
+              case .group(let groupID)? = openConversationID
+        else { return }
+        guard let poll = await api.poll(pollID, in: groupID) else { return }
+        polls[pollID] = poll
+    }
+
+    /// Cast, change, or withdraw a vote.
+    ///
+    /// The server's copy replaces ours wholesale rather than being patched: a
+    /// tally is the one thing here that other people are changing at the same
+    /// time, and merging two views of it would invent a number nobody holds.
+    func vote(_ optionIDs: [String], in pollID: String) async {
+        guard case .group(let groupID)? = openConversationID else { return }
+        guard let updated = await api.vote(optionIDs, in: pollID, groupID: groupID) else { return }
+        polls[pollID] = updated
+    }
+
     // MARK: - Requests
 
     /// How many decisions are waiting, account-wide.

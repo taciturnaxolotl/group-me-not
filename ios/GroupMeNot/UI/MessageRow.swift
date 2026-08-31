@@ -831,19 +831,23 @@ private struct AttachmentChipFor: View {
     var body: some View {
         switch attachment.type {
         case "location":
-            AttachmentChip(
-                symbol: "mappin.and.ellipse",
-                title: attachment.name ?? "Location",
-                isOwn: isOwn
-            )
+            LocationCard(attachment: attachment, isOwn: isOwn)
         case "file":
             AttachmentChip(symbol: "doc.fill", title: attachment.name ?? "File", isOwn: isOwn)
         case "audio":
-            AttachmentChip(symbol: "waveform", title: "Voice message", isOwn: isOwn)
+            VoiceNote(attachment: attachment, isOwn: isOwn)
         case "poll":
-            AttachmentChip(symbol: "chart.bar.fill", title: "Poll", isOwn: isOwn)
+            PollCard(attachment: attachment, isOwn: isOwn)
         case "event":
-            AttachmentChip(symbol: "calendar", title: "Event", isOwn: isOwn)
+            // Still a chip, and deliberately so. The events routes are
+            // documented but no event was available to read, so a card built
+            // from guessed field names would be a confident drawing of nothing.
+            // The name is what the attachment actually carries.
+            AttachmentChip(
+                symbol: "calendar",
+                title: attachment.name ?? "Event",
+                isOwn: isOwn
+            )
         case "emoji":
             EmptyView()
         default:
@@ -868,7 +872,9 @@ private struct AttachmentChipFor: View {
 }
 
 /// A one-line stand-in for an attachment we do not render inline.
-private struct AttachmentChip: View {
+/// Shared with the rich attachment views, which fall back to it whenever the
+/// thing they were going to draw turns out not to be drawable.
+struct AttachmentChip: View {
     let symbol: String
     let title: String
     let isOwn: Bool

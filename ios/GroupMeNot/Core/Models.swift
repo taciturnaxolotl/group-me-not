@@ -653,6 +653,52 @@ nonisolated struct Chat: Codable, Hashable, Sendable {
     }
 }
 
+/// A poll, as `GET /v3/poll/{groupId}/{pollId}` returns it.
+///
+/// Every field optional, and that is not laziness. The endpoints are documented
+/// from the client's own classes and no poll was available to read at the time
+/// this was written, so the safe assumption is that some of these names are
+/// close rather than exact. A poll that decodes thinly draws a thin card; a
+/// poll that decodes strictly and fails draws nothing at all.
+nonisolated struct Poll: Codable, Identifiable, Hashable, Sendable {
+    var id: String?
+    var subject: String?
+    var ownerId: String?
+    var created_at: Int?
+    var expiration: Int?
+    /// `active` while it is open, and something else once it is not. Compared
+    /// loosely, because the closed spelling is the uncertain one.
+    var status: String?
+    /// `single` or `multi`. Anything unrecognised is treated as single, which is
+    /// the safer of the two: offering one vote where many were allowed is a
+    /// smaller wrong than the reverse.
+    var type: String?
+    var options: [Option]?
+
+    nonisolated struct Option: Codable, Identifiable, Hashable, Sendable {
+        var id: String?
+        var title: String?
+        var votes: Int?
+        /// Present once the poll is visible to the reader, which is how "did I
+        /// vote for this" is answered without a second request.
+        var voterIds: [String]?
+
+        var identity: String { id ?? title ?? UUID().uuidString }
+    }
+
+    var identity: String { id ?? subject ?? UUID().uuidString }
+    var isOpen: Bool { (status ?? "active") == "active" }
+    var allowsMultiple: Bool { type == "multi" }
+    var totalVotes: Int { (options ?? []).reduce(0) { $0 + ($1.votes ?? 0) } }
+
+    func chose(_ option: Option, as userID: String?) -> Bool {
+        guard let userID, let voters = option.voterIds else { return false }
+        return voters.contains(userID)
+    }
+
+    var closesAt: Date? { expiration.map { Date(timeIntervalSince1970: TimeInterval($0)) } }
+}
+
 /// Somebody waiting to be let into a group.
 ///
 /// `GET /v3/groups/{id}/pending_memberships`. Every field is optional on
