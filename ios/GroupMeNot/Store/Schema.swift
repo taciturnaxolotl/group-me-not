@@ -10,7 +10,7 @@ import OSLog
 /// `Message` never needs a migration.
 nonisolated enum Schema {
     /// Bump this and add a `case` to `apply(step:)` for every change.
-    static let version: Int32 = 8
+    static let version: Int32 = 9
 
     private static let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "schema")
 
@@ -55,6 +55,7 @@ nonisolated enum Schema {
         case 6: try db.execute(addHistorySynced)
         case 7: try db.execute(addLikeIcon)
         case 8: try db.execute(addSubgroups)
+        case 9: try db.execute(addShareURL)
         default:
             throw SQLError(code: 1, message: "no migration defined for schema \(step)", sql: nil)
         }
@@ -84,6 +85,17 @@ nonisolated enum Schema {
 
     CREATE INDEX conversations_parent
         ON conversations(parent_id) WHERE parent_id IS NOT NULL;
+    """
+
+    // MARK: - Version 9
+
+    /// A group's join link, so the share sheet works with the radio off.
+    ///
+    /// Stored rather than fetched on demand, because the one moment somebody
+    /// wants to hand this to a person standing next to them is the moment the
+    /// two of them are somewhere with no signal.
+    private static let addShareURL = """
+    ALTER TABLE conversations ADD COLUMN share_url TEXT;
     """
 
     // MARK: - Version 1

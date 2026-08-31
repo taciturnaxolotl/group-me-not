@@ -293,6 +293,10 @@ actor SyncEngine {
             // server's `unread_count`, which is stale by definition at this
             // point: we cleared the badge locally a moment ago and the read
             // receipt has not landed yet, so the badge would come straight back.
+            // The join link comes down the same fetch and is worth keeping: the
+            // list endpoint may not carry it, and the share sheet has to work
+            // with the radio off.
+            try? await store.conversations.setShareURL(group.shareUrl, for: conversation)
             guard let roster = group.members else { return }
             try await store.conversations.replaceMembers(roster, in: conversation)
             continuation.yield(.conversations)

@@ -43,6 +43,8 @@ nonisolated struct ConversationRow: Identifiable, Hashable, Sendable {
     var parentID: String?
     /// Who may post here. See ``PostingPolicy``.
     var postingPolicy: PostingPolicy = .everyone
+    /// The group's join link, for the share sheet and the code.
+    var shareURL: String?
 
     var isGroup: Bool { id.isGroup }
 
@@ -150,6 +152,7 @@ actor ConversationStore {
             SQLValue(StoreCoding.encodeIfPresent(row.likeIcon)),
             SQLValue(row.parentID),
             SQLValue(row.postingPolicy.rawValue),
+            SQLValue(row.shareURL),
         ])
     }
 
@@ -231,6 +234,20 @@ actor ConversationStore {
         try db.run(
             "UPDATE conversations SET unread_count = MAX(0, unread_count + ?) WHERE key = ?",
             [SQLValue(amount), SQLValue(conversation.storageKey)]
+        )
+    }
+
+    /// Records a group's join link without touching anything else on the row.
+    ///
+    /// Targeted for the same reason ``setLikeIcon(_:for:)`` is: the caller is a
+    /// single-group fetch made while a conversation is open, and writing the
+    /// whole row from there would also write the server's `unread_count`, which
+    /// is stale by definition at that moment.
+    func setShareURL(_ url: String?, for conversation: ConversationID) throws {
+        guard let url, !url.isEmpty else { return }
+        try db.run(
+            "UPDATE conversations SET share_url = ? WHERE key = ?",
+            [SQLValue(url), SQLValue(conversation.storageKey)]
         )
     }
 
@@ -374,7 +391,7 @@ actor ConversationStore {
     kind, remote_id, name, avatar_url, last_message_id, last_message_at,
     last_message_preview, last_message_sender, unread_count, last_read_message_id,
     muted_until, member_count, placeholder, message_edit_period, message_deletion_period,
-    like_icon, parent_id, posting_policy
+    like_icon, parent_id, posting_policy, share_url
     """
 
     nonisolated private static func decode(_ row: Row) throws -> ConversationRow {
@@ -399,7 +416,8 @@ actor ConversationStore {
             likeIcon: StoreCoding.decodeIfPossible(Message.Reaction.self, from: row.dataOrNil(15)),
             isPlaceholder: row.bool(12),
             parentID: row.stringOrNil(16),
-            postingPolicy: PostingPolicy(rawValue: row.int(17)) ?? .everyone
+            postingPolicy: PostingPolicy(rawValue: row.int(17)) ?? .everyone,
+            shareURL: row.stringOrNil(18)
         )
     }
 
@@ -466,8 +484,9 @@ actor ConversationStore {
         (key, kind, remote_id, name, avatar_url, last_message_id, last_message_sort,
          last_message_at, last_message_preview, last_message_sender, unread_count,
          last_read_message_id, muted_until, member_count, placeholder, synced_at,
-         message_edit_period, message_deletion_period, like_icon, parent_id, posting_policy)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         message_edit_period, message_deletion_period, like_icon, parent_id, posting_policy,
+         share_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(key) DO UPDATE SET
         name       = COALESCE(excluded.name, conversations.name),
         avatar_url = COALESCE(excluded.avatar_url, conversations.avatar_url),
@@ -518,7 +537,8 @@ actor ConversationStore {
         message_deletion_period = COALESCE(excluded.message_deletion_period, conversations.message_deletion_period),
         like_icon = COALESCE(excluded.like_icon, conversations.like_icon),
         parent_id = COALESCE(excluded.parent_id, conversations.parent_id),
-        posting_policy = excluded.posting_policy
+        posting_policy = excluded.posting_policy,
+        share_url = COALESCE(excluded.share_url, conversations.share_url)
     """
 
     // MARK: - Wire model to row
@@ -543,7 +563,8 @@ actor ConversationStore {
             messageEditPeriod: group.messageEditPeriod,
             messageDeletionPeriod: group.messageDeletionPeriod,
             likeIcon: group.likeIcon,
-            isPlaceholder: false
+            isPlaceholder: false,
+            shareURL: group.shareUrl
         )
     }
 

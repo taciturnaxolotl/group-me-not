@@ -505,6 +505,9 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
 nonisolated struct Group: Codable, Identifiable, Hashable, Sendable {
     var id: String
     var name: String
+    /// The join link. Anyone who opens it can join, which is why it is only ever
+    /// shown behind a deliberate tap.
+    var shareUrl: String?
     var type: String?
     var description: String?
     var imageUrl: String?
