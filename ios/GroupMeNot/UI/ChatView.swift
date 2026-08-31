@@ -796,12 +796,16 @@ struct ChatView: View {
                 Divider().padding(.leading, 14)
             }
             if !staged.isEmpty {
-                stagedStrip
-                // The whole reason the tray lives inside the field rather than
-                // above it. A photo waiting to be sent is part of the message
-                // being written, and a hairline is enough to say "these two
-                // things go together, and one of them is the words".
-                Divider().padding(.leading, 14)
+                SwiftUI.Group {
+                    stagedStrip
+                    // The whole reason the tray lives inside the field rather
+                    // than above it. A photo waiting to be sent is part of the
+                    // message being written, and a hairline is enough to say
+                    // "these two things go together, and one of them is the
+                    // words".
+                    Divider().padding(.leading, 14)
+                }
+                .animation(.snappy(duration: 0.22), value: staged)
             }
 
             HStack(alignment: .bottom, spacing: 4) {
@@ -820,6 +824,16 @@ struct ChatView: View {
                     }
 
                 sendButton
+                    // On the button, not on the field.
+                    //
+                    // An implicit animation applies to everything beneath it,
+                    // and beneath it was the `TextField`. Sending flips
+                    // `canSend` in the same update that empties `draft`, so the
+                    // field's own text change was being handed an animation it
+                    // had no business having, and the words stayed on screen
+                    // after the message had gone. Only the button appears and
+                    // disappears here; only the button should animate.
+                    .animation(.snappy(duration: 0.18), value: canSend)
             }
         }
         // A rounded rectangle rather than a capsule, because a capsule around a
@@ -827,8 +841,6 @@ struct ChatView: View {
         // height, and the taller it gets the more the ends bow out. At a single
         // line's height this is within a point of the capsule it replaces.
         .glassEffect(.regular, in: .rect(cornerRadius: 20, style: .continuous))
-        .animation(.snappy(duration: 0.18), value: canSend)
-        .animation(.snappy(duration: 0.22), value: staged)
     }
 
     /// What this message will be answering, with a way out.
