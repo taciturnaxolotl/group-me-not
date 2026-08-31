@@ -159,6 +159,52 @@ actor MessageStore {
         }
     }
 
+    /// Replaces a message's whole reaction set with the one a `favorite` or
+    /// `like.delete` push delivered.
+    ///
+    /// The push carries the complete list, not a delta: the official client
+    /// hands it straight to `updateReactionsForMessage(…, replace: true)` and
+    /// treats an absent array as "no reactions at all". So this replaces rather
+    /// than merges, which is the only reading under which removing the last
+    /// reaction can ever reach us.
+    ///
+    /// `favorited_by` is cleared for the same reason. It is not a second,
+    /// independent set of likers; it is the legacy *view* of this same data,
+    /// which is why the modern client hides the heart row entirely whenever it
+    /// draws reaction pills. Leaving a stale copy behind would strand a phantom
+    /// heart on the message forever, because `after_id` paging never revisits a
+    /// message to correct it.
+    ///
+    /// Bypasses ``upsertSQL``'s freshness guard on purpose: a reaction does not
+    /// move `updated_at`, so a guarded write would refuse its own edit.
+    ///
+    /// - Returns: the stored message afterwards, or nil if we do not hold it.
+    @discardableResult
+    func replaceReactions(
+        _ reactions: [Message.Reaction],
+        onMessage messageID: String,
+        in conversation: ConversationID
+    ) throws -> Message? {
+        try db.transaction {
+            guard var message = try loadMessage(id: messageID, in: conversation) else { return nil }
+            message.reactions = reactions
+            message.favoritedBy = nil
+
+            try db.run(
+                """
+                UPDATE messages SET payload = ?, reactions = ?
+                 WHERE conversation_key = ? AND id = ?
+                """,
+                [
+                    SQLValue(try StoreCoding.encode(message)),
+                    SQLValue(StoreCoding.encodeIfPresent(message.reactions)),
+                    SQLValue(conversation.storageKey),
+                    SQLValue(messageID),
+                ])
+            return message
+        }
+    }
+
     // MARK: - Reading
 
     /// The newest `limit` messages, oldest first so the caller can render them

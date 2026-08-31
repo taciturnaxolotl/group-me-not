@@ -10,7 +10,7 @@ import OSLog
 /// `Message` never needs a migration.
 nonisolated enum Schema {
     /// Bump this and add a `case` to `apply(step:)` for every change.
-    static let version: Int32 = 5
+    static let version: Int32 = 6
 
     private static let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "schema")
 
@@ -52,6 +52,7 @@ nonisolated enum Schema {
         case 3: try db.execute(addEditPeriods)
         case 4: try db.execute(addPendingReactions)
         case 5: try db.execute(addOutboxMedia)
+        case 6: try db.execute(addHistorySynced)
         default:
             throw SQLError(code: 1, message: "no migration defined for schema \(step)", sql: nil)
         }
@@ -255,6 +256,42 @@ nonisolated enum Schema {
     /// pushing the same bytes twice.
     private static let addOutboxMedia = """
     ALTER TABLE outbox ADD COLUMN media BLOB;  -- JSON array of PendingMedia
+    """
+
+    // MARK: - Version 6
+
+    /// How far forward this conversation's history has actually been *paged*,
+    /// as opposed to how far forward we happen to hold a message.
+    ///
+    /// The two are not the same thing, and conflating them is how a client
+    /// loses a week of messages without noticing. A Faye push writes its
+    /// message straight into `messages`, so after a spell offline the newest
+    /// row we hold can be a message from thirty seconds ago with four thousand
+    /// unfetched messages behind it. Ask `MAX(id)` where the transcript starts
+    /// and it answers with that pushed message; page `after_id` from there and
+    /// the four thousand are skipped, permanently, because `after_id` never
+    /// looks backwards and nothing else ever will either.
+    ///
+    /// So this column records only what a contiguous `after_id` walk has
+    /// covered. Pushes never touch it. That keeps the diff in
+    /// ``SyncEngine/plan(groups:chats:heads:)`` honest: the conversation still
+    /// reads as "moved" while the hole is open, and the ordinary catch-up path
+    /// closes it. The hole is also *visible* here rather than being an absence
+    /// nobody can see: `history_synced_id` behind `last_message_id` is the
+    /// client saying, in a column, that it knows it is missing something.
+    ///
+    /// Seeded from the newest message each conversation already holds. That is
+    /// exactly what the old code assumed, so an upgrade changes nothing about
+    /// what we refetch; it only stops new holes from forming.
+    private static let addHistorySynced = """
+    ALTER TABLE conversations ADD COLUMN history_synced_id TEXT;
+
+    UPDATE conversations SET history_synced_id = (
+        SELECT m.id FROM messages m
+         WHERE m.conversation_key = conversations.key
+         ORDER BY m.sort_key DESC, m.id DESC
+         LIMIT 1
+    );
     """
 }
 

@@ -33,21 +33,47 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
     var isDeleted: Bool { (deletedAt ?? 0) > 0 }
     var likeCount: Int { favoritedBy?.count ?? 0 }
 
+    /// The reaction buckets the server actually described, in the one shape the
+    /// rest of the app reasons about.
+    ///
+    /// `reactions` and `favorited_by` are not two sets of people to add up. They
+    /// are two *views of the same set*, and which one you get depends on how old
+    /// the reading client is. The same `favorite` frame on the wire is parsed by
+    /// the official client either as `{line, reactions: [...]}` or, with
+    /// multi-reactions off, as `{line, user_id}` appended to `favorited_by`; and
+    /// its bubble shows reaction pills or the heart row but never both
+    /// (`LikeableViewHolder.configureLikeUI`). So `favorited_by` is everyone who
+    /// reacted with anything, and treating it as a heart bucket *alongside*
+    /// `reactions` counts every reactor twice and puts a ❤️ on every message
+    /// that has any reaction at all.
+    ///
+    /// Hence: when the server sent a reaction array, that array is the whole
+    /// truth. `favorited_by` is the fallback for messages it described no other
+    /// way, where a heart is the only thing we could honestly draw, and even
+    /// then the glyph is a legacy convention rather than something we were told.
+    ///
+    /// The emptiness test is on the raw array, not on what survives drawing: a
+    /// message whose only reaction is a powerup sticker we have no art for has
+    /// been described, and inventing a heart for it would be attributing a glyph
+    /// nobody sent.
+    var wireReactions: [Reaction] {
+        if let reactions, !reactions.isEmpty { return reactions }
+        guard let likers = favoritedBy, !likers.isEmpty else { return [] }
+        return [Reaction(type: "unicode", code: ReactionSummary.heart, userIds: likers)]
+    }
+
     /// The one list a bubble draws.
     ///
-    /// A plain like and a `❤️` reaction are the same thing to a reader, so they
-    /// share a bucket: `favorited_by` is folded into the heart and the two user
-    /// lists are merged, the plain likers first. Everything else keeps the
-    /// order the server sent, which is the order the reactions were first used.
+    /// Buckets keep the order the server sent, which is the order the reactions
+    /// were first used.
     ///
     /// Reactions we cannot draw (legacy powerup packs, whose art lives behind a
     /// CDN we do not talk to) are dropped rather than rendered as a blank.
     func reactionSummaries(currentUserID: String?) -> [ReactionSummary] {
-        let likers = favoritedBy ?? []
-        var order: [String] = likers.isEmpty ? [] : [ReactionSummary.heart]
-        var buckets: [String: [String]] = likers.isEmpty ? [:] : [ReactionSummary.heart: likers]
+        var order: [String] = []
+        var buckets: [String: [String]] = [:]
 
-        for reaction in reactions ?? [] {
+        for reaction in wireReactions {
             guard let glyph = reaction.glyph, let users = reaction.userIds, !users.isEmpty
             else { continue }
             if buckets[glyph] == nil { order.append(glyph) }
@@ -83,32 +109,34 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
     /// frame, and ``MessageStore/setReaction(_:by:onMessage:in:)`` applies the
     /// same function to the stored copy inside its transaction. One rule, two
     /// callers, no chance of them drifting apart.
+    ///
+    /// The result is always in the modern shape: buckets in `reactions`, and
+    /// `favorited_by` cleared. It has to be, because ``wireReactions`` reads
+    /// `favorited_by` only when `reactions` is empty, so a heart left behind in
+    /// the legacy field would simply not be drawn on a message that has any
+    /// other reaction on it. Starting from ``wireReactions`` rather than from
+    /// `reactions` is what carries the existing likers across that conversion
+    /// instead of dropping them the moment somebody adds a second glyph.
     func settingReaction(_ glyph: String?, by userID: String) -> Message {
         var copy = self
 
-        copy.favoritedBy = copy.favoritedBy?.filter { $0 != userID }
-        copy.reactions = copy.reactions?.compactMap { reaction in
+        var buckets = wireReactions.compactMap { reaction -> Reaction? in
             guard let users = reaction.userIds, users.contains(userID) else { return reaction }
             var updated = reaction
             updated.userIds = users.filter { $0 != userID }
             return (updated.userIds?.isEmpty ?? true) ? nil : updated
         }
 
-        switch glyph {
-        case .none:
-            break
-        // The heart is a plain like on the wire, so it goes where a like goes.
-        case .some(ReactionSummary.heart):
-            copy.favoritedBy = (copy.favoritedBy ?? []) + [userID]
-        case .some(let glyph):
-            var reactions = copy.reactions ?? []
-            if let index = reactions.firstIndex(where: { $0.glyph == glyph }) {
-                reactions[index].userIds = (reactions[index].userIds ?? []) + [userID]
+        if let glyph {
+            if let index = buckets.firstIndex(where: { $0.glyph == glyph }) {
+                buckets[index].userIds = (buckets[index].userIds ?? []) + [userID]
             } else {
-                reactions.append(Reaction(type: "unicode", code: glyph, userIds: [userID]))
+                buckets.append(Reaction(type: "unicode", code: glyph, userIds: [userID]))
             }
-            copy.reactions = reactions
         }
+
+        copy.reactions = buckets
+        copy.favoritedBy = nil
         return copy
     }
 

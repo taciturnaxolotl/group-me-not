@@ -95,12 +95,34 @@ nonisolated struct PushEvent: Sendable, Hashable {
         case unrecognised(subject: JSONValue?)
     }
 
+    /// A `favorite` or `like.delete` delivery.
+    ///
+    /// The frame is *not* a message, which is worth stating plainly because it
+    /// looks like one. Its subject is
+    /// `{ line: { group_id, id }, reactions: [...] }` for a group and
+    /// `{ direct_message: { chat_id, id }, reactions: [...] }` for a DM
+    /// (`FayeMessage.ReactionsPayload` / `DMReactionsPayload` in the official
+    /// client). The `line` is a stub with an id and a conversation, no
+    /// `created_at` and no text, so decoding the subject as a `Message` fails
+    /// and always did; the reaction state lives in the sibling `reactions`
+    /// array, not inside the line.
+    ///
+    /// That array is the message's complete reaction set, not a delta. The
+    /// official client feeds it to `updateReactionsForMessage(…, replace: true)`
+    /// and reads an absent array as "none left", which is the only way an
+    /// unreact ever reaches a client at all.
     nonisolated struct Like: Sendable, Hashable {
-        /// The full message when the server sent it, which it usually does.
-        var message: Message?
-        /// The message the like applies to. Present even when `message` is not.
+        /// The message the like applies to.
         var messageID: String?
-        /// Who liked it, from `data.user_id`.
+        /// The reaction set afterwards, when the frame carried one. Empty is
+        /// meaningful: it says the last reaction was taken off.
+        var reactions: [Message.Reaction]?
+        /// `line.group_id`, when this arrived for a group.
+        var groupID: String?
+        /// `direct_message.chat_id`, when this arrived for a DM. Two user ids
+        /// joined with `+`.
+        var chatID: String?
+        /// Who reacted, from `data.user_id`.
         var userID: String?
     }
 
@@ -185,16 +207,28 @@ extension PushEvent {
         }
     }
 
-    /// Like payloads have been seen two ways: the subject *is* the message, or the
-    /// subject wraps it under `line`. Try both rather than guess.
+    /// Pull the message identity and the new reaction set out of a `favorite`
+    /// or `like.delete` subject.
+    ///
+    /// Groups put the stub under `line`, DMs under `direct_message`; both call
+    /// the message id `id`. `message_id` is checked too because the legacy
+    /// favourite frame is the same delivery read a different way, and a spare
+    /// key costs nothing.
     nonisolated private static func like(from data: PushEnvelope, coder: JSONValue.Coder) -> Like {
         let subject = data.subject
-        let message = subject?.decoded(as: Message.self, using: coder)
-            ?? subject?["line"]?.decoded(as: Message.self, using: coder)
-        let id = message?.id
+        let line = subject?["line"]
+        let dm = subject?["direct_message"]
+        let id = line?["id"]?.stringValue
+            ?? dm?["id"]?.stringValue
             ?? subject?["message_id"]?.stringValue
-            ?? subject?["line"]?["id"]?.stringValue
-        return Like(message: message, messageID: id, userID: data.userId)
+        let reactions: [Message.Reaction]? = subject?["reactions"]
+            .flatMap { $0.decodedArray(of: Message.Reaction.self, using: coder) }
+        return Like(
+            messageID: id,
+            reactions: reactions,
+            groupID: line?["group_id"]?.stringValue,
+            chatID: dm?["chat_id"]?.stringValue,
+            userID: data.userId)
     }
 }
 
@@ -322,5 +356,13 @@ nonisolated enum JSONValue: Codable, Hashable, Sendable {
     func decoded<T: Decodable>(as type: T.Type, using coder: Coder) -> T? {
         guard case .object = self, let data = try? coder.encoder.encode(self) else { return nil }
         return try? coder.decoder.decode(T.self, from: data)
+    }
+
+    /// The same, for a subtree that is an array. Separate from ``decoded(as:using:)``
+    /// because that one insists on an object, which is what keeps a bare string
+    /// or number from being mistaken for a model.
+    func decodedArray<T: Decodable>(of type: T.Type, using coder: Coder) -> [T]? {
+        guard case .array = self, let data = try? coder.encoder.encode(self) else { return nil }
+        return try? coder.decoder.decode([T].self, from: data)
     }
 }

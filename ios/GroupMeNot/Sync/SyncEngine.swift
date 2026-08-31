@@ -180,8 +180,15 @@ actor SyncEngine {
             continuation.yield(.conversations)
 
             // 3. Diff against local heads and close the gaps.
-            let heads = try await store.messages.syncHeads()
-            let plans = plan(groups: groups, chats: chats, heads: heads)
+            // Two different questions, and the difference between them is the
+            // whole point. `historyHeads` is how far we have *paged*;
+            // `syncHeads` is the newest message we happen to hold, which a push
+            // can raise without proving anything about what sits behind it.
+            // The diff runs off the first; the second only tells the log when a
+            // push has run out ahead of verified history.
+            let heads = try await store.conversations.historyHeads()
+            let held = try await store.messages.syncHeads()
+            let plans = plan(groups: groups, chats: chats, heads: heads, held: held)
             await execute(plans)
 
             // A 409 tells us a queued send landed but not what id it landed
@@ -284,9 +291,28 @@ actor SyncEngine {
     private func plan(
         groups: [Group],
         chats: [Chat],
-        heads: [ConversationID: String]
+        heads: [ConversationID: String],
+        held: [ConversationID: String]
     ) -> [Plan] {
         var plans: [Plan] = []
+
+        /// Say so when a conversation's newest local message is ahead of the
+        /// history we have actually paged.
+        ///
+        /// That is a hole, and it is the exact shape of the bug this logging
+        /// exists for: a push lands after a spell offline, the transcript's
+        /// newest row jumps to it, and everything between the old head and the
+        /// pushed message is missing. It stays quiet for a healthy conversation
+        /// because a healthy conversation is paged up to its own head.
+        func noteGap(_ id: ConversationID) {
+            guard let newest = held[id], let verified = heads[id],
+                  newest != verified, Message.isNewer(newest, than: verified)
+            else { return }
+            log.notice("""
+                gap in \(id.storageKey, privacy: .public): hold through \(newest, privacy: .public) \
+                but history verified only through \(verified, privacy: .public); paging forward from there
+                """)
+        }
 
         for group in groups {
             let id = ConversationID.group(group.id)
@@ -297,6 +323,7 @@ actor SyncEngine {
             lastSeenTips[id] = tip
 
             guard moved(remote: remoteHead, local: localHead) else { continue }
+            noteGap(id)
             plans.append(Plan(
                 conversation: id,
                 localHead: localHead,
@@ -317,6 +344,7 @@ actor SyncEngine {
             // `upsert(chats:)` already pointed the list row at this message; the
             // question here is only whether the transcript is missing anything.
             guard moved(remote: last.id, local: localHead) else { continue }
+            noteGap(id)
             plans.append(Plan(
                 conversation: id,
                 localHead: localHead,
@@ -411,6 +439,12 @@ actor SyncEngine {
         do {
             if let embedded = plan.embedded {
                 try await store.messages.upsert(embedded, in: plan.conversation)
+                // `advancedByOne` proved this message is the only one we were
+                // missing, so history really is contiguous through it. Saying so
+                // is what stops the next sync from planning this conversation
+                // again forever.
+                try await store.conversations.advanceHistorySynced(
+                    plan.conversation, to: embedded.id)
                 continuation.yield(.messages(plan.conversation))
                 return
             }
@@ -435,21 +469,45 @@ actor SyncEngine {
     ) async throws -> Int {
         var anchor = anchor
         var stored = 0
+        var exhaustedPages = true
 
         for _ in 0..<Self.maxHistoryPages {
             let page = try await api.messages(
                 in: conversation, after: anchor,
                 limit: Self.historyPageSize, retry: retry)
-            guard !page.isEmpty else { break }
+            guard !page.isEmpty else { exhaustedPages = false; break }
 
             try await store.messages.upsert(page, in: conversation)
             stored += page.count
+            // The page is ascending and was fetched from `anchor`, so history is
+            // now contiguous through its last message. Recording that after every
+            // page rather than at the end is what lets a catch-up that gives up
+            // early, or fails halfway, resume from where it got to instead of
+            // starting over or, worse, pretending it finished.
+            if let last = page.last?.id {
+                try await store.conversations.advanceHistorySynced(conversation, to: last)
+            }
             continuation.yield(.messages(conversation))
 
             // With no anchor the server hands back the newest page, so there is
             // nothing after it to ask for.
-            guard anchor != nil, page.count >= Self.historyPageSize, let last = page.last?.id else { break }
+            guard anchor != nil, page.count >= Self.historyPageSize, let last = page.last?.id else {
+                exhaustedPages = false
+                break
+            }
             anchor = last
+        }
+
+        if exhaustedPages {
+            // We stopped because we ran out of budget, not because we ran out of
+            // history, so there is still a hole. It is not lost: the verified
+            // head moved as far as we got, so the next sync sees the conversation
+            // as still behind and carries on from here. Worth a line all the
+            // same, because "the catch-up was truncated" is otherwise invisible.
+            log.notice("""
+                history for \(conversation.storageKey, privacy: .public) still incomplete after \
+                \(Self.maxHistoryPages) pages (\(stored) messages); resuming on the next sync
+                """)
         }
 
         if stored > 0 {
@@ -459,13 +517,31 @@ actor SyncEngine {
         return stored
     }
 
-    /// The newest local message id that is safe to page forward from: the head,
-    /// unless the head is a list-preview placeholder, in which case we anchor
-    /// behind it so the real message comes back and overwrites it.
+    /// The newest message id that is safe to page forward from.
+    ///
+    /// Safe means two things. It must be somewhere history is actually
+    /// contiguous, which is what `history_synced_id` records and what the
+    /// newest row in the table emphatically is not: anchoring on a pushed
+    /// message skips everything between it and the last thing we paged. And it
+    /// must not be a list-preview placeholder, which carries no sender and has
+    /// to be overwritten by the server's real copy.
+    ///
+    /// Falling back to the recent scan when nothing has been paged yet keeps the
+    /// cold-start behaviour: no anchor means "fetch the newest page", which is
+    /// the right thing to show somebody opening a conversation for the first
+    /// time.
     private func healableAnchor(_ conversation: ConversationID) async throws -> String? {
         let recent = try await store.messages.recent(conversation, limit: 32)
-        // `recent` is oldest first, so the last non-placeholder is the newest one.
-        return recent.last(where: { !$0.isListPreview })?.id
+        guard let verified = try await store.conversations.historySyncedID(conversation) else {
+            // `recent` is oldest first, so the last non-placeholder is the newest one.
+            return recent.last(where: { !$0.isListPreview })?.id
+        }
+        guard recent.contains(where: { $0.id == verified && $0.isListPreview }) else {
+            return verified
+        }
+        // The verified head is a preview row. Anchor behind it so the server's
+        // real message comes back and replaces it.
+        return recent.last { !$0.isListPreview && Message.isNewer(verified, than: $0.id) }?.id
     }
 
     // MARK: - Step 4: read state
@@ -545,6 +621,21 @@ actor SyncEngine {
                 }
 
                 try await store.messages.upsert(message, in: conversation)
+                // Deliberately *not* an advance of `history_synced_id`. A push
+                // proves this message exists; it proves nothing about the
+                // messages between it and the last page we fetched, and after a
+                // spell offline there can be thousands. Leaving the verified
+                // head where it is keeps the conversation looking behind to the
+                // next diff, which is what makes the hole get filled instead of
+                // hidden. See `history_synced_id` in ``Schema``.
+                if !known, let verified = try await store.conversations
+                    .historySyncedID(conversation),
+                    Message.isNewer(message.id, than: verified) {
+                    log.debug("""
+                        push \(message.id, privacy: .public) into \(conversation.storageKey, privacy: .public) \
+                        sits ahead of verified history \(verified, privacy: .public)
+                        """)
+                }
                 // Only a genuinely new message from somebody else moves a badge.
                 if !isMine, !known, !message.isSystem {
                     try await store.conversations.incrementUnread(conversation)
@@ -556,13 +647,34 @@ actor SyncEngine {
             }
 
         case .liked(let like), .unliked(let like):
-            // The like payload usually carries the whole message, favourites and
-            // all, so storing it is the entire update.
-            guard let message = like.message,
-                  let conversation = conversation(for: message, channel: push.channel)
-            else { return }
-            _ = try? await store.messages.upsert(message, in: conversation)
-            continuation.yield(.messages(conversation))
+            // The frame is not a message: it names one and carries the whole
+            // reaction set afterwards. See ``PushEvent/Like``. This used to try
+            // to decode the subject as a `Message` and could never succeed,
+            // because the stub it names has no `created_at`, so every reaction
+            // anybody made went in the bin and the only reactions we ever drew
+            // were the ones a REST fetch happened to carry. `after_id` never
+            // revisits a message, so that is not a delay; it is forever.
+            guard let messageID = like.messageID,
+                  let conversation = conversation(for: like, channel: push.channel)
+            else {
+                log.notice("reaction push with no addressable message on \(push.channel, privacy: .public)")
+                return
+            }
+            guard let reactions = like.reactions else {
+                log.notice("""
+                    reaction push for \(messageID, privacy: .public) carried no reaction set; \
+                    leaving the stored copy alone
+                    """)
+                return
+            }
+            do {
+                guard try await store.messages.replaceReactions(
+                    reactions, onMessage: messageID, in: conversation) != nil
+                else { return }
+                continuation.yield(.messages(conversation))
+            } catch {
+                log.error("could not store reaction: \(failureText(error), privacy: .public)")
+            }
 
         case .typing, .unrecognised:
             break
@@ -584,6 +696,17 @@ actor SyncEngine {
             // A note to self: both ends are us.
             if message.recipientId == me { return .direct(otherUserID: me) }
         }
+        return channel.flatMap(conversation(forChannel:))
+    }
+
+    /// Which conversation a reaction push belongs to.
+    ///
+    /// The group case names its group outright. The DM case carries a `chat_id`,
+    /// which is the two user ids joined with `+`, so the conversation is
+    /// whichever end is not us.
+    private func conversation(for like: PushEvent.Like, channel: String?) -> ConversationID? {
+        if let groupID = like.groupID { return .group(groupID) }
+        if let chatID = like.chatID, let id = direct(fromJoined: chatID, separator: "+") { return id }
         return channel.flatMap(conversation(forChannel:))
     }
 

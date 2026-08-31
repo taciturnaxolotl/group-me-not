@@ -120,6 +120,57 @@ actor ConversationStore {
         ])
     }
 
+    // MARK: - Verified history
+
+    /// How far a contiguous `after_id` walk has taken each conversation, for
+    /// every conversation at once.
+    ///
+    /// This, and not `MAX(messages.id)`, is what the catch-up diff compares
+    /// against. See `history_synced_id` in ``Schema``: a pushed message raises
+    /// the newest row we hold without proving anything about what sits behind
+    /// it, so trusting `MAX(id)` lets one live message hide an arbitrarily
+    /// large hole and stop the sync from ever asking for it.
+    func historyHeads() throws -> [ConversationID: String] {
+        let rows = try db.query(
+            """
+            SELECT kind, remote_id, history_synced_id
+              FROM conversations
+             WHERE history_synced_id IS NOT NULL
+            """
+        ) { (kind: $0.int64(0), remoteID: $0.string(1), head: $0.string(2)) }
+        return rows.reduce(into: [:]) { result, row in
+            guard let id = ConversationID(storageKind: row.kind, remoteID: row.remoteID) else { return }
+            result[id] = row.head
+        }
+    }
+
+    /// How far this one conversation has been paged, or nil if it never has.
+    func historySyncedID(_ conversation: ConversationID) throws -> String? {
+        try db.queryOne(
+            "SELECT history_synced_id FROM conversations WHERE key = ?",
+            [SQLValue(conversation.storageKey)]
+        ) { $0.stringOrNil(0) } ?? nil
+    }
+
+    /// Records that history is now contiguous up to `messageID`.
+    ///
+    /// Only ever called by the code that did the paging, and only forwards: two
+    /// catch-ups racing must not let the slower one rewind the faster one's
+    /// progress and reopen a hole that is already closed.
+    func advanceHistorySynced(_ conversation: ConversationID, to messageID: String) throws {
+        try ConversationWrites.ensureExists(conversation, in: db)
+        try db.run(
+            """
+            UPDATE conversations
+               SET history_synced_id = ?2
+             WHERE key = ?1
+               AND (history_synced_id IS NULL
+                    OR CAST(?2 AS INTEGER) > CAST(history_synced_id AS INTEGER))
+            """,
+            [SQLValue(conversation.storageKey), SQLValue(messageID)]
+        )
+    }
+
     /// Creates a bare row if the conversation is new to us. Used when a message
     /// or an outgoing send names a conversation we have never listed.
     func ensureExists(_ conversation: ConversationID) throws {
