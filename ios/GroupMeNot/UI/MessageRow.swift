@@ -656,7 +656,8 @@ private struct MediaThumbnail: View {
     var body: some View {
         RemoteImage(
             url: inlineURL, maxPixelSize: box.width * 3,
-            previewURL: GroupMeImage.variant(.placeholder, of: url), onLoad: adopt
+            previewURL: GroupMeImage.variant(.placeholder, of: url),
+            blurHash: attachment.blurHash, onLoad: adopt
         ) {
             ZStack {
                 Rectangle().fill(.quaternary)

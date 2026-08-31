@@ -112,6 +112,10 @@ struct RemoteImage<Placeholder: View>: View {
     /// way. Loaded in parallel rather than in sequence: it is a head start, not
     /// a step the full image has to wait behind.
     var previewURL: URL?
+    /// The `blur_hash` GroupMe sent with this attachment, if it sent one. The
+    /// only placeholder that needs no network at all, so it is the one that is
+    /// there on the frame the message appears.
+    var blurHash: String?
     /// The pixel size of whatever arrived, for callers that reserved space from
     /// a guess and want to correct it. Ignored by everything drawing into a
     /// fixed box, which is most of them.
@@ -120,6 +124,7 @@ struct RemoteImage<Placeholder: View>: View {
 
     @State private var image: UIImage?
     @State private var preview: UIImage?
+    @State private var blurred: UIImage?
 
     var body: some View {
         ZStack {
@@ -139,6 +144,11 @@ struct RemoteImage<Placeholder: View>: View {
                     .blur(radius: 8)
                     .clipped()
                     .transition(.opacity)
+            } else if let blurred {
+                Image(uiImage: blurred)
+                    .resizable()
+                    .scaledToFill()
+                    .transition(.opacity)
             } else {
                 placeholder()
             }
@@ -147,6 +157,21 @@ struct RemoteImage<Placeholder: View>: View {
         // wants and starts the one it does.
         .task(id: request) { await load() }
         .task(id: previewRequest) { await loadPreview() }
+        .task(id: blurHash) { await decodeHash() }
+    }
+
+    /// Off the main actor, because it is a loop over every pixel of the result
+    /// and the result is wanted during a scroll.
+    private func decodeHash() async {
+        guard let blurHash, !blurHash.isEmpty else {
+            blurred = nil
+            return
+        }
+        let decoded = await Task.detached(priority: .utility) {
+            BlurHash.image(from: blurHash)
+        }.value
+        guard !Task.isCancelled, image == nil else { return }
+        blurred = decoded
     }
 
     private var previewRequest: ImageLoader.Request? {
