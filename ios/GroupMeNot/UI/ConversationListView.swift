@@ -205,7 +205,7 @@ struct ConversationListView: View {
                                 .foregroundStyle(.white, .red)
                                 .offset(x: 4, y: -4)
                         } else {
-                            UnreadBadge(count: row.unreadCount, isMuted: row.isMuted)
+                            UnreadBadge(count: unreadTotal(for: row), isMuted: row.isMuted)
                                 .offset(x: 6, y: -2)
                         }
                     }
@@ -246,6 +246,17 @@ struct ConversationListView: View {
                 .accessibilityLabel("Unpin \(row.name)")
             }
         }
+    }
+
+    /// A pinned group answers for its topics, the same way a collapsed one does
+    /// in the list. A tile has nothing to expand, so if it did not carry their
+    /// unread the only sign of a message in a topic would be a conversation the
+    /// pin was meant to save you from opening.
+    private func unreadTotal(for row: ConversationRow) -> Int {
+        guard case .group(let id) = row.id else { return row.unreadCount }
+        return model.conversations
+            .filter { $0.parentID == id }
+            .reduce(row.unreadCount) { $0 + $1.unreadCount }
     }
 
     private func hasTopics(_ row: ConversationRow) -> Bool {
