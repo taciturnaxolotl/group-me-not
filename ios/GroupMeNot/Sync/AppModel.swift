@@ -35,7 +35,24 @@ final class AppModel {
     private(set) var members: [Member] = []
 
     private(set) var currentUser: CurrentUser?
-    private(set) var isSignedIn = false
+    /// What is known about the session, which is not the same question as
+    /// whether there is one.
+    ///
+    /// The third case is the whole point. A plain `Bool` has to start somewhere,
+    /// and starting at false means the first frames of every launch draw the
+    /// sign-in screen before the keychain has been asked. That is not a slow
+    /// answer, it is a wrong one: the app flashes a screen the user has already
+    /// dealt with and then throws it away.
+    nonisolated enum Session: Sendable {
+        /// The keychain has not answered yet. Lasts a frame or two.
+        case unknown
+        case signedOut
+        case signedIn
+    }
+
+    private(set) var session: Session = .unknown
+
+    var isSignedIn: Bool { session == .signedIn }
     private(set) var syncState = SyncState()
     private(set) var totalUnread = 0
     /// Who is typing in the open conversation, and when we last heard from them.
@@ -167,13 +184,18 @@ final class AppModel {
         // than here: `didSendBodyData` fires per packet, and a photo on a slow
         // connection would otherwise ask for a hundred frames a second.
         await sends.onUploadProgress { [weak self] guid, fraction in
-            Task { @MainActor in self?.noteUploadProgress(guid, fraction) }
+            // Bound to a `let` before the `Task` reads it. A capture list makes
+            // `self` a mutable variable in the enclosing closure, and reading a
+            // captured `var` from concurrently-executing code is exactly what
+            // Swift 6 refuses; a constant has nothing to race with.
+            let model = self
+            Task { @MainActor in model?.noteUploadProgress(guid, fraction) }
         }
 
         // 1. The screen, from disk. This is the part that must never wait.
         restoreIdentity()
         await reloadConversations()
-        isSignedIn = await tokens.isSignedIn
+        session = await tokens.isSignedIn ? .signedIn : .signedOut
 
         guard isSignedIn else { return }
 
@@ -655,7 +677,7 @@ final class AppModel {
     /// user typed something plausible and the next successful request settles it.
     func signIn(token: String) async {
         await tokens.save(token)
-        isSignedIn = true
+        session = .signedIn
         syncState.lastError = nil
 
         do {
@@ -666,7 +688,7 @@ final class AppModel {
             await sync.sync(reason: .signIn)
         } catch let error as APIError where error.status == 401 || error.status == 403 {
             await tokens.clear()
-            isSignedIn = false
+            session = .signedOut
             syncState.phase = .failed
             syncState.lastError = "That token was refused."
             log.error("sign-in refused")
@@ -698,7 +720,7 @@ final class AppModel {
         // photo belongs to the session that picked it.
         await MediaVault.shared.removeAll()
 
-        isSignedIn = false
+        session = .signedOut
         currentUser = nil
         conversations = []
         messages = []
