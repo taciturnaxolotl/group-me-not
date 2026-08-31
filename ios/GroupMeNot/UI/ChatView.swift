@@ -969,7 +969,7 @@ struct ChatView: View {
             Avatar(
                 url: conversation.avatarURL,
                 name: conversation.name,
-                size: 56,
+                size: 62,
                 isGroup: conversation.isGroup
             )
             // A stack draws in order, so the pill would otherwise cover the
@@ -978,15 +978,15 @@ struct ChatView: View {
             .zIndex(1)
             HStack(spacing: 3) {
                 Text(conversation.name)
-                    .font(.caption.weight(.semibold))
+                    .font(.footnote.weight(.semibold))
                     .lineLimit(1)
                     .foregroundStyle(.primary)
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 13)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 15)
+            .padding(.vertical, 6)
             .glassEffect(.regular.interactive(), in: .capsule)
         }
         // Clear of the status bar. A picture that starts where the safe area
