@@ -159,6 +159,14 @@ struct VoiceNote: View {
     }
 }
 
+/// How wide a card in a bubble may be.
+///
+/// Just under the bubble's own maximum, so a card fills the space a paragraph
+/// would rather than sitting in the middle of it looking provisional. Polls and
+/// events share it because they are the same kind of object: a thing with rows
+/// you press.
+private let cardWidth: CGFloat = 272
+
 // MARK: - Polls
 
 /// A poll, with its options and where the votes have gone.
@@ -197,7 +205,7 @@ struct PollCard: View {
         VStack(alignment: .leading, spacing: 8) {
             if let subject = poll.subject, !subject.isEmpty {
                 Text(subject)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.headline)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -206,14 +214,14 @@ struct PollCard: View {
             }
 
             Text(footnote(for: poll))
-                .font(.caption2)
+                .font(.caption)
                 .foregroundStyle(ink.opacity(0.8))
         }
-        .padding(10)
-        .frame(width: 250, alignment: .leading)
+        .padding(12)
+        .frame(width: cardWidth, alignment: .leading)
         .background(
             isOwn ? AnyShapeStyle(.white.opacity(0.15)) : AnyShapeStyle(.quaternary),
-            in: .rect(cornerRadius: 12, style: .continuous))
+            in: .rect(cornerRadius: 14, style: .continuous))
         .foregroundStyle(ink)
     }
 
@@ -224,16 +232,16 @@ struct PollCard: View {
         return Button {
             choose(option, in: poll)
         } label: {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
                     Image(systemName: mine ? "checkmark.circle.fill" : "circle")
-                        .font(.caption)
+                        .font(.body)
                     Text(option.title ?? "Option")
-                        .font(.caption)
+                        .font(.subheadline)
                         .lineLimit(2)
                     Spacer(minLength: 4)
                     Text("\(votes)")
-                        .font(.caption.monospacedDigit())
+                        .font(.subheadline.monospacedDigit())
                 }
                 // A bar rather than a percentage. The question a poll answers is
                 // which one is winning, and a row of numbers makes the reader
@@ -241,10 +249,15 @@ struct PollCard: View {
                 GeometryReader { geo in
                     Capsule()
                         .fill(ink.opacity(mine ? 0.55 : 0.25))
-                        .frame(width: max(2, geo.size.width * share))
+                        .frame(width: max(3, geo.size.width * share))
                 }
-                .frame(height: 4)
+                .frame(height: 7)
             }
+            // Every option is a tap target, so every option gets the room a tap
+            // target needs. At caption size with four points of padding these
+            // were half the height a finger expects.
+            .padding(.vertical, 6)
+            .frame(minHeight: 44, alignment: .center)
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
@@ -351,18 +364,18 @@ struct EventCard: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 10) {
                 if let starts = event.starts { datePlaque(starts) }
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(event.name ?? "Event")
-                        .font(.subheadline.weight(.semibold))
+                        .font(.headline)
                         .lineLimit(2)
                     if let when = timeLine(event) {
                         Text(when)
-                            .font(.caption)
+                            .font(.subheadline)
                             .foregroundStyle(ink.opacity(0.75))
                     }
                     if let place = event.location?.name, !place.isEmpty {
                         Label(place, systemImage: "mappin")
-                            .font(.caption)
+                            .font(.subheadline)
                             .foregroundStyle(ink.opacity(0.75))
                             .lineLimit(1)
                     }
@@ -371,18 +384,18 @@ struct EventCard: View {
 
             if let detail = event.description, !detail.isEmpty {
                 Text(detail)
-                    .font(.caption)
+                    .font(.subheadline)
                     .foregroundStyle(ink.opacity(0.8))
                     .lineLimit(3)
             }
 
             replies(event)
         }
-        .padding(10)
-        .frame(width: 250, alignment: .leading)
+        .padding(12)
+        .frame(width: cardWidth, alignment: .leading)
         .background(
             isOwn ? AnyShapeStyle(.white.opacity(0.15)) : AnyShapeStyle(.quaternary),
-            in: .rect(cornerRadius: 12, style: .continuous))
+            in: .rect(cornerRadius: 14, style: .continuous))
         .foregroundStyle(ink)
     }
 
@@ -391,16 +404,16 @@ struct EventCard: View {
     private func datePlaque(_ date: Date) -> some View {
         VStack(spacing: 0) {
             Text(date.formatted(.dateTime.month(.abbreviated)).uppercased())
-                .font(.caption2.weight(.bold))
+                .font(.caption.weight(.bold))
             Text(date.formatted(.dateTime.day()))
-                .font(.title3.weight(.bold))
+                .font(.title2.weight(.bold))
                 .monospacedDigit()
         }
         .foregroundStyle(isOwn ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.white))
-        .frame(width: 44, height: 44)
+        .frame(width: 54, height: 54)
         .background(
             isOwn ? AnyShapeStyle(.white) : AnyShapeStyle(Color.accentColor),
-            in: .rect(cornerRadius: 9, style: .continuous))
+            in: .rect(cornerRadius: 11, style: .continuous))
     }
 
     private func timeLine(_ event: GroupEvent) -> String? {
@@ -419,7 +432,7 @@ struct EventCard: View {
             Spacer(minLength: 0)
             if let count = event.goingCount, count > 0 {
                 Text("\(count) going")
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(ink.opacity(0.7))
             }
         }
@@ -428,12 +441,13 @@ struct EventCard: View {
     private func button(_ title: String, isOn: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.caption.weight(.semibold))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 16)
+                .frame(minHeight: 36)
                 .background(
                     isOn ? AnyShapeStyle(ink.opacity(0.28)) : AnyShapeStyle(ink.opacity(0.10)),
                     in: .capsule)
+                .contentShape(.capsule)
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(isOn ? [.isButton, .isSelected] : .isButton)
