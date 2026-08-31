@@ -63,6 +63,14 @@ nonisolated struct MessageDisplay: Identifiable, Hashable, Sendable {
         delivery == .sent && !message.isDeleted && !message.isSystem
     }
 
+    /// True once the author has rewritten this message.
+    ///
+    /// Straight off `updated_at`, which the store has been keeping all along and
+    /// nothing was reading. Worth surfacing: an edit is invisible to REST
+    /// catch-up, so a reader who sees changed text with no marker has no way to
+    /// tell a rewrite from a misremembering.
+    var isEdited: Bool { message.isEdited && !message.isDeleted }
+
     /// The link worth a card. Only the first: past that the message is a link
     /// dump and cards stop helping.
     var previewLink: URL? {
@@ -97,6 +105,15 @@ struct MessageRow: View {
     var onRetry: () -> Void = {}
     /// Called when the user gives up on a failed message.
     var onDiscard: () -> Void = {}
+    /// Whether this conversation's edit window is still open for this message.
+    ///
+    /// Decided outside the row, because the window is `Group.messageEditPeriod`
+    /// and lives on the conversation, not the message. Passed rather than
+    /// inferred so the action is simply absent once the window closes: offering
+    /// an Edit the server is going to refuse is worse than offering none.
+    var canEdit: Bool = false
+    /// Called with the new text when the user finishes an edit.
+    var onEdit: (String) -> Void = { _ in }
 
     var body: some View {
         if item.message.isSystem {
@@ -108,7 +125,9 @@ struct MessageRow: View {
                 previews: previews,
                 onReact: onReact,
                 onRetry: onRetry,
-                onDiscard: onDiscard)
+                onDiscard: onDiscard,
+                canEdit: canEdit,
+                onEdit: onEdit)
         }
     }
 }
@@ -139,6 +158,8 @@ private struct BubbleRow: View {
     let onReact: (String) -> Void
     let onRetry: () -> Void
     let onDiscard: () -> Void
+    let canEdit: Bool
+    let onEdit: (String) -> Void
 
     @ScaledMetric(relativeTo: .body) private var avatarSize: CGFloat = 28
     @ScaledMetric(relativeTo: .body) private var gutter: CGFloat = 56
@@ -149,6 +170,12 @@ private struct BubbleRow: View {
     private let chipOverlap: CGFloat = 9
 
     @State private var isPickerPresented = false
+    @State private var isEditorPresented = false
+    /// Set by the Edit action and consumed once the popover has actually gone.
+    /// Raising a sheet while a popover is still dismissing loses the sheet, so
+    /// the two are sequenced rather than fired together.
+    @State private var editWanted = false
+    @State private var editDraft = ""
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
@@ -214,7 +241,19 @@ private struct BubbleRow: View {
         // the animation is attached above the view being inserted.
         .animation(.snappy(duration: 0.2), value: item.reactions)
         .contentShape(.rect)
-        .onLongPressGesture(minimumDuration: 0.32) { isPickerPresented = true }
+        // `maximumDistance` is not about the finger. It measures movement
+        // relative to *this view*, and the view moves on its own:
+        // `.defaultScrollAnchor(.bottom, for: .sizeChanges)` re-pins the
+        // transcript to the content bottom whenever it resizes, so a typing
+        // bubble appearing (~45pt) or a catch-up rewriting history yanks the row
+        // out from under a stationary touch and cancels the press. At the 10pt
+        // default that makes the newest few messages unpressable while the ones
+        // above them work perfectly, which is a maddening thing to debug.
+        //
+        // 44pt absorbs those shifts and still sits well inside the distance a
+        // real drag covers before the pan recogniser claims the touch, so
+        // scrolling does not start opening pickers.
+        .onLongPressGesture(minimumDuration: 0.32, maximumDistance: 44) { isPickerPresented = true }
         // On the way up only. A haptic for the dismissal would be a second
         // tap the user did not make.
         .sensoryFeedback(trigger: isPickerPresented) { _, shown in
@@ -230,6 +269,20 @@ private struct BubbleRow: View {
                 },
                 actions: pickerActions)
                 .presentationCompactAdaptation(.popover)
+        }
+        .onChange(of: isPickerPresented) { _, shown in
+            guard !shown, editWanted else { return }
+            editWanted = false
+            isEditorPresented = true
+        }
+        .alert("Edit Message", isPresented: $isEditorPresented) {
+            TextField("Message", text: $editDraft)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                let text = editDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty, text != item.message.text else { return }
+                onEdit(text)
+            }
         }
     }
 
@@ -270,6 +323,7 @@ private struct BubbleRow: View {
                             // already baked in per side.
                             .tint(item.isOwn ? .white : .accentColor)
                     }
+                    if item.isEdited { editedMarker }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -281,6 +335,18 @@ private struct BubbleRow: View {
         // and merely looks provisional until the server agrees.
         .opacity(item.isPending ? 0.55 : 1)
         .animation(.easeOut(duration: 0.2), value: item.isPending)
+    }
+
+    /// "Edited", under the text and out of the way.
+    ///
+    /// Inside the bubble rather than in the footer on purpose: the footer only
+    /// draws on the tail of a run, and an edited message in the middle of one
+    /// would otherwise carry no marker at all.
+    private var editedMarker: some View {
+        Text("Edited")
+            .font(.caption2)
+            .foregroundStyle(item.isOwn ? AnyShapeStyle(.white.opacity(0.7)) : AnyShapeStyle(.secondary))
+            .accessibilityLabel("Edited")
     }
 
     private var bubbleTint: AnyShapeStyle {
@@ -350,6 +416,15 @@ private struct BubbleRow: View {
                 isPickerPresented = false
             })
         }
+        if canEdit {
+            actions.append(.init("Edit", symbol: "pencil") {
+                // The server's own text, not the parsed copy: an edit starts
+                // from what was actually posted.
+                editDraft = item.message.text ?? ""
+                editWanted = true
+                isPickerPresented = false
+            })
+        }
         if item.isFailed {
             actions.append(.init("Try Again", symbol: "arrow.clockwise") {
                 isPickerPresented = false
@@ -376,6 +451,7 @@ private struct BubbleRow: View {
         var parts: [String] = []
         parts.append(item.isOwn ? "You said" : "\(item.senderName) said")
         if item.message.isDeleted { parts.append("this message was deleted") }
+        if item.isEdited { parts.append("edited") }
         switch item.delivery {
         case .sent: parts.append(Formatters.spokenTimestamp(item.message.date))
         case .pending: parts.append("sending")

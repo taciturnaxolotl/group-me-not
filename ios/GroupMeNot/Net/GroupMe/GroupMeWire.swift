@@ -55,6 +55,22 @@ nonisolated struct SendMessageBody: Encodable, Sendable {
     }
 }
 
+/// `PUT /v4/groups/{groupId}/messages/{messageId}` and
+/// `PUT /v4/direct_messages/{userId}/messages/{messageId}`.
+///
+/// The same `message` wrapper the send routes use, minus the parts an edit
+/// cannot change: the id is in the path and `source_guid` belongs to the
+/// original send, so repeating it here would only invite the server to dedupe
+/// an edit against the message it is editing.
+nonisolated struct EditMessageBody: Encodable, Sendable {
+    var message: Payload
+
+    nonisolated struct Payload: Encodable, Sendable {
+        var text: String?
+        var attachments: [Message.Attachment]
+    }
+}
+
 /// `POST /v4/read_receipts/{conversationId}`
 nonisolated struct ReadCursorBody: Encodable, Sendable {
     var lastReadMessageId: String

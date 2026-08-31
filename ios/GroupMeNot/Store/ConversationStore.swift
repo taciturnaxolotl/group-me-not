@@ -17,6 +17,16 @@ nonisolated struct ConversationRow: Identifiable, Hashable, Sendable {
     var lastReadMessageID: String?
     var mutedUntil: Date?
     var memberCount: Int?
+    /// How long after posting a message may still be edited, in seconds, as the
+    /// server reports it for this conversation. Nil or zero means editing is off.
+    ///
+    /// Carried on the list row rather than looked up per message so the
+    /// transcript can decide whether to offer an Edit action without a request,
+    /// which is the only way the affordance is honest offline.
+    var messageEditPeriod: Int?
+    /// The matching window for deletion, same rules. Stored now because it comes
+    /// down the same fetch; nothing reads it yet.
+    var messageDeletionPeriod: Int?
     /// True while all we know is that the conversation exists, because a
     /// message arrived for it before any list fetch did.
     var isPlaceholder: Bool
@@ -30,6 +40,17 @@ nonisolated struct ConversationRow: Identifiable, Hashable, Sendable {
     }
 
     var isMuted: Bool { isMuted() }
+
+    /// Whether `message` is still inside this conversation's edit window.
+    ///
+    /// The same rule as ``Group/canEdit(_:now:)``, asked of the row the UI
+    /// already holds. False when we have no window, which is every DM: `/v3/chats`
+    /// reports no edit period, and an action the server is going to refuse is
+    /// worse than no action at all.
+    func canEdit(_ message: Message, now: Date = Date()) -> Bool {
+        guard let period = messageEditPeriod, period > 0 else { return false }
+        return now.timeIntervalSince(message.date) < TimeInterval(period)
+    }
 }
 
 /// The conversation list, plus membership.
@@ -94,6 +115,8 @@ actor ConversationStore {
             SQLValue(row.memberCount),
             SQLValue(row.isPlaceholder),
             SQLValue(Date()),
+            SQLValue(row.messageEditPeriod),
+            SQLValue(row.messageDeletionPeriod),
         ])
     }
 
@@ -247,7 +270,7 @@ actor ConversationStore {
     nonisolated private static let columns = """
     kind, remote_id, name, avatar_url, last_message_id, last_message_at,
     last_message_preview, last_message_sender, unread_count, last_read_message_id,
-    muted_until, member_count, placeholder
+    muted_until, member_count, placeholder, message_edit_period, message_deletion_period
     """
 
     nonisolated private static func decode(_ row: Row) throws -> ConversationRow {
@@ -267,6 +290,8 @@ actor ConversationStore {
             lastReadMessageID: row.stringOrNil(9),
             mutedUntil: row.dateOrNil(10),
             memberCount: row.intOrNil(11),
+            messageEditPeriod: row.intOrNil(13),
+            messageDeletionPeriod: row.intOrNil(14),
             isPlaceholder: row.bool(12)
         )
     }
@@ -278,8 +303,9 @@ actor ConversationStore {
     INSERT INTO conversations
         (key, kind, remote_id, name, avatar_url, last_message_id, last_message_sort,
          last_message_at, last_message_preview, last_message_sender, unread_count,
-         last_read_message_id, muted_until, member_count, placeholder, synced_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         last_read_message_id, muted_until, member_count, placeholder, synced_at,
+         message_edit_period, message_deletion_period)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(key) DO UPDATE SET
         name       = COALESCE(excluded.name, conversations.name),
         avatar_url = COALESCE(excluded.avatar_url, conversations.avatar_url),
@@ -301,7 +327,9 @@ actor ConversationStore {
                            ELSE COALESCE(NULLIF(excluded.muted_until, 0), conversations.muted_until) END,
         member_count = COALESCE(excluded.member_count, conversations.member_count),
         placeholder = 0,
-        synced_at = excluded.synced_at
+        synced_at = excluded.synced_at,
+        message_edit_period = COALESCE(excluded.message_edit_period, conversations.message_edit_period),
+        message_deletion_period = COALESCE(excluded.message_deletion_period, conversations.message_deletion_period)
     """
 
     // MARK: - Wire model to row
@@ -323,6 +351,8 @@ actor ConversationStore {
             lastReadMessageID: group.lastReadMessageId,
             mutedUntil: group.mutedUntil.map { Date(timeIntervalSince1970: TimeInterval($0)) },
             memberCount: group.membersCount ?? group.members?.count,
+            messageEditPeriod: group.messageEditPeriod,
+            messageDeletionPeriod: group.messageDeletionPeriod,
             isPlaceholder: false
         )
     }
@@ -343,6 +373,9 @@ actor ConversationStore {
             lastReadMessageID: chat.lastReadMessageId,
             mutedUntil: nil,
             memberCount: 2,
+            // `/v3/chats` reports no edit or deletion window for a DM.
+            messageEditPeriod: nil,
+            messageDeletionPeriod: nil,
             isPlaceholder: false
         )
     }

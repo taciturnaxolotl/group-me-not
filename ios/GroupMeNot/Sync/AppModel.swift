@@ -303,6 +303,79 @@ final class AppModel {
         await bayeux.sendTyping(in: conversation)
     }
 
+    // MARK: - Editing
+
+    /// Whether the Edit action should be offered for this message at all.
+    ///
+    /// Three conditions, and the third is the one worth stating: GroupMe closes
+    /// editing after `Group.messageEditPeriod` seconds and refuses the PUT after
+    /// that. So the window is checked before the action appears rather than
+    /// after it is used. A menu item that fails on tap is a worse bug than a menu
+    /// item that is not there.
+    ///
+    /// DMs report no window, so this is false for them; see
+    /// ``ConversationRow/canEdit(_:now:)``.
+    func canEdit(_ message: Message) -> Bool {
+        guard let me = currentUser?.id, (message.senderId ?? message.userId) == me else { return false }
+        guard !message.isDeleted, !message.isSystem, !message.isListPreview else { return false }
+        guard let conversation = openConversationID,
+              let row = conversations.first(where: { $0.id == conversation })
+        else { return false }
+        return row.canEdit(message)
+    }
+
+    /// Rewrite one of our own messages, optimistically.
+    ///
+    /// Same order as a reaction: the published array first so the bubble changes
+    /// on the next frame, then the database so a reload agrees, then the server.
+    /// A refusal puts both local copies back to the text that was there before.
+    ///
+    /// There is no outbox entry for this. An edit has no `source_guid` and so no
+    /// idempotency key, which means a blind retry could race a later edit and
+    /// resurrect older text. A failed edit is therefore just a failed edit: the
+    /// bubble reverts, and the user can try again knowing what they are looking
+    /// at.
+    func edit(_ message: Message, to text: String) async {
+        guard let conversation = openConversationID, canEdit(message) else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != message.text else { return }
+
+        let originalText = message.text
+        let originalStamp = message.updatedAt ?? message.createdAt
+
+        await applyEdit(text: trimmed, stamp: Int(Date().timeIntervalSince1970),
+                        to: message.id, in: conversation)
+
+        do {
+            try await api.edit(message: message.id, in: conversation, text: trimmed)
+        } catch {
+            log.notice("""
+                edit of \(message.id, privacy: .public) did not stick: \
+                \(failureText(error), privacy: .public)
+                """)
+            await applyEdit(text: originalText, stamp: originalStamp,
+                            to: message.id, in: conversation)
+        }
+    }
+
+    /// The published copy and the stored copy, in that order. Adopting what the
+    /// store hands back settles the same race ``commit(_:by:to:in:)`` does: a
+    /// coalesced reload can land between the two writes.
+    private func applyEdit(
+        text: String?, stamp: Int, to messageID: String, in conversation: ConversationID
+    ) async {
+        if let index = messages.firstIndex(where: { $0.id == messageID }) {
+            messages[index] = messages[index].editing(text: text, updatedAt: stamp)
+        }
+        guard let stored = try? await store.messages.applyEdit(
+            text: text, updatedAt: stamp, toMessage: messageID, in: conversation)
+        else { return }
+        if let index = messages.firstIndex(where: { $0.id == messageID }) {
+            messages[index] = stored
+        }
+        await reloadConversations()
+    }
+
 
     // MARK: - Reactions
 

@@ -68,6 +68,57 @@ actor MessageStore {
         try upsert([message], in: conversation)
     }
 
+    /// Folds a revision of a message we already hold into the stored copy.
+    ///
+    /// This is what a `message.update` push turns into. It is not an
+    /// ``upsert(_:in:)``: an edit payload is a revision, not a whole message,
+    /// and replacing the row with it would drop the likes, reactions and
+    /// attachments the update did not bother to repeat. Worse, it would be
+    /// unrecoverable, because `after_id` never revisits an id it has passed, so
+    /// nothing short of refetching history you already have would put them back.
+    /// ``Message/merging(_:)`` is the rule; this is where it meets the disk.
+    ///
+    /// A message we have never seen is inserted whole instead, which is the
+    /// right fallback: an edit is also the first time an offline client may be
+    /// hearing about a message at all.
+    ///
+    /// - Returns: the stored message afterwards.
+    @discardableResult
+    func applyUpdate(_ update: Message, in conversation: ConversationID) throws -> Message {
+        try db.transaction {
+            guard let stored = try loadMessage(id: update.id, in: conversation) else {
+                try writeMerged(update, in: conversation)
+                return update
+            }
+            let merged = stored.merging(update)
+            try writeMerged(merged, in: conversation)
+            return merged
+        }
+    }
+
+    /// Rewrites one message's text locally, ahead of the server agreeing.
+    ///
+    /// The optimistic half of an edit: the bubble changes on the next frame and
+    /// the PUT follows. Pass the stamp back through ``applyUpdate(_:in:)`` when
+    /// the server's own revision arrives, and pass the original text back here
+    /// if the PUT fails.
+    ///
+    /// - Returns: the stored message, or nil if we do not have it.
+    @discardableResult
+    func applyEdit(
+        text: String?,
+        updatedAt: Int = Int(Date().timeIntervalSince1970),
+        toMessage messageID: String,
+        in conversation: ConversationID
+    ) throws -> Message? {
+        try db.transaction {
+            guard let stored = try loadMessage(id: messageID, in: conversation) else { return nil }
+            let edited = stored.editing(text: text, updatedAt: updatedAt)
+            try writeMerged(edited, in: conversation)
+            return edited
+        }
+    }
+
     /// Applies one person's reaction to the stored copy, so a scroll, a reload
     /// or a relaunch agrees with the chip the tap already drew.
     ///
@@ -167,6 +218,55 @@ actor MessageStore {
     }
 
     // MARK: - Internals
+
+    /// Writes an already-merged message straight over the stored row.
+    ///
+    /// Deliberately without ``upsertSQL``'s freshness guard. That guard exists to
+    /// stop a stale *replay* from undoing an edit; here the caller has already
+    /// merged the two revisions by hand, so the row in front of it is the answer
+    /// and refusing it on a timestamp comparison would only lose the edit. The
+    /// list row is repointed too, because editing the newest message changes what
+    /// the conversation list should be previewing.
+    ///
+    /// Must be called inside a transaction.
+    private func writeMerged(_ message: Message, in conversation: ConversationID) throws {
+        try ConversationWrites.ensureExists(conversation, in: db)
+        try db.run(
+            """
+            INSERT INTO messages
+                (conversation_key, id, sort_key, source_guid, created_at, updated_at,
+                 sender_id, text, system, deleted_at, pinned_at, parent_id, payload, reactions)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(conversation_key, id) DO UPDATE SET
+                source_guid = COALESCE(excluded.source_guid, messages.source_guid),
+                updated_at  = excluded.updated_at,
+                sender_id   = excluded.sender_id,
+                text        = excluded.text,
+                system      = excluded.system,
+                deleted_at  = excluded.deleted_at,
+                pinned_at   = excluded.pinned_at,
+                parent_id   = excluded.parent_id,
+                payload     = excluded.payload,
+                reactions   = excluded.reactions
+            """,
+            [
+                SQLValue(conversation.storageKey),
+                SQLValue(message.id),
+                SQLValue(MessageSortKey.value(for: message.id)),
+                SQLValue(message.sourceGuid),
+                SQLValue(message.createdAt),
+                SQLValue(message.updatedAt),
+                SQLValue(message.senderId ?? message.userId),
+                SQLValue(message.text),
+                SQLValue(message.isSystem),
+                SQLValue(message.deletedAt),
+                SQLValue(message.pinnedAt),
+                SQLValue(message.parentId),
+                SQLValue(try StoreCoding.encode(message)),
+                SQLValue(StoreCoding.encodeIfPresent(message.reactions)),
+            ])
+        try ConversationWrites.applyLatest(message, conversation, in: db)
+    }
 
     private func loadMessage(id: String, in conversation: ConversationID) throws -> Message? {
         try db.queryOne(

@@ -112,6 +112,60 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
         return copy
     }
 
+    /// True once the author has changed the text after posting.
+    ///
+    /// GroupMe stamps `updated_at` equal to `created_at` on a message nobody has
+    /// touched, so the marker turns on strictly after, never on equality.
+    var isEdited: Bool { (updatedAt ?? 0) > createdAt }
+
+    /// This message with a later revision folded in, field by field.
+    ///
+    /// The reason to merge rather than replace: a `message.update` push carries
+    /// the revised message, but nothing promises it carries *all* of it. A blind
+    /// upsert of a thin edit payload would drop the likes, the reactions and the
+    /// attachments we already hold, and REST catch-up could never put them back
+    /// (`after_id` never revisits an id it has already passed). So anything the
+    /// update leaves out is kept, and only what it states wins.
+    ///
+    /// `text` is the exception worth naming: an edit that clears the text sends
+    /// an empty string, not a missing field, so an absent `text` really does mean
+    /// "unchanged" here.
+    func merging(_ update: Message) -> Message {
+        var copy = self
+        copy.text = update.text ?? copy.text
+        copy.updatedAt = update.updatedAt ?? copy.updatedAt
+        copy.attachments = update.attachments ?? copy.attachments
+        copy.favoritedBy = update.favoritedBy ?? copy.favoritedBy
+        copy.reactions = update.reactions ?? copy.reactions
+        copy.name = update.name ?? copy.name
+        copy.avatarUrl = update.avatarUrl ?? copy.avatarUrl
+        copy.senderId = update.senderId ?? copy.senderId
+        copy.userId = update.userId ?? copy.userId
+        copy.deletedAt = update.deletedAt ?? copy.deletedAt
+        copy.deletionActor = update.deletionActor ?? copy.deletionActor
+        copy.pinnedAt = update.pinnedAt ?? copy.pinnedAt
+        copy.pinnedBy = update.pinnedBy ?? copy.pinnedBy
+        copy.parentId = update.parentId ?? copy.parentId
+        copy.event = update.event ?? copy.event
+        return copy
+    }
+
+    /// This message with new text and a fresh revision stamp. Used for the
+    /// optimistic local edit, before the server has said anything.
+    func editing(text: String?, updatedAt: Int = Int(Date().timeIntervalSince1970)) -> Message {
+        var copy = self
+        copy.text = text
+        copy.updatedAt = updatedAt
+        return copy
+    }
+
+    /// The family of system event this message announces, for the transcript's
+    /// run collapsing. Nil for anything that is not a system notice.
+    var systemFamily: SystemMessageFamily? {
+        guard isSystem else { return nil }
+        return SystemMessageFamily(eventType: event?.type)
+    }
+
     /// Message ids sort chronologically as big integers, never lexically.
     static func isNewer(_ lhs: String, than rhs: String) -> Bool {
         if let a = UInt64(lhs), let b = UInt64(rhs) { return a > b }

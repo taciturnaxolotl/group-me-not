@@ -10,7 +10,7 @@ import OSLog
 /// `Message` never needs a migration.
 nonisolated enum Schema {
     /// Bump this and add a `case` to `apply(step:)` for every change.
-    static let version: Int32 = 2
+    static let version: Int32 = 3
 
     private static let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "schema")
 
@@ -49,6 +49,7 @@ nonisolated enum Schema {
         switch step {
         case 1: try db.execute(initial)
         case 2: try db.execute(addReactions)
+        case 3: try db.execute(addEditPeriods)
         default:
             throw SQLError(code: 1, message: "no migration defined for schema \(step)", sql: nil)
         }
@@ -169,6 +170,24 @@ nonisolated enum Schema {
     /// re-encoding the whole message.
     private static let addReactions = """
     ALTER TABLE messages ADD COLUMN reactions BLOB;
+    """
+
+    // MARK: - Version 3
+
+    /// How long a message stays editable, per conversation.
+    ///
+    /// Server-owned, per group, and it has to be on disk rather than in memory:
+    /// the transcript decides whether to offer an Edit action while it draws, and
+    /// it draws from local storage on a cold start with the radio off. A window
+    /// we only learn from a live `GET /v3/groups` would mean the affordance is
+    /// missing exactly when the app is being useful offline.
+    ///
+    /// `/v3/chats` reports no equivalent for DMs, so the column stays NULL there
+    /// and the action is not offered. Guessing a window would be worse than not
+    /// offering one: the wrong guess is an action the server refuses.
+    private static let addEditPeriods = """
+    ALTER TABLE conversations ADD COLUMN message_edit_period INTEGER;
+    ALTER TABLE conversations ADD COLUMN message_deletion_period INTEGER;
     """
 }
 

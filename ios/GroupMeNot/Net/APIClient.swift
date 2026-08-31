@@ -59,6 +59,21 @@ actor APIClient {
         try await send(host, path, method: "POST", query: query, body: body, retry: retry)
     }
 
+    /// Edits. GroupMe puts them on `PUT` and, unlike the send routes, does not
+    /// document what comes back, so the response is read for `meta` and nothing
+    /// else. Anything the caller wants to show comes from its own optimistic
+    /// copy or from the next `message.update`.
+    @discardableResult
+    func putIgnoringResponse<B: Encodable & Sendable>(
+        _ host: Host, _ path: String,
+        query: [String: String?] = [:],
+        body: B?,
+        retry: RetryPolicy = .interactive
+    ) async throws -> Meta? {
+        let env: Envelope<Discard> = try await send(host, path, method: "PUT", query: query, body: body, retry: retry, unwrap: false)
+        return env.meta
+    }
+
     /// For calls whose body we do not care about.
     @discardableResult
     func postIgnoringResponse<B: Encodable & Sendable>(

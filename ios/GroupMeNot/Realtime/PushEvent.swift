@@ -124,6 +124,30 @@ nonisolated struct PushEvent: Sendable, Hashable {
         static let likeDelete = "like.delete"
         static let typing = "typing"
     }
+
+    /// The third vocabulary: `event.type`, which rides *inside* a message rather
+    /// than on the envelope. Only the ones we act on are named.
+    ///
+    /// `messageUpdate` matters more than it looks. An edit does not change a
+    /// message's id, so `after_id` paging can never revisit it and REST catch-up
+    /// is structurally blind to edits. This event is the only way a client learns
+    /// that text it already stored has changed.
+    ///
+    /// Tested against both `data.type` and `message.event.type`, because the
+    /// dispatch in the official client is a switch we could not fully recover and
+    /// the two carry the same literal.
+    nonisolated enum SystemEventType {
+        static let messageUpdate = "message.update"
+        static let messageDeleted = "message.deleted"
+    }
+
+    /// True when this delivery is a revision of a message rather than a new one.
+    var isMessageUpdate: Bool {
+        if type == SystemEventType.messageUpdate { return true }
+        if case .message(let message) = kind,
+           message.event?.type == SystemEventType.messageUpdate { return true }
+        return false
+    }
 }
 
 extension PushEvent {

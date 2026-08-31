@@ -189,6 +189,55 @@ actor GroupMeAPI {
         }
     }
 
+    // MARK: - Editing
+
+    /// Rewrite a message that is already on the server.
+    ///
+    /// ```
+    /// PUT /v4/groups/{groupId}/messages/{messageId}
+    /// PUT /v4/direct_messages/{otherUserId}/messages/{messageId}
+    /// ```
+    ///
+    /// Note the shape of the DM route: unlike sending, which takes no id in the
+    /// path and names the recipient in the body, editing puts the *other user's*
+    /// id in the path. And both are v4 while both send routes are v3. There is
+    /// no rule to lean on; the branch lives here so no call site has to know.
+    ///
+    /// Two things a caller has to respect, because the server will not explain
+    /// itself if they are ignored:
+    ///
+    /// - There is an edit window, `Group.messageEditPeriod`, and it is per group.
+    ///   Past it the call is refused. Check ``ConversationRow/canEdit(_:now:)``
+    ///   before offering the action rather than after.
+    /// - An edit does not change the message's id, so no `after_id` catch-up will
+    ///   ever show it to another client. Whoever is listening on Faye hears the
+    ///   `message.update`; whoever is offline simply never learns. That is the
+    ///   API's gap, not ours, but it is why the local copy is updated here and
+    ///   now rather than waiting for a resync to confirm it.
+    ///
+    /// Retries default to none. A send is safe to repeat because `source_guid`
+    /// dedupes it; an edit has no such key, and a second PUT of the same text is
+    /// harmless but a second PUT racing a *later* edit is not.
+    func edit(
+        message messageID: String,
+        in conversation: ConversationID,
+        text: String?,
+        attachments: [Message.Attachment] = [],
+        retry: RetryPolicy = .none
+    ) async throws {
+        let path: String
+        switch conversation {
+        case .group(let groupID):
+            path = "/groups/\(groupID)/messages/\(messageID)"
+        case .direct(let otherUserID):
+            path = "/direct_messages/\(otherUserID)/messages/\(messageID)"
+        }
+        try await client.putIgnoringResponse(
+            .v4, path,
+            body: EditMessageBody(message: .init(text: text, attachments: attachments)),
+            retry: retry)
+    }
+
     // MARK: - Likes
 
     /// A reaction. Plain likes send no body at all; `unicode` and legacy

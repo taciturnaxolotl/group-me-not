@@ -527,7 +527,23 @@ actor SyncEngine {
             }
             do {
                 let isMine = currentUserID != nil && (message.senderId ?? message.userId) == currentUserID
-                let known = try await store.messages.message(id: message.id, in: conversation) != nil
+                let stored = try await store.messages.message(id: message.id, in: conversation)
+                let known = stored != nil
+
+                // An edit arrives under the same id as the message it revises, so
+                // it must merge rather than insert. `after_id` can never show us
+                // this, which makes the live event the only chance we get; see
+                // `PushEvent.SystemEventType.messageUpdate`. The `isEdited` test
+                // is a belt to the envelope's braces: the delivery is not always
+                // labelled, and a revision stamp on a message we already hold says
+                // the same thing.
+                if known, push.isMessageUpdate || message.isEdited {
+                    try await store.messages.applyUpdate(message, in: conversation)
+                    continuation.yield(.messages(conversation))
+                    continuation.yield(.conversations)
+                    return
+                }
+
                 try await store.messages.upsert(message, in: conversation)
                 // Only a genuinely new message from somebody else moves a badge.
                 if !isMine, !known, !message.isSystem {
