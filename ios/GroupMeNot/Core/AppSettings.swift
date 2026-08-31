@@ -65,9 +65,9 @@ final class AppSettings {
         didSet { defaults.set(pinned, forKey: Key.pinned) }
     }
 
-    /// Past this the strip stops being a shortcut and starts being the list
-    /// again, only smaller and without the previews.
-    static let pinLimit = 12
+    /// Three to a row, three rows. Past that the strip is taller than the list
+    /// it sits above and has stopped being a shortcut.
+    static let pinLimit = 9
 
     func isPinned(_ key: String) -> Bool { pinned.contains(key) }
 

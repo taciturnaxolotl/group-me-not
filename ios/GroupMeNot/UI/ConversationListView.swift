@@ -12,12 +12,13 @@ struct ConversationListView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppSettings.self) private var settings
 
-    @State private var path: [ConversationRow] = []
+    @State private var path: [Route] = []
     @State private var query = ""
     @State private var isSettingsPresented = false
     /// Groups whose topics are showing, by group id. Not persisted: which
     /// branches of a list are open is the shape of one visit to it.
     @State private var expanded: Set<String> = []
+    @State private var isEditingPins = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -29,8 +30,13 @@ struct ConversationListView: View {
                 // exactly this reason.
                 .navigationTitle("")
                 .navigationBarTitleDisplayMode(.inline)
-                .navigationDestination(for: ConversationRow.self) { row in
-                    ChatView(conversation: row)
+                .navigationDestination(for: Route.self) { route in
+                    switch route {
+                    case .chat(let row):
+                        ChatView(conversation: row)
+                    case .topics(let group):
+                        TopicChooserView(group: group) { path.append(.chat($0)) }
+                    }
                 }
                 .refreshable { await model.refresh() }
                 .safeAreaInset(edge: .top, spacing: 0) {
@@ -70,7 +76,7 @@ struct ConversationListView: View {
                         }
                         .buttonStyle(.plain)
                     } else {
-                        NavigationLink(value: entry.row) {
+                        NavigationLink(value: Route.chat(entry.row)) {
                             ConversationCell(entry: entry)
                         }
                     }
@@ -146,42 +152,109 @@ struct ConversationListView: View {
     /// row it replaced. Hidden while searching, because a search should look
     /// through everything rather than have part of it pinned above the results.
     private var pinnedStrip: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 76), spacing: 4)], spacing: 12) {
-            ForEach(pinnedRows) { row in
-                NavigationLink(value: row) {
-                    VStack(spacing: 5) {
-                        Avatar(
-                            url: row.avatarURL,
-                            name: row.name,
-                            size: 56,
-                            isGroup: row.isGroup
-                        )
-                        .overlay(alignment: .topTrailing) {
-                            UnreadBadge(count: row.unreadCount, isMuted: row.isMuted)
-                                .offset(x: 6, y: -2)
-                        }
-                        Text(row.name)
-                            .font(.caption2)
-                            .lineLimit(1)
-                            .foregroundStyle(.primary)
-                    }
-                    .frame(maxWidth: .infinity)
+        VStack(spacing: 10) {
+            HStack {
+                Text("Pinned")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(isEditingPins ? "Done" : "Edit") {
+                    withAnimation(.snappy(duration: 0.2)) { isEditingPins.toggle() }
                 }
+                .font(.footnote.weight(.semibold))
                 .buttonStyle(.plain)
-                .contextMenu {
-                    Button(role: .destructive) {
-                        settings.togglePin(row.id.storageKey)
-                    } label: {
-                        Label("Unpin", systemImage: "pin.slash.fill")
-                    }
+                .foregroundStyle(.tint)
+            }
+            .padding(.horizontal, 4)
+
+            // Three fixed columns rather than an adaptive fit, so the grid is
+            // the same shape on every phone and a pin does not move when the
+            // one before it is removed.
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 14) {
+                ForEach(pinnedRows) { row in
+                    pinnedTile(row)
                 }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.bottom, 14)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 16)
         .listRowInsets(EdgeInsets())
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
+    }
+
+    /// A plain `Button`, not a `NavigationLink`.
+    ///
+    /// A link inside a grid inside a `List` row is drawn as a list row: it takes
+    /// the disclosure chevron, and it resolves its destination against the row
+    /// it is nested in rather than the value it was given, which is why tapping
+    /// a pinned chat opened somebody else's messages. Pushing the route by hand
+    /// has neither problem.
+    private func pinnedTile(_ row: ConversationRow) -> some View {
+        Button {
+            guard !isEditingPins else { return }
+            path.append(destination(for: row))
+        } label: {
+            VStack(spacing: 6) {
+                Avatar(url: row.avatarURL, name: row.name, size: 60, isGroup: row.isGroup)
+                    .overlay(alignment: .topTrailing) {
+                        if isEditingPins {
+                            Image(systemName: "minus.circle.fill")
+                                .font(.title3)
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(.white, .red)
+                                .offset(x: 4, y: -4)
+                        } else {
+                            UnreadBadge(count: row.unreadCount, isMuted: row.isMuted)
+                                .offset(x: 6, y: -2)
+                        }
+                    }
+                    // A topic-bearing group opens a chooser rather than a
+                    // conversation, and the stack of pages says so before it is
+                    // tapped.
+                    .overlay(alignment: .bottomTrailing) {
+                        if !isEditingPins, hasTopics(row) {
+                            Image(systemName: "square.stack.3d.up.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.white)
+                                .padding(4)
+                                .background(Color.accentColor, in: .circle)
+                                .overlay(Circle().strokeBorder(Color(.systemBackground), lineWidth: 1.5))
+                        }
+                    }
+                Text(row.name)
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .overlay {
+            // The remove target is the whole tile while editing, which is a
+            // 60-point circle rather than the 20-point badge drawn on it.
+            if isEditingPins {
+                Button {
+                    withAnimation(.snappy(duration: 0.2)) {
+                        settings.togglePin(row.id.storageKey)
+                    }
+                } label: {
+                    Color.clear.contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Unpin \(row.name)")
+            }
+        }
+    }
+
+    private func hasTopics(_ row: ConversationRow) -> Bool {
+        guard case .group(let id) = row.id else { return false }
+        return model.conversations.contains { $0.parentID == id }
+    }
+
+    private func destination(for row: ConversationRow) -> Route {
+        hasTopics(row) ? .topics(row) : .chat(row)
     }
 
     private func toggle(_ row: ConversationRow) {
@@ -356,6 +429,16 @@ struct ConversationListView: View {
         .accessibilityLabel("Settings")
         .accessibilityHint("Your account and preferences")
     }
+}
+
+/// Where a tap in the list goes.
+///
+/// Two cases because a pinned group with topics has nothing to open: the list's
+/// own disclosure is not available to a tile, so it pushes a page that offers
+/// the choice instead.
+enum Route: Hashable {
+    case chat(ConversationRow)
+    case topics(ConversationRow)
 }
 
 // MARK: - Row
