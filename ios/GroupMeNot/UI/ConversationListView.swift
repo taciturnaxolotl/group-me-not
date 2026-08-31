@@ -18,7 +18,6 @@ struct ConversationListView: View {
     /// Groups whose topics are showing, by group id. Not persisted: which
     /// branches of a list are open is the shape of one visit to it.
     @State private var expanded: Set<String> = []
-    @State private var isEditingPins = false
     @State private var isRequestsPresented = false
 
     var body: some View {
@@ -238,12 +237,6 @@ struct ConversationListView: View {
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button(isEditingPins ? "Done" : "Edit") {
-                    withAnimation(.snappy(duration: 0.2)) { isEditingPins.toggle() }
-                }
-                .font(.footnote.weight(.semibold))
-                .buttonStyle(.plain)
-                .foregroundStyle(.tint)
             }
             .padding(.horizontal, 4)
 
@@ -276,15 +269,10 @@ struct ConversationListView: View {
             name: row.name,
             unread: unreadTotal(for: row),
             size: 60,
-            isEditing: isEditingPins,
             leadsToChooser: hasTopics(row),
             menu: { pinButton(for: row) }
         ) {
-            if isEditingPins {
-                withAnimation(.snappy(duration: 0.2)) { settings.togglePin(row.id.storageKey) }
-            } else {
-                path.append(destination(for: row))
-            }
+            path.append(destination(for: row))
         }
     }
 
@@ -686,8 +674,6 @@ struct ConversationTile<Menu: View>: View {
     let name: String
     let unread: Int
     var size: CGFloat = 56
-    /// Shows the remove badge instead of the unread count.
-    var isEditing = false
     /// Marks a tile that opens a choice rather than a conversation.
     var leadsToChooser = false
     @ViewBuilder var menu: () -> Menu
@@ -697,7 +683,10 @@ struct ConversationTile<Menu: View>: View {
         Button(action: action) {
             VStack(spacing: 6) {
                 Avatar(url: row.avatarURL, name: name, size: size, isGroup: row.isGroup)
-                    .overlay(alignment: .topTrailing) { corner }
+                    .overlay(alignment: .topTrailing) {
+                        UnreadBadge(count: unread, isMuted: row.isMuted)
+                            .offset(x: 6, y: -2)
+                    }
                     .overlay(alignment: .bottomTrailing) { hints }
                 Text(name)
                     .font(.caption2)
@@ -713,28 +702,13 @@ struct ConversationTile<Menu: View>: View {
         .accessibilityLabel(unread > 0 ? "\(name), \(unread) unread" : name)
     }
 
-    @ViewBuilder private var corner: some View {
-        if isEditing {
-            Image(systemName: "minus.circle.fill")
-                .font(.title3)
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(.white, .red)
-                .offset(x: 4, y: -4)
-        } else {
-            UnreadBadge(count: unread, isMuted: row.isMuted)
-                .offset(x: 6, y: -2)
-        }
-    }
-
     /// Two things worth knowing before tapping: that this leads to a choice
     /// rather than a conversation, and that it is one nobody can post in.
     @ViewBuilder private var hints: some View {
-        if !isEditing {
-            if leadsToChooser {
-                badge("square.stack.3d.up.fill", tint: Color.accentColor)
-            } else if row.postingPolicy == .adminsOnly {
-                badge("megaphone.fill", tint: .secondary)
-            }
+        if leadsToChooser {
+            badge("square.stack.3d.up.fill", tint: Color.accentColor)
+        } else if row.postingPolicy == .adminsOnly {
+            badge("megaphone.fill", tint: .secondary)
         }
     }
 
@@ -751,12 +725,10 @@ struct ConversationTile<Menu: View>: View {
 extension ConversationTile where Menu == EmptyView {
     init(
         row: ConversationRow, name: String, unread: Int, size: CGFloat = 56,
-        isEditing: Bool = false, leadsToChooser: Bool = false,
-        action: @escaping () -> Void
+        leadsToChooser: Bool = false, action: @escaping () -> Void
     ) {
         self.init(
             row: row, name: name, unread: unread, size: size,
-            isEditing: isEditing, leadsToChooser: leadsToChooser,
-            menu: { EmptyView() }, action: action)
+            leadsToChooser: leadsToChooser, menu: { EmptyView() }, action: action)
     }
 }
