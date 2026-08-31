@@ -171,6 +171,10 @@ private struct BubbleRow: View {
     /// height is reserved below, so the next row never has to move over.
     private let chipOverlap: CGFloat = 9
 
+    /// The bubble's frame in global space, captured on every layout pass so a
+    /// long press can hand it to the overlay. Cheap, and the alternative is
+    /// measuring at press time, which is a frame too late.
+    @State private var bubbleFrame: CGRect = .zero
     @State private var isPickerPresented = false
     @State private var isEditorPresented = false
     /// Same sequencing as `editWanted`: a sheet raised while the popover is
@@ -271,26 +275,33 @@ private struct BubbleRow: View {
         // 44pt absorbs those shifts and still sits well inside the distance a
         // real drag covers before the pan recogniser claims the touch, so
         // scrolling does not start opening pickers.
-        .onLongPressGesture(minimumDuration: 0.32, maximumDistance: 44) { isPickerPresented = true }
+        .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { bubbleFrame = $0 }
+        .onLongPressGesture(minimumDuration: 0.32, maximumDistance: 44) { showPicker(true) }
         // On the way up only. A haptic for the dismissal would be a second
         // tap the user did not make.
         .sensoryFeedback(trigger: isPickerPresented) { _, shown in
             shown ? .impact(weight: .light) : nil
         }
-        .popover(isPresented: $isPickerPresented) {
-            ReactionPicker(
-                glyphs: catalog.glyphs,
+        // A cover rather than a popover, so the two floating pieces can sit
+        // above and below the bubble instead of inside one box with an arrow.
+        // Its background is cleared and its own slide-up animation suppressed;
+        // the overlay animates itself, out of the message that was pressed.
+        .fullScreenCover(isPresented: $isPickerPresented) {
+            MessageActionsOverlay(
+                anchor: bubbleFrame,
+                glyphs: catalog.quick,
                 selected: mine,
+                actions: pickerActions,
                 onPick: { glyph in
-                    isPickerPresented = false
+                    showPicker(false)
                     onReact(glyph)
                 },
                 onMore: {
                     emojiWanted = true
-                    isPickerPresented = false
+                    showPicker(false)
                 },
-                actions: pickerActions)
-                .presentationCompactAdaptation(.popover)
+                onDismiss: { showPicker(false) })
+                .presentationBackground(.clear)
         }
         .onChange(of: isPickerPresented) { _, shown in
             guard !shown else { return }
@@ -437,6 +448,20 @@ private struct BubbleRow: View {
 
     // MARK: The long-press bar
 
+    /// Raise or drop the actions overlay without the cover's own slide-up.
+    ///
+    /// A `fullScreenCover` animates in from the bottom edge, which is the wrong
+    /// gesture entirely for something that should appear on the message under
+    /// the finger. Suppressing it here rather than with a `.transaction` on the
+    /// row keeps the suppression to this one state change: the same modifier
+    /// applied to the view would silence the reaction chips and every other
+    /// animation in the subtree.
+    private func showPicker(_ shown: Bool) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { isPickerPresented = shown }
+    }
+
     /// The glyph shown as selected, which is also the one a second tap clears.
     private var mine: String? {
         item.reactions.first { $0.reactedByMe }?.glyph
@@ -444,12 +469,12 @@ private struct BubbleRow: View {
 
     /// Everything the context menu used to carry. The reaction bar above it is
     /// unconditional; these are not.
-    private var pickerActions: [ReactionPicker.Action] {
-        var actions: [ReactionPicker.Action] = []
+    private var pickerActions: [MessageAction] {
+        var actions: [MessageAction] = []
         if !item.text.isEmpty, !item.message.isDeleted {
             actions.append(.init("Copy", symbol: "doc.on.doc") {
                 UIPasteboard.general.string = item.text.plain
-                isPickerPresented = false
+                showPicker(false)
             })
         }
         if canEdit {
@@ -458,16 +483,16 @@ private struct BubbleRow: View {
                 // from what was actually posted.
                 editDraft = item.message.text ?? ""
                 editWanted = true
-                isPickerPresented = false
+                showPicker(false)
             })
         }
         if item.isFailed {
             actions.append(.init("Try Again", symbol: "arrow.clockwise") {
-                isPickerPresented = false
+                showPicker(false)
                 onRetry()
             })
             actions.append(.init("Delete", symbol: "trash", isDestructive: true) {
-                isPickerPresented = false
+                showPicker(false)
                 onDiscard()
             })
         }

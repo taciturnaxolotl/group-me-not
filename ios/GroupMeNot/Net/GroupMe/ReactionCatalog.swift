@@ -53,6 +53,19 @@ nonisolated struct ReactionCatalog: Sendable, Hashable {
         return ReactionCatalog(glyphs: [glyph] + glyphs.filter { $0 != glyph })
     }
 
+    /// The short row a long press offers: the group's own like icon, if it has
+    /// one, and four more.
+    ///
+    /// Five, not eighteen. A row that has to scroll is a row nobody scrolls, and
+    /// the tail of the catalog was reachable only by dragging inside a popover
+    /// that a stray millimetre would dismiss. Everything past the fifth glyph
+    /// lives behind the More button, where the whole emoji set is searchable and
+    /// nothing is hiding off the edge.
+    ///
+    /// ``withLikeIcon(_:)`` has already moved the group's glyph to the front, so
+    /// taking the first five is what puts it under the thumb.
+    var quick: [String] { Array(glyphs.prefix(5)) }
+
     /// The glyph a plain, bodyless like means.
     ///
     /// Legacy likes have no icon of their own, and every client draws them as a
