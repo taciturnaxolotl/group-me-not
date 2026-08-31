@@ -10,7 +10,7 @@ import OSLog
 /// `Message` never needs a migration.
 nonisolated enum Schema {
     /// Bump this and add a `case` to `apply(step:)` for every change.
-    static let version: Int32 = 4
+    static let version: Int32 = 5
 
     private static let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "schema")
 
@@ -51,6 +51,7 @@ nonisolated enum Schema {
         case 2: try db.execute(addReactions)
         case 3: try db.execute(addEditPeriods)
         case 4: try db.execute(addPendingReactions)
+        case 5: try db.execute(addOutboxMedia)
         default:
             throw SQLError(code: 1, message: "no migration defined for schema \(step)", sql: nil)
         }
@@ -233,6 +234,27 @@ nonisolated enum Schema {
     -- The transcript's query: what to overlay on one conversation.
     CREATE INDEX pending_reactions_conversation
         ON pending_reactions(conversation_key);
+    """
+
+    // MARK: - Version 5
+
+    /// Attachments the user has picked that no service has taken yet.
+    ///
+    /// A column on `outbox` rather than a table of its own, for the same reason
+    /// `reactions` is a column on `messages`: this list is only ever read with
+    /// its queue row and never joined or aggregated across one, so a side table
+    /// would buy a join and nothing else.
+    ///
+    /// Separate from `attachments` because the two are different things.
+    /// `attachments` is wire shape, encoded straight into the send body;
+    /// `media` is local bookkeeping, a `PendingMedia` array naming files in the
+    /// vault, and it is what makes a photo attached with the radio off survive a
+    /// force quit. The drain uploads each entry, writes the returned URL back
+    /// into this column, and only then builds the wire attachments. Writing the
+    /// URL back is what stops a send that fails after a successful upload from
+    /// pushing the same bytes twice.
+    private static let addOutboxMedia = """
+    ALTER TABLE outbox ADD COLUMN media BLOB;  -- JSON array of PendingMedia
     """
 }
 

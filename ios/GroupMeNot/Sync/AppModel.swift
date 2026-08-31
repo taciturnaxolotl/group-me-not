@@ -103,7 +103,8 @@ final class AppModel {
         let provider: @Sendable () async -> String? = { await tokens.token() }
         let client = APIClient(tokenProvider: provider)
         let api = GroupMeAPI(client: client)
-        let outbox = Outbox(api: api, store: resolved)
+        let uploads = MediaUploadService(tokenProvider: provider)
+        let outbox = Outbox(api: api, store: resolved, uploads: uploads)
 
         self.store = resolved
         self.tokens = tokens
@@ -266,17 +267,23 @@ final class AppModel {
     // MARK: - Sending
 
     /// Queue a message for the open conversation.
-    func send(_ text: String) async {
+    func send(_ text: String, media: [PickedMedia] = []) async {
         guard let conversation = openConversationID else { return }
-        await send(text: text, to: conversation)
+        await send(text: text, media: media, to: conversation)
     }
 
     /// Queue a message. Returns as soon as it is durable, which is immediately.
-    func send(text: String, to conversation: ConversationID) async {
+    ///
+    /// Attachments change nothing about that promise. The picked files are moved
+    /// somewhere durable and the queue row is written before any upload starts,
+    /// so a photo attached with the radio off is already in the transcript and
+    /// already safe; the bytes go up whenever the network next allows.
+    func send(text: String, media: [PickedMedia] = [], to conversation: ConversationID) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty || !media.isEmpty else { return }
         do {
-            try await sends.send(text: trimmed, to: conversation)
+            try await sends.send(
+                text: trimmed.isEmpty ? nil : trimmed, media: media, to: conversation)
         } catch {
             log.error("could not queue a send: \(error)")
         }
@@ -644,6 +651,9 @@ final class AppModel {
         }
         UserDefaults.standard.removeObject(forKey: Self.currentUserKey)
         await previews.clear()
+        // The queue went with the conversations, so its files go too. An unsent
+        // photo belongs to the session that picked it.
+        await MediaVault.shared.removeAll()
 
         isSignedIn = false
         currentUser = nil

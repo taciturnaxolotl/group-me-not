@@ -35,6 +35,8 @@ actor Outbox {
 
     private let api: GroupMeAPI
     private let store: Store
+    private let uploads: MediaUploadService
+    private let vault: MediaVault
     private let continuation: AsyncStream<ConversationID>.Continuation
     private let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "outbox")
 
@@ -48,9 +50,16 @@ actor Outbox {
     /// message id from a catch-up. See ``reconcile()``.
     private var awaitingServerID: [String: ConversationID] = [:]
 
-    init(api: GroupMeAPI, store: Store) {
+    init(
+        api: GroupMeAPI,
+        store: Store,
+        uploads: MediaUploadService,
+        vault: MediaVault = .shared
+    ) {
         self.api = api
         self.store = store
+        self.uploads = uploads
+        self.vault = vault
         let (stream, continuation) = AsyncStream<ConversationID>.makeStream(
             bufferingPolicy: .bufferingNewest(32)
         )
@@ -76,14 +85,32 @@ actor Outbox {
     func send(
         text: String?,
         attachments: [Message.Attachment] = [],
+        media: [PickedMedia] = [],
         to conversation: ConversationID,
         sourceGuid: String = UUID().uuidString
     ) async throws -> OutboxEntry {
+        // The bytes go somewhere durable before the row that names them, so a
+        // crash in between leaves an unclaimed file rather than a queue entry
+        // pointing at nothing. `sweep` cleans up after that; nothing cleans up
+        // after the other order.
+        var pending: [PendingMedia] = []
+        for item in media {
+            do {
+                pending.append(try await vault.adopt(item))
+            } catch {
+                log.error("could not keep a picked file: \(error)")
+            }
+        }
+
         // A send can name a conversation we have never listed, so give the
         // message a list row to hang off before anything else.
         try await store.conversations.ensureExists(conversation)
+        // Everything above this line is local. The row is on disk before a
+        // single byte goes anywhere, which is the promise the whole queue rests
+        // on: an attachment picked in a tunnel is already the user's message.
         let entry = try await store.outbox.enqueue(
-            in: conversation, text: text, attachments: attachments, sourceGuid: sourceGuid)
+            in: conversation, text: text, attachments: attachments, media: pending,
+            sourceGuid: sourceGuid)
         continuation.yield(conversation)
         kick()
         return entry
@@ -109,7 +136,16 @@ actor Outbox {
     func discard(_ sourceGuid: String) async {
         guard let entry = try? await store.outbox.entry(sourceGuid) else { return }
         try? await store.outbox.remove(sourceGuid)
+        await vault.remove(entry.media)
         continuation.yield(entry.conversation)
+    }
+
+    /// Delete vault files no queue row claims any more.
+    ///
+    /// Runs after a drain, where the rows that just left the queue are.
+    private func sweepMedia() async {
+        guard let claimed = try? await store.outbox.claimedMediaFilenames() else { return }
+        await vault.sweep(keeping: claimed)
     }
 
     // MARK: - Draining
@@ -182,13 +218,19 @@ actor Outbox {
         }
 
         await scheduleNextWake()
+        await sweepMedia()
     }
 
     private func attempt(_ entry: OutboxEntry) async {
         do {
+            // Attachments first. A message referencing a `file://` URL is a
+            // message GroupMe would store and nobody could ever open, so the
+            // send does not happen until every picked file has a real one.
+            let entry = try await uploadingMedia(entry)
+
             let outcome = try await api.send(
                 text: entry.text,
-                attachments: entry.attachments,
+                attachments: entry.allAttachments,
                 to: entry.conversation,
                 sourceGuid: entry.sourceGuid,
                 retry: .background)
@@ -200,12 +242,14 @@ actor Outbox {
                 _ = try? await store.messages.upsert(message, in: entry.conversation)
                 try? await store.outbox.markSent(entry.id, messageID: message.id)
                 try? await store.outbox.remove(entry.id)
+                await vault.remove(entry.media)
 
             case .alreadyAccepted:
                 try? await store.outbox.markSent(entry.id, messageID: nil)
                 if let stored = (try? await store.messages.message(sourceGuid: entry.id)) ?? nil {
                     try? await store.outbox.markSent(entry.id, messageID: stored.id)
                     try? await store.outbox.remove(entry.id)
+                    await vault.remove(entry.media)
                 } else {
                     awaitingServerID[entry.id] = entry.conversation
                     if let reconcileHook {
@@ -224,9 +268,42 @@ actor Outbox {
         }
     }
 
+    /// Push every attachment that has not been pushed, and hand back the entry
+    /// with its URLs filled in.
+    ///
+    /// Each success is written to disk as it happens rather than at the end. A
+    /// message with three photos that loses the network after the second one
+    /// resumes at the third, and a `409` on a resend never costs a second copy
+    /// of the same video.
+    private func uploadingMedia(_ entry: OutboxEntry) async throws -> OutboxEntry {
+        guard entry.needsUpload else { return entry }
+
+        let senderID = await api.currentUser()
+        let groupID = entry.conversation.isGroup ? entry.conversation.remoteID : nil
+        let conversationID = try? await api.conversationRestID(entry.conversation)
+
+        var entry = entry
+        for index in entry.media.indices where !entry.media[index].isUploaded {
+            let uploaded = try await uploads.upload(
+                entry.media[index],
+                senderID: senderID,
+                groupID: groupID,
+                conversationID: conversationID)
+            entry.media[index].uploadedURL = uploaded.url
+            entry.media[index].uploadedPreviewURL =
+                uploaded.previewURL ?? entry.media[index].uploadedPreviewURL
+            try? await store.outbox.setMedia(entry.media, for: entry.id)
+            // The bubble picks up the real URL as soon as the row does, which
+            // is what makes a slow send show its photo arriving rather than
+            // sitting there looking stuck.
+            continuation.yield(entry.conversation)
+        }
+        return entry
+    }
+
     private func fail(_ entry: OutboxEntry, _ error: Error) async {
         let attempts = entry.attempts + 1  // `claim` already bumped the stored count
-        let description = failureText(error)
+        let description = (error as? MediaUploadError).map(Self.uploadFailureText) ?? failureText(error)
 
         switch Self.disposition(for: error) {
         case .retry:
@@ -293,6 +370,19 @@ actor Outbox {
         }
     }
 
+    /// A short phrase for a failed upload, fit for the line under a bubble.
+    private static func uploadFailureText(_ error: MediaUploadError) -> String {
+        switch error {
+        case .transport: "offline"
+        case .unavailable(let status, _): "HTTP \(status)"
+        case .unauthenticated: "signed out"
+        case .rejected: "attachment refused"
+        case .malformed: "unreadable response"
+        case .transcodeTimedOut: "still processing"
+        case .missingFile: "attachment missing"
+        }
+    }
+
     // MARK: - Classifying failures
 
     private enum Disposition {
@@ -305,6 +395,13 @@ actor Outbox {
     }
 
     private static func disposition(for error: Error) -> Disposition {
+        // An upload failure and a send failure are the same three questions:
+        // wait for the radio, wait for a token, or stop. The upload service
+        // answers them itself rather than making this read status codes twice.
+        if let upload = error as? MediaUploadError {
+            if upload.needsCredentials { return .waitForCredentials }
+            return upload.isRetryable ? .retry : .permanent
+        }
         guard let api = error as? APIError else { return .retry }
         switch api {
         case .transport:

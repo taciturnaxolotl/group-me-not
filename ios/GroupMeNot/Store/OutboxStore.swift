@@ -20,6 +20,13 @@ nonisolated struct OutboxEntry: Identifiable, Hashable, Sendable {
     var conversation: ConversationID
     var text: String?
     var attachments: [Message.Attachment]
+    /// Photos and videos picked for this message, still on the phone.
+    ///
+    /// Local bookkeeping, not wire shape: each entry names a file in the
+    /// ``MediaVault`` and gains an `uploadedURL` once a media service has taken
+    /// it. ``Outbox`` turns them into real attachments on the way out, and
+    /// refuses to send until every one of them has a URL.
+    var media: [PendingMedia] = []
     var state: OutboxState
     var attempts: Int
     var createdAt: Date
@@ -33,6 +40,25 @@ nonisolated struct OutboxEntry: Identifiable, Hashable, Sendable {
     var sentMessageID: String?
 
     var sourceGuid: String { id }
+
+    /// True while some picked file still has to reach a media service.
+    var needsUpload: Bool { media.contains { !$0.isUploaded } }
+
+    /// Everything this message carries, wire attachments and uploaded media
+    /// alike. Before the upload this holds `file://` URLs, which is exactly what
+    /// the transcript wants and never what the API sees; see
+    /// ``PendingMedia/attachment``.
+    var allAttachments: [Message.Attachment] { attachments + media.map(\.attachment) }
+
+    /// The vault files this entry still owns, by name.
+    var claimedFilenames: Set<String> {
+        var names: Set<String> = []
+        for item in media {
+            names.insert(item.filename)
+            if let preview = item.previewFilename { names.insert(preview) }
+        }
+        return names
+    }
 
     /// A stand-in `Message` so the transcript can render the bubble before the
     /// server has ever seen it. The id is the guid, so it never collides with a
@@ -51,7 +77,7 @@ nonisolated struct OutboxEntry: Identifiable, Hashable, Sendable {
             text: text,
             system: false,
             favoritedBy: [],
-            attachments: attachments.isEmpty ? nil : attachments,
+            attachments: allAttachments.isEmpty ? nil : allAttachments,
             groupId: conversation.isGroup ? conversation.remoteID : nil,
             chatId: nil,
             recipientId: conversation.isGroup ? nil : conversation.remoteID,
@@ -92,6 +118,7 @@ actor OutboxStore {
         in conversation: ConversationID,
         text: String?,
         attachments: [Message.Attachment] = [],
+        media: [PendingMedia] = [],
         sourceGuid: String = UUID().uuidString,
         at now: Date = Date()
     ) throws -> OutboxEntry {
@@ -100,6 +127,7 @@ actor OutboxStore {
             conversation: conversation,
             text: text,
             attachments: attachments,
+            media: media,
             state: .pending,
             attempts: 0,
             createdAt: now,
@@ -118,9 +146,9 @@ actor OutboxStore {
         try db.run(
             """
             INSERT INTO outbox
-                (source_guid, conversation_key, kind, remote_id, text, attachments,
+                (source_guid, conversation_key, kind, remote_id, text, attachments, media,
                  state, attempts, created_at, updated_at, next_attempt_at, last_error, sent_message_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_guid) DO NOTHING
             """,
             [
@@ -130,6 +158,7 @@ actor OutboxStore {
                 SQLValue(entry.conversation.remoteID),
                 SQLValue(entry.text),
                 SQLValue(entry.attachments.isEmpty ? nil : StoreCoding.encodeIfPresent(entry.attachments)),
+                SQLValue(entry.media.isEmpty ? nil : StoreCoding.encodeIfPresent(entry.media)),
                 SQLValue(entry.state.rawValue),
                 SQLValue(entry.attempts),
                 SQLValue(entry.createdAt),
@@ -269,7 +298,44 @@ actor OutboxStore {
         return released
     }
 
+    /// Record what an upload produced, so a later attempt does not push the same
+    /// bytes again.
+    ///
+    /// Called after every individual upload rather than once at the end, which
+    /// is the point: a message with three photos that dies after the second one
+    /// resumes at the third.
+    func setMedia(_ media: [PendingMedia], for sourceGuid: String, at now: Date = Date()) throws {
+        try db.run(
+            "UPDATE outbox SET media = ?, updated_at = ? WHERE source_guid = ?",
+            [
+                SQLValue(media.isEmpty ? nil : StoreCoding.encodeIfPresent(media)),
+                SQLValue(now),
+                SQLValue(sourceGuid),
+            ]
+        )
+    }
+
     // MARK: - Reading
+
+    /// Every vault file any queue row still refers to.
+    ///
+    /// The input to ``MediaVault/sweep(keeping:)``. Anything on disk and not in
+    /// here belongs to a send that has already landed or been thrown away.
+    func claimedMediaFilenames() throws -> Set<String> {
+        let rows = try db.query(
+            "SELECT media FROM outbox WHERE media IS NOT NULL",
+            [],
+            { StoreCoding.decodeIfPossible([PendingMedia].self, from: $0.dataOrNil(0)) ?? [] }
+        )
+        var names: Set<String> = []
+        for media in rows {
+            for item in media {
+                names.insert(item.filename)
+                if let preview = item.previewFilename { names.insert(preview) }
+            }
+        }
+        return names
+    }
 
     /// What is still in flight in one conversation, oldest first. The transcript
     /// appends these below the stored history.
@@ -327,7 +393,7 @@ actor OutboxStore {
 
     nonisolated private static let columns = """
     source_guid, kind, remote_id, text, attachments, state, attempts,
-    created_at, updated_at, next_attempt_at, last_error, sent_message_id
+    created_at, updated_at, next_attempt_at, last_error, sent_message_id, media
     """
 
     nonisolated private static func decode(_ row: Row) throws -> OutboxEntry {
@@ -342,6 +408,7 @@ actor OutboxStore {
             conversation: conversation,
             text: row.stringOrNil(3),
             attachments: attachments,
+            media: StoreCoding.decodeIfPossible([PendingMedia].self, from: row.dataOrNil(12)) ?? [],
             state: OutboxState(rawValue: row.int64(5)) ?? .pending,
             attempts: row.int(6),
             createdAt: row.dateOrNil(7) ?? Date(timeIntervalSince1970: 0),

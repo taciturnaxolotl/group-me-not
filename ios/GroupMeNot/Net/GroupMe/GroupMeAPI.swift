@@ -38,6 +38,20 @@ actor GroupMeAPI {
         return user
     }
 
+    /// Our user id, if we already know it. Never asks the network: the media
+    /// upload path wants it in a body and would rather fall back to the older
+    /// endpoint than spend a round trip on it.
+    func currentUser() -> String? { currentUserID }
+
+    /// The `{a}+{b}` id the media and file services want in a header.
+    ///
+    /// The same value ``restID(for:)`` builds for the like and read-receipt
+    /// routes, exposed because the upload service is outside this actor and the
+    /// rule for joining two user ids should not be written twice.
+    func conversationRestID(_ conversation: ConversationID) async throws -> String {
+        try await restID(for: conversation)
+    }
+
     // MARK: - Conversation lists
 
     /// `GET /v3/groups`, always with `omit=memberships`.
@@ -52,6 +66,11 @@ actor GroupMeAPI {
             "page": String(page),
             "per_page": String(perPage),
             "omit": "memberships",
+            // Not optional. The list endpoints leave `unread_count` out unless
+            // it is asked for, and without it every badge in the conversation
+            // list reads zero. The single-group read includes it either way,
+            // which is what makes the omission easy to miss.
+            "include": "unread_count",
         ])
     }
 
@@ -60,6 +79,7 @@ actor GroupMeAPI {
         try await client.get(.v3, "/chats", query: [
             "page": String(page),
             "per_page": String(perPage),
+            "include": "unread_count",
         ])
     }
 

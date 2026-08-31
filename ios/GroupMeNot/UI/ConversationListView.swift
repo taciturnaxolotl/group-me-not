@@ -263,9 +263,9 @@ struct ConversationCell: View {
         guard let text = row.lastMessagePreview, !text.isEmpty else {
             return row.isPlaceholder ? "Syncing…" : "No messages yet"
         }
-        if row.isGroup, let sender = row.lastMessageSender, !sender.isEmpty {
-            return "\(sender): \(text)"
-        }
+        // Just the message. Prefixing the sender in groups pushed the useful
+        // half off the end of a two-line cell, which is the opposite of what a
+        // preview is for. The sender is still searchable.
         return text
     }
 

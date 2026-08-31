@@ -9,14 +9,35 @@ nonisolated enum TranscriptRow: Identifiable, Hashable, Sendable {
     case message(MessageDisplay)
     /// Several consecutive notices of one kind, drawn as one line until opened.
     case systemRun(SystemMessageRun)
+    /// Where the reader left off.
+    case unreadMarker(UnreadMark)
+
+    /// The only row of its kind in a transcript, so a constant is enough and
+    /// scrolling to it does not need to know which message it precedes.
+    static let unreadMarkerID = "transcript.unread"
 
     var id: String {
         switch self {
         case .day(let date): "day-\(Int(date.timeIntervalSince1970))"
         case .message(let item): item.id
         case .systemRun(let run): "system-run-\(run.id)"
+        case .unreadMarker: Self.unreadMarkerID
         }
     }
+}
+
+/// Where the unread divider goes, and what it says.
+///
+/// Resolved once, when the conversation opens, and then held still. The read
+/// receipt posts within a second of arriving, so a marker recomputed from live
+/// data would vanish before anyone had used it; the whole value of the thing is
+/// that it outlives the state that produced it.
+nonisolated struct UnreadMark: Hashable, Sendable {
+    /// The first message the reader has not seen. The divider is drawn directly
+    /// above it, which keeps the two together when older pages load in and
+    /// shift every index.
+    let firstUnreadID: String
+    let count: Int
 }
 
 /// Turns stored history plus the outbox into rows.
@@ -36,10 +57,13 @@ nonisolated enum Transcript {
     ///   - outbox: queued sends for this conversation, oldest first.
     ///   - currentUser: used to attribute the outbox echoes, which have no
     ///     server-assigned sender yet.
+    ///   - unread: where the reader left off, if anywhere. Already pinned by
+    ///     the view; this only places it.
     static func rows(
         messages: [Message],
         outbox: [OutboxEntry],
         currentUser: CurrentUser?,
+        unread: UnreadMark? = nil,
         calendar: Calendar = .current
     ) -> [TranscriptRow] {
         let myID = currentUser?.id
@@ -70,6 +94,13 @@ nonisolated enum Transcript {
 
             if previous == nil || !calendar.isDate(previous!.date, inSameDayAs: message.date) {
                 rows.append(.day(calendar.startOfDay(for: message.date)))
+            }
+
+            // Below the day heading and above the bubble, which is where the
+            // eye expects a landmark: the date tells you when, the divider
+            // tells you where you stopped.
+            if let unread, unread.firstUnreadID == message.id {
+                rows.append(.unreadMarker(unread))
             }
 
             let opensRun = previous.map { !continuesRun(from: $0, to: message, calendar: calendar) } ?? true
@@ -155,6 +186,54 @@ struct ChatView: View {
     /// visible even if the user had drifted up the history.
     private let bottomAnchor = "transcript.bottom"
 
+    // MARK: Scroll state
+
+    /// Close enough to the newest message that following along is what the
+    /// reader wants. Further up than this and they are reading history, and
+    /// nothing that arrives is allowed to move the page under them.
+    private static let nearBottomSlack: CGFloat = 80
+
+    /// Starts true because the transcript opens at the newest message.
+    @State private var isNearBottom = true
+
+    /// Something arrived below the fold while the reader was up in the history.
+    /// Drawn as a mark on the jump button and cleared when they get there.
+    @State private var hasNewBelow = false
+
+    /// Which end of the content stays put when the content size changes.
+    ///
+    /// Almost always `nil`, meaning the top: rows appended at the foot, and the
+    /// typing bubble coming and going, must not shift what is on screen. It is
+    /// flipped to `.bottom` for exactly as long as a page of older history is
+    /// being spliced in above the viewport, which is the one case where holding
+    /// the *end* of the content still is what keeps the reader in place.
+    @State private var sizeChangeAnchor: UnitPoint?
+    @State private var anchorResetTask: Task<Void, Never>?
+
+    /// Bumped whenever something has happened that should put the newest
+    /// message on screen. Cheaper and more reliable than watching row counts,
+    /// and it gives the several callers one place to land.
+    @State private var bottomRequest = 0
+    @State private var isAttachmentPickerPresented = false
+    /// Media the user picked but has not sent yet, shown above the field.
+    @State private var staged: [PickedMedia] = []
+
+    // MARK: Unread
+
+    /// Where the divider goes, fixed for as long as this view lives. Resolved
+    /// on the first fill and never again; see ``UnreadMark``.
+    @State private var unread: UnreadMark?
+    @State private var hasResolvedUnread = false
+
+    /// The row the transcript opens on, when that is not the newest message.
+    /// Set once, consumed once, by the effect inside the `ScrollViewReader`.
+    @State private var openingTarget: String?
+
+    /// A quarter of the way down rather than hard against the top edge, so a
+    /// little of what was already read stays visible above the divider. Landing
+    /// with nothing above it reads as the top of the conversation.
+    private static let openingAnchor = UnitPoint(x: 0.5, y: 0.25)
+
     var body: some View {
         transcript
             .background(Color(.systemBackground))
@@ -173,6 +252,14 @@ struct ChatView: View {
             .onDisappear(perform: teardown)
             .onChange(of: model.messages, initial: true) { messagesChanged() }
             .onChange(of: model.outbox, initial: true) { rebuild() }
+            // The indicator changes the content height by about a bubble. A
+            // reader at the foot should follow it; a reader in the history
+            // should not feel it at all, which is what the missing size-change
+            // anchor already guarantees.
+            .onChange(of: model.isAnyoneTyping) {
+                guard isNearBottom else { return }
+                bottomRequest += 1
+            }
     }
 
     // MARK: Transcript
@@ -194,11 +281,58 @@ struct ChatView: View {
                 .padding(.bottom, 14)
             }
             .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .defaultScrollAnchor(.bottom, for: .sizeChanges)
+            // Deliberately optional, and `nil` nearly all the time. See
+            // `sizeChangeAnchor`.
+            .defaultScrollAnchor(sizeChangeAnchor, for: .sizeChanges)
             .scrollDismissesKeyboard(.interactively)
-            .onChange(of: draftSubmissionCount) {
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                let maxOffset = geometry.contentSize.height
+                    + geometry.contentInsets.bottom
+                    - geometry.containerSize.height
+                return maxOffset - geometry.contentOffset.y <= Self.nearBottomSlack
+            } action: { _, nearBottom in
+                isNearBottom = nearBottom
+                if nearBottom { hasNewBelow = false }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                // The stack is the stable parent the transition needs; the `if`
+                // lives one level down, inside `jumpButton`.
+                ZStack { jumpButton }
+                    .animation(.snappy(duration: 0.22), value: isNearBottom)
+            }
+            .onChange(of: bottomRequest) {
                 withAnimation(.snappy) { proxy.scrollTo(bottomAnchor, anchor: .bottom) }
             }
+            // Not animated: this is where the conversation opens, not a
+            // movement the reader should see happen.
+            .onChange(of: openingTarget) { _, target in
+                guard let target else { return }
+                proxy.scrollTo(target, anchor: Self.openingAnchor)
+                openingTarget = nil
+            }
+        }
+    }
+
+    /// The way back down, and the only notice a reader up in the history gets
+    /// that something has arrived. Small, out of the way, and absent entirely
+    /// while they are already at the foot.
+    @ViewBuilder private var jumpButton: some View {
+        if !isNearBottom {
+            Button { bottomRequest += 1 } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(hasNewBelow ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                    .frame(width: 32, height: 32)
+                    .background(.regularMaterial, in: .circle)
+                    .overlay {
+                        Circle().strokeBorder(.quaternary, lineWidth: 0.75)
+                    }
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 14)
+            .padding(.bottom, 12)
+            .transition(.scale(scale: 0.8).combined(with: .opacity))
+            .accessibilityLabel(hasNewBelow ? "New messages, jump to latest" : "Jump to latest")
         }
     }
 
@@ -213,6 +347,8 @@ struct ChatView: View {
             case .systemRun(let run):
                 SystemRunRow(run: run) { messageRow($0) }
                     .onAppear { prefetchOlderIfNeeded(atRow: index) }
+            case .unreadMarker(let mark):
+                UnreadDivider(count: mark.count)
             }
         }
     }
@@ -320,10 +456,17 @@ struct ChatView: View {
         // `.bar` material this replaced, does not reach down into that strip on
         // its own. Without it the transcript shows through under the composer.
         .background(Color(.systemBackground).ignoresSafeArea(edges: .bottom))
+        .attachmentPicker(isPresented: $isAttachmentPickerPresented) { picked in
+            // Staged rather than sent. Picking a photo and then typing a caption
+            // is the common case, and sending on pick would make that
+            // impossible.
+            staged.append(contentsOf: picked)
+            composerFocused = true
+        }
     }
 
     private var attachButton: some View {
-        Button(action: {}) {
+        Button { isAttachmentPickerPresented = true } label: {
             Image(systemName: "plus")
                 .font(.system(size: 21, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -362,14 +505,20 @@ struct ChatView: View {
     @ViewBuilder private var sendButton: some View {
         if canSend {
             Button(action: send) {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 27))
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(Color(.systemBackground), Color.accentColor)
+                // Drawn as a glyph on a filled circle rather than
+                // `arrow.up.circle.fill`. The SF Symbol's arrow is small
+                // relative to its enclosing ring and the ring cannot be
+                // thickened, which reads thinner than the control it is
+                // imitating. An explicit circle gets the weight right.
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 29, height: 29)
+                    .background(Color.accentColor, in: .circle)
             }
             .buttonStyle(.plain)
-            .padding(.trailing, 3)
-            .padding(.bottom, 2)
+            .padding(.trailing, 4)
+            .padding(.bottom, 3)
             .transition(.scale.combined(with: .opacity))
             .accessibilityLabel("Send")
         } else {
@@ -378,21 +527,25 @@ struct ChatView: View {
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !staged.isEmpty
     }
-
-    /// Bumped on every send purely so the scroll-to-bottom effect has something
-    /// to observe. Cheaper and more reliable than watching the row count.
-    @State private var draftSubmissionCount = 0
 
     /// Clears the field and hands the text off without awaiting anything. The
     /// bubble appears on the next frame; the network hears about it afterwards.
+    ///
+    /// Sending always goes to the foot, wherever the reader had drifted to. It
+    /// is the one movement they asked for.
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        let media = staged
+        guard !text.isEmpty || !media.isEmpty else { return }
+        // Cleared before the await, like the text: the queued row is what the
+        // transcript draws from here on, and leaving the tray populated would
+        // show the same photo twice.
         draft = ""
-        draftSubmissionCount += 1
-        Task { await model.send(text) }
+        staged = []
+        bottomRequest += 1
+        Task { await model.send(text, media: media) }
     }
 
     /// A tapped chip or glyph. The model works out whether that adds, swaps or
@@ -473,6 +626,7 @@ struct ChatView: View {
 
     private func teardown() {
         rebuildTask?.cancel()
+        anchorResetTask?.cancel()
         model.closeConversation()
     }
 
@@ -498,24 +652,122 @@ struct ChatView: View {
         let outbox = model.outbox
         let currentUser = model.currentUser
 
+        // Before the receipt posts. `messagesChanged` marks the conversation
+        // read in a task it kicks off after calling this, so resolving here is
+        // what gets the divider in ahead of its own erasure.
+        resolveUnreadIfNeeded(in: messages)
+        let unread = unread
+
         rebuildTask?.cancel()
         rebuildTask = Task {
             let built = await Task.detached(priority: .userInitiated) {
-                Transcript.rows(messages: messages, outbox: outbox, currentUser: currentUser)
+                Transcript.rows(messages: messages, outbox: outbox, currentUser: currentUser, unread: unread)
             }.value
             guard !Task.isCancelled else { return }
             // Only when something actually moved.
             //
             // A catch-up rewrites `model.messages` several times a second, and
             // most of those rebuilds produce an identical array. Assigning it
-            // anyway changes the transcript's content size, and a content-size
-            // change while the scroll view is pinned to the bottom makes it
-            // re-anchor, which shifts the rows under a stationary finger. That
-            // is what kills a long press on the newest messages while leaving
-            // one in the middle of the history alone: re-anchoring only moves
-            // content for a reader who is already at the bottom.
+            // anyway changes the transcript's content size, and every
+            // content-size change is a chance to shift the rows under a
+            // stationary finger, which is what kills a long press.
             guard built != rows else { return }
-            rows = built
+            apply(built)
+        }
+    }
+
+    /// Installs a freshly built transcript, having first decided what the
+    /// change means for the scroll position.
+    ///
+    /// Three cases, and they want opposite things:
+    ///
+    /// - Rows arriving above the ones already on screen. That is a page of
+    ///   older history, or the very first fill of an empty transcript. Hold the
+    ///   *end* of the content still for the length of the splice so the reader
+    ///   does not see it happen.
+    /// - Rows arriving at the foot while the reader is there too. Follow them
+    ///   down, animated, so a new bubble slides in rather than appearing
+    ///   mid-jump.
+    /// - Rows arriving at the foot while the reader is up in the history. Move
+    ///   nothing. Mark the jump button and let them come down when they like.
+    private func apply(_ built: [TranscriptRow]) {
+        let grewAbove = rows.isEmpty
+            ? !built.isEmpty
+            : built.count > rows.count && built.first?.id != rows.first?.id
+        let grewBelow = !built.isEmpty && built.last?.id != rows.last?.id
+
+        // The sixth case: a conversation with unreads opens on the divider
+        // rather than at the foot. The end anchor is skipped for that fill,
+        // since holding the content's end for the next few frames is the one
+        // thing that would drag the view back down off the divider.
+        let opensOnDivider = rows.isEmpty && !built.isEmpty && unread != nil
+
+        if grewAbove, !opensOnDivider { holdContentEnd() }
+        rows = built
+
+        // After the assignment, so the row it scrolls to exists by the time the
+        // effect runs.
+        if opensOnDivider { openingTarget = TranscriptRow.unreadMarkerID }
+
+        if grewAbove { return }
+        if grewBelow {
+            if isNearBottom {
+                bottomRequest += 1
+            } else {
+                hasNewBelow = true
+            }
+        }
+    }
+
+    // MARK: Unread
+
+    /// Works out where the reader left off, once, from the conversation row as
+    /// it stood when this view was pushed.
+    ///
+    /// `conversation` is a snapshot taken at navigation time, so the counts in
+    /// it cannot move underneath us; the only reason this has to be guarded is
+    /// that the *messages* it resolves against arrive later, and a second pass
+    /// over a longer history would find a different answer.
+    private func resolveUnreadIfNeeded(in messages: [Message]) {
+        guard !hasResolvedUnread, !messages.isEmpty else { return }
+        hasResolvedUnread = true
+
+        let count = conversation.unreadCount
+        guard count > 0 else { return }
+
+        // The receipt is the good answer: the first message after it is the
+        // first thing the reader has not seen.
+        if let lastRead = conversation.lastReadMessageID,
+           let index = messages.lastIndex(where: { $0.id == lastRead }) {
+            guard index + 1 < messages.count else { return }
+            unread = UnreadMark(firstUnreadID: messages[index + 1].id, count: count)
+            return
+        }
+
+        // No receipt, or one older than anything loaded. Counting back from the
+        // newest message is the same arithmetic the badge was drawn from, and
+        // clamping to the first loaded message is what covers a long absence:
+        // everything on screen is unread, so the divider sits at the top of it
+        // rather than somewhere off above the loaded window.
+        let index = max(0, messages.count - count)
+        guard index < messages.count else { return }
+        unread = UnreadMark(firstUnreadID: messages[index].id, count: count)
+    }
+
+    /// Anchors the content's end for the frame or two it takes the scroll view
+    /// to absorb a prepend, then puts it back.
+    ///
+    /// The window has to outlast the layout pass, not the fetch: the page has
+    /// already arrived by the time this runs, and it is the resulting size
+    /// change that needs the anchor. Leaving the anchor on any longer would
+    /// bring back the every-size-change re-pin this replaced.
+    private func holdContentEnd() {
+        anchorResetTask?.cancel()
+        sizeChangeAnchor = .bottom
+        anchorResetTask = Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            sizeChangeAnchor = nil
         }
     }
 }
@@ -536,6 +788,45 @@ private struct DaySeparator: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 12)
             .accessibilityLabel(Formatters.spokenDayHeader(date))
+    }
+}
+
+/// The line marking where the reader left off.
+///
+/// A landmark, not an alert: a hairline rule with a quiet label sitting in it.
+/// It carries no colour of its own, because the one thing it must not do is
+/// compete with the messages it is pointing at.
+private struct UnreadDivider: View {
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            rule
+            Text(label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+                .kerning(0.4)
+            rule
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 12)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spokenLabel)
+    }
+
+    private var rule: some View {
+        Rectangle()
+            .fill(.quaternary)
+            .frame(height: 0.5)
+    }
+
+    private var label: String {
+        count > 1 ? "\(count) unread" : "Unread"
+    }
+
+    private var spokenLabel: String {
+        count > 1 ? "\(count) unread messages below" : "Unread messages below"
     }
 }
 

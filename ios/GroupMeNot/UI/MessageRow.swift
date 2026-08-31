@@ -488,20 +488,29 @@ private struct AttachmentStack: View {
     let attachments: [Message.Attachment]
     let isOwn: Bool
 
+    /// The one the user tapped, if any. Wrapped rather than used directly
+    /// because `Message.Attachment` has no identity of its own and a message can
+    /// carry two identical ones.
+    @State private var viewing: ViewableMedia?
+
     var body: some View {
         if !attachments.isEmpty {
             VStack(alignment: isOwn ? .trailing : .leading, spacing: 6) {
-                ForEach(Array(attachments.enumerated()), id: \.offset) { _, attachment in
-                    view(for: attachment)
+                ForEach(Array(attachments.enumerated()), id: \.offset) { index, attachment in
+                    view(for: attachment, at: index)
                 }
+            }
+            .fullScreenCover(item: $viewing) { item in
+                MediaViewer(attachment: item.attachment)
             }
         }
     }
 
-    @ViewBuilder private func view(for attachment: Message.Attachment) -> some View {
+    @ViewBuilder private func view(for attachment: Message.Attachment, at index: Int) -> some View {
         switch attachment.type {
         case "image", "video", "linked_image":
             MediaThumbnail(attachment: attachment)
+                .onTapGesture { viewing = ViewableMedia(id: index, attachment: attachment) }
         case "location":
             AttachmentChip(
                 symbol: "mappin.and.ellipse",
@@ -540,6 +549,12 @@ private struct AttachmentStack: View {
     }
 }
 
+/// One tapped attachment, given the identity `fullScreenCover(item:)` needs.
+private struct ViewableMedia: Identifiable {
+    let id: Int
+    let attachment: Message.Attachment
+}
+
 /// A photo or video still in a box of known size.
 private struct MediaThumbnail: View {
     let attachment: Message.Attachment
@@ -570,8 +585,17 @@ private struct MediaThumbnail: View {
             }
         }
         .accessibilityLabel(attachment.type == "video" ? "Video" : "Photo")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint("Double tap to open")
     }
 
+    /// The still to draw.
+    ///
+    /// `previewUrl` first, because a video's own `url` is an MP4 and no image
+    /// loader is going to make a picture out of it. For a queued attachment both
+    /// of these are `file://` URLs into the vault, which the loader reads
+    /// exactly as happily as an HTTPS one; that is what lets one renderer draw a
+    /// photo that is still on the phone and one that came back from GroupMe.
     private var url: URL? {
         let candidate = attachment.previewUrl ?? attachment.url ?? attachment.sourceUrl
         return candidate.flatMap(URL.init(string:))
