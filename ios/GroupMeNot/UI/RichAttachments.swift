@@ -310,3 +310,145 @@ struct PollCard: View {
         Task { await model.vote(chosen, in: pollID) }
     }
 }
+
+// MARK: - Events
+
+/// An event, with the day it is on and a way to answer it.
+///
+/// The message carries only `event_id` and a `view` hint, so this fetches once
+/// and follows the model. Times come off the wire as ISO 8601 strings rather
+/// than the epoch seconds the rest of this API uses, which is handled in
+/// `GroupEvent` so nothing here has to know.
+struct EventCard: View {
+    let attachment: Message.Attachment
+    let isOwn: Bool
+
+    @Environment(AppModel.self) private var model
+
+    private var event: GroupEvent? {
+        attachment.eventId.flatMap { model.events[$0] }
+    }
+
+    var body: some View {
+        SwiftUI.Group {
+            if let event {
+                card(event)
+            } else {
+                AttachmentChip(
+                    symbol: "calendar",
+                    title: attachment.name ?? "Event",
+                    isOwn: isOwn
+                )
+            }
+        }
+        .task(id: attachment.eventId) {
+            guard let id = attachment.eventId else { return }
+            await model.loadEvent(id)
+        }
+    }
+
+    private func card(_ event: GroupEvent) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                if let starts = event.starts { datePlaque(starts) }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(event.name ?? "Event")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(2)
+                    if let when = timeLine(event) {
+                        Text(when)
+                            .font(.caption)
+                            .foregroundStyle(ink.opacity(0.75))
+                    }
+                    if let place = event.location?.name, !place.isEmpty {
+                        Label(place, systemImage: "mappin")
+                            .font(.caption)
+                            .foregroundStyle(ink.opacity(0.75))
+                            .lineLimit(1)
+                    }
+                }
+            }
+
+            if let detail = event.description, !detail.isEmpty {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(ink.opacity(0.8))
+                    .lineLimit(3)
+            }
+
+            replies(event)
+        }
+        .padding(10)
+        .frame(width: 250, alignment: .leading)
+        .background(
+            isOwn ? AnyShapeStyle(.white.opacity(0.15)) : AnyShapeStyle(.quaternary),
+            in: .rect(cornerRadius: 12, style: .continuous))
+        .foregroundStyle(ink)
+    }
+
+    /// A calendar tear-off. It is the one part of an event a reader takes in
+    /// without reading, which is worth more here than a fourth line of text.
+    private func datePlaque(_ date: Date) -> some View {
+        VStack(spacing: 0) {
+            Text(date.formatted(.dateTime.month(.abbreviated)).uppercased())
+                .font(.caption2.weight(.bold))
+            Text(date.formatted(.dateTime.day()))
+                .font(.title3.weight(.bold))
+                .monospacedDigit()
+        }
+        .foregroundStyle(isOwn ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.white))
+        .frame(width: 44, height: 44)
+        .background(
+            isOwn ? AnyShapeStyle(.white) : AnyShapeStyle(Color.accentColor),
+            in: .rect(cornerRadius: 9, style: .continuous))
+    }
+
+    private func timeLine(_ event: GroupEvent) -> String? {
+        guard let starts = event.starts else { return nil }
+        if event.isAllDay == true {
+            return starts.formatted(.dateTime.weekday(.wide).month().day())
+        }
+        return starts.formatted(.dateTime.weekday(.abbreviated).month().day().hour().minute())
+    }
+
+    private func replies(_ event: GroupEvent) -> some View {
+        let mine = event.reply(from: model.currentUser?.id)
+        return HStack(spacing: 8) {
+            button("Going", isOn: mine == .going) { answer(true, to: event) }
+            button("Can't", isOn: mine == .notGoing) { answer(false, to: event) }
+            Spacer(minLength: 0)
+            if let count = event.goingCount, count > 0 {
+                Text("\(count) going")
+                    .font(.caption2)
+                    .foregroundStyle(ink.opacity(0.7))
+            }
+        }
+    }
+
+    private func button(_ title: String, isOn: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    isOn ? AnyShapeStyle(ink.opacity(0.28)) : AnyShapeStyle(ink.opacity(0.10)),
+                    in: .capsule)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isOn ? [.isButton, .isSelected] : .isButton)
+    }
+
+    /// Answering the same way twice is not a toggle: there is no "un-RSVP" on
+    /// this route, and the way out is a separate delete this app does not offer
+    /// yet. So a second tap on the same answer does nothing rather than
+    /// pretending to withdraw it.
+    private func answer(_ going: Bool, to event: GroupEvent) {
+        guard let id = attachment.eventId else { return }
+        let mine = event.reply(from: model.currentUser?.id)
+        guard mine != (going ? .going : .notGoing) else { return }
+        Task { await model.rsvp(going, to: id) }
+    }
+
+    private var ink: Color { isOwn ? .white : .primary }
+}

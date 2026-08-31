@@ -653,6 +653,26 @@ final class AppModel {
         polls[pollID] = updated
     }
 
+    // MARK: - Events
+
+    /// Events the transcript has asked for, by event id. In memory, like polls
+    /// and for the same reason: an RSVP list is true until somebody answers.
+    private(set) var events: [String: GroupEvent] = [:]
+
+    func loadEvent(_ eventID: String) async {
+        guard events[eventID] == nil, let conversation = openConversationID else { return }
+        guard let event = await api.event(eventID, in: conversation) else { return }
+        events[eventID] = event
+    }
+
+    /// Answer an invitation. The server's copy replaces ours, since the lists
+    /// are shared and merging two views of them would invent a guest.
+    func rsvp(_ going: Bool, to eventID: String) async {
+        guard let conversation = openConversationID else { return }
+        guard let updated = await api.rsvp(going, to: eventID, in: conversation) else { return }
+        events[eventID] = updated
+    }
+
     // MARK: - Requests
 
     /// How many decisions are waiting, account-wide.

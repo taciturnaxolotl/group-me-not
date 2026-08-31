@@ -726,6 +726,81 @@ nonisolated struct PollListResponse: Decodable, Sendable {
     var continuationToken: String?
 }
 
+/// An event, as `GET /v3/conversations/{id}/events/show` returns it.
+///
+/// Measured against one created, RSVP'd to, and deleted on 2026-08-31. The
+/// thing to know: **its timestamps are ISO 8601 strings**, not the epoch
+/// seconds every other date in this API uses. A client that reads them as
+/// numbers gets nothing, and one that writes them as numbers is refused.
+nonisolated struct GroupEvent: Codable, Identifiable, Hashable, Sendable {
+    var eventId: String?
+    var conversationId: String?
+    var creatorId: String?
+    var name: String?
+    var description: String?
+    var location: Place?
+    /// ISO 8601. See above.
+    var startAt: String?
+    var endAt: String?
+    var isAllDay: Bool?
+    var timezone: String?
+    /// User ids, three lists. `maybe_going` arrives as null on a fresh event
+    /// and as an array afterwards, so it is optional twice over.
+    var going: [String]?
+    var notGoing: [String]?
+    var maybeGoing: [String]?
+    var goingCount: Int?
+    var shareUrl: String?
+    var callStarted: Bool?
+    var scheduledCall: Bool?
+
+    nonisolated struct Place: Codable, Hashable, Sendable {
+        var name: String?
+        var address: String?
+        var lat: Double?
+        var lng: Double?
+    }
+
+    var id: String { eventId ?? name ?? UUID().uuidString }
+
+    var starts: Date? { Self.date(from: startAt) }
+    var ends: Date? { Self.date(from: endAt) }
+
+    /// Fractional seconds are present on a freshly created event and absent on
+    /// one read back, so both are tried.
+    ///
+    /// Built per call rather than shared. `ISO8601DateFormatter` is not
+    /// `Sendable`, and a cached one would either need isolating to an actor this
+    /// type has no business knowing about or would be a data race waiting for a
+    /// second thread. Parsing two dates when a card appears is not a cost worth
+    /// buying either of those with.
+    static func date(from text: String?) -> Date? {
+        guard let text, !text.isEmpty else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let parsed = formatter.date(from: text) { return parsed }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: text)
+    }
+
+    /// What this account said, if anything.
+    func reply(from userID: String?) -> Reply? {
+        guard let userID else { return nil }
+        if going?.contains(userID) == true { return .going }
+        if notGoing?.contains(userID) == true { return .notGoing }
+        if maybeGoing?.contains(userID) == true { return .maybe }
+        return nil
+    }
+
+    nonisolated enum Reply: String, Sendable {
+        case going, notGoing, maybe
+    }
+}
+
+nonisolated struct EventResponse: Decodable, Sendable {
+    var event: GroupEvent?
+}
+
 /// Somebody waiting to be let into a group.
 ///
 /// `GET /v3/groups/{id}/pending_memberships`. Every field is optional on

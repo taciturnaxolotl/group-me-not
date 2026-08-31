@@ -300,3 +300,48 @@ Create takes `{subject, options: [{title}], expiration, type, visibility}` and a
 with the poll *and* the announcing message.
 
 Measured 2026-08-31 against polls created, voted in, and ended for the purpose.
+
+
+## Events
+
+An `event` attachment carries `event_id` and a `view` hint, nothing else:
+
+```json
+{ "type": "event", "event_id": "49c46675244f47be9aece538a6f11590", "view": "full" }
+```
+
+```
+POST   /v3/conversations/{id}/events/create
+GET    /v3/conversations/{id}/events/show?event_id={id}
+GET    /v3/conversations/{id}/events/list?limit=100
+POST   /v3/conversations/{id}/events/rsvp?event_id={id}&going={true|false}
+DELETE /v3/conversations/{id}/events/rsvp/delete?event_id={id}
+DELETE /v3/conversations/{id}/events/delete?event_id={id}
+```
+
+**Timestamps are ISO 8601 strings**, not the epoch seconds every other date in this API uses.
+Fractional seconds are present on a freshly created event and absent when it is read back, so a
+parser has to accept both.
+
+```json
+{ "event_id": "…", "conversation_id": "117088005", "creator_id": "…",
+  "name": "…", "description": "…", "location": { "name": "…" },
+  "start_at": "2026-09-01T23:03:15.291Z", "end_at": "2026-09-02T00:03:15.292Z",
+  "is_all_day": false, "timezone": "America/New_York",
+  "going": ["131883422"], "not_going": [], "maybe_going": null, "going_count": 1,
+  "rsvp_list": { "131883422": "2026-08-31T23:03:15Z" },
+  "share_url": "https://groupme.com/join_event/{conversationId}/{eventId}/{shareToken}",
+  "deep_link_ios": "groupme://join_event/…", "scheduled_call": false, "call_started": false,
+  "reminders": [], "aesthetics": …, "rsvp_sources": …, "is_top_level": …, "waitlisted": … }
+```
+
+Creating requires **`start_at`, `end_at`, `timezone` and `is_all_day` together** — omitting
+`timezone` earns `400` with that sentence as the error. The creator is placed in `going`
+automatically.
+
+`maybe_going` arrives as `null` on a new event and as an array once anyone has answered, so it
+is optional twice over. RSVP takes `going` as a **query parameter** with only `true` or `false`;
+there is no value that puts you in `maybe_going`, and withdrawing is the separate
+`rsvp/delete`.
+
+Measured 2026-08-31 against an event created, RSVP'd to, and deleted for the purpose.

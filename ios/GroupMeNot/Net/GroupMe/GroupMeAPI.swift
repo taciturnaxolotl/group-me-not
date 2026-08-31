@@ -203,6 +203,38 @@ actor GroupMeAPI {
         var votes: [String]
     }
 
+    // MARK: - Events
+
+    /// One event.
+    ///
+    /// The conversation id here is the REST one — a group id, or two user ids
+    /// joined with `+` for a DM — which is why it goes through `restID`.
+    func event(_ eventID: String, in conversation: ConversationID) async -> GroupEvent? {
+        guard let convID = try? await restID(for: conversation) else { return nil }
+        let response: EventResponse? = try? await client.get(
+            .v3, "/conversations/\(convID)/events/show",
+            query: ["event_id": eventID], retry: .background)
+        return response?.event
+    }
+
+    /// Say whether you are going.
+    ///
+    /// `going` is a query parameter rather than a body, and there are only two
+    /// values: `true` and `false`. "Maybe" exists in the response as a third
+    /// list but there is no way found to put yourself in it, and withdrawing
+    /// entirely is a separate `DELETE` rather than a third value here.
+    @discardableResult
+    func rsvp(
+        _ going: Bool, to eventID: String, in conversation: ConversationID
+    ) async -> GroupEvent? {
+        guard let convID = try? await restID(for: conversation) else { return nil }
+        let response: EventResponse? = try? await client.post(
+            .v3, "/conversations/\(convID)/events/rsvp",
+            query: ["event_id": eventID, "going": going ? "true" : "false"],
+            body: Optional<Discard>.none, retry: .interactive)
+        return response?.event
+    }
+
     // MARK: - Requests
 
     /// Everything waiting on a decision: message requests and group invitations.
