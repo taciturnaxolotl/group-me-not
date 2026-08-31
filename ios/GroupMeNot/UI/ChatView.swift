@@ -528,26 +528,102 @@ struct ChatView: View {
     }
 
     private var field: some View {
-        HStack(alignment: .bottom, spacing: 4) {
-            TextField("Message", text: $draft, axis: .vertical)
-                .textInputAutocapitalization(.sentences)
-                .lineLimit(1...6)
-                .padding(.leading, 14)
-                .padding(.vertical, 7)
-                .focused($composerFocused)
-                .accessibilityLabel("Message")
-                .onChange(of: draft) { _, text in
-                    // Throttled inside the socket client, so every keystroke
-                    // calling this is the intended usage.
-                    guard !text.isEmpty else { return }
-                    Task { await model.userIsTyping() }
-                }
+        VStack(alignment: .leading, spacing: 0) {
+            if !staged.isEmpty {
+                stagedStrip
+                // The whole reason the tray lives inside the field rather than
+                // above it. A photo waiting to be sent is part of the message
+                // being written, and a hairline is enough to say "these two
+                // things go together, and one of them is the words".
+                Divider().padding(.leading, 14)
+            }
 
-            sendButton
+            HStack(alignment: .bottom, spacing: 4) {
+                TextField("Message", text: $draft, axis: .vertical)
+                    .textInputAutocapitalization(.sentences)
+                    .lineLimit(1...6)
+                    .padding(.leading, 14)
+                    .padding(.vertical, 7)
+                    .focused($composerFocused)
+                    .accessibilityLabel("Message")
+                    .onChange(of: draft) { _, text in
+                        // Throttled inside the socket client, so every keystroke
+                        // calling this is the intended usage.
+                        guard !text.isEmpty else { return }
+                        Task { await model.userIsTyping() }
+                    }
+
+                sendButton
+            }
         }
-        .glassEffect(.regular, in: .capsule)
+        // A rounded rectangle rather than a capsule, because a capsule around a
+        // field carrying a row of photos is a stadium: the radius follows the
+        // height, and the taller it gets the more the ends bow out. At a single
+        // line's height this is within a point of the capsule it replaces.
+        .glassEffect(.regular, in: .rect(cornerRadius: 20, style: .continuous))
         .animation(.snappy(duration: 0.18), value: canSend)
+        .animation(.snappy(duration: 0.22), value: staged)
     }
+
+    /// The photos and videos waiting to go with this message.
+    ///
+    /// Horizontal and scrolling, so picking eight makes the row longer rather
+    /// than making the composer taller. Each carries its own way out: a staged
+    /// photo is a decision that has not been committed to yet, and a decision
+    /// you cannot reverse is a decision you have to send.
+    private var stagedStrip: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(staged) { item in
+                    stagedChip(item)
+                        .transition(.scale(scale: 0.7).combined(with: .opacity))
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            .padding(.bottom, 9)
+        }
+        .scrollIndicators(.hidden)
+        .scrollBounceBehavior(.basedOnSize)
+    }
+
+    private func stagedChip(_ item: PickedMedia) -> some View {
+        // The poster frame first: a video's own URL is a movie, and no image
+        // loader makes a thumbnail out of one.
+        RemoteImage(url: item.previewURL ?? item.fileURL, maxPixelSize: Self.chipSide * 3) {
+            Rectangle().fill(.quaternary)
+        }
+        .frame(width: Self.chipSide, height: Self.chipSide)
+        .clipShape(.rect(cornerRadius: 10, style: .continuous))
+        .overlay(alignment: .bottomLeading) {
+            if item.kind == .video {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(4)
+                    .background(.black.opacity(0.45), in: .circle)
+                    .padding(4)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            Button {
+                staged.removeAll { $0.id == item.id }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 18, height: 18)
+                    .background(.black.opacity(0.55), in: .circle)
+            }
+            .buttonStyle(.plain)
+            .padding(3)
+            .accessibilityLabel("Remove attachment")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(item.kind == .video ? "Video attachment" : "Photo attachment")
+    }
+
+    private static let chipSide: CGFloat = 56
 
     @ViewBuilder private var sendButton: some View {
         if canSend {
