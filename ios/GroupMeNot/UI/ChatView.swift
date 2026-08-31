@@ -131,7 +131,7 @@ nonisolated enum Transcript {
             // `body`. This whole function runs off the main actor; see
             // `ChatView.rebuild()`.
             let own = isOwn(message, myID: myID)
-            let text = MessageTextParser.parse(message)
+            let text = message.announcesItsAttachment ? .empty : MessageTextParser.parse(message)
 
             rows.append(.message(MessageDisplay(
                 // Already unique: history carries a server id, and an echo

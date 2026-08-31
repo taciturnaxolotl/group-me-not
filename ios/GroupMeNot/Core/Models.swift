@@ -75,6 +75,21 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
         return remaining.isEmpty ? nil : remaining
     }
 
+    /// True when the text is the server's own announcement of something that
+    /// draws itself.
+    ///
+    /// A poll or an event arrives with text like "Kieran created event 'Dinner'",
+    /// written by GroupMe rather than by anybody. Under a card that already
+    /// carries the name, the date and the buttons, it is the same sentence
+    /// twice.
+    ///
+    /// Only in the transcript. The conversation list still shows it, because
+    /// there the alternative is the bare word "Poll" and the sentence is the
+    /// more useful of the two.
+    var announcesItsAttachment: Bool {
+        (attachments ?? []).contains { $0.type == "poll" || $0.type == "event" }
+    }
+
     /// The message this one is a reply to, if it is one.
     ///
     /// The attachment, and *only* the attachment.
