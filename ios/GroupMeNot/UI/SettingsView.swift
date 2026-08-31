@@ -14,6 +14,9 @@ struct SettingsView: View {
     @State private var isSignOutPresented = false
     @State private var isClearCachePresented = false
     @State private var isClearing = false
+    /// Nil until measured. A zero would be a claim, and the measurement takes a
+    /// moment on a full library.
+    @State private var cacheSize: Int64?
 
     var body: some View {
         NavigationStack {
@@ -23,6 +26,7 @@ struct SettingsView: View {
                 storage
                 about
             }
+            .task { await measure() }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -55,6 +59,7 @@ struct SettingsView: View {
                     Task {
                         await model.clearCache()
                         isClearing = false
+                        await measure()
                     }
                 }
                 Button("Cancel", role: .cancel) {}
@@ -128,6 +133,15 @@ struct SettingsView: View {
     /// the only part a person needs to be sure of before tapping a red button.
     private var storage: some View {
         Section {
+            LabeledContent("On This Phone") {
+                if let cacheSize {
+                    Text(cacheSize.formatted(.byteCount(style: .file)))
+                        .monospacedDigit()
+                } else {
+                    ProgressView()
+                }
+            }
+
             Button(role: .destructive) {
                 isClearCachePresented = true
             } label: {
@@ -152,6 +166,15 @@ struct SettingsView: View {
         Section("About") {
             LabeledContent("Version", value: Self.version)
         }
+    }
+
+    /// Off the main actor: it walks a directory, and on a phone that has been
+    /// scrolling photographs for a month that directory is not small.
+    private func measure() async {
+        let file = model.store.file
+        cacheSize = await Task.detached(priority: .utility) {
+            Store.diskUsage(of: file)
+        }.value
     }
 
     /// Marketing version and build, straight off the bundle, so a bug report

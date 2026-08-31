@@ -268,6 +268,20 @@ actor ImageLoader {
     }
 
     /// The decoded image if we already have it. Safe to call from `body`.
+    /// Throw away both layers: the decoded images in memory and the bytes
+    /// `URLCache` is holding on disk.
+    ///
+    /// The second is the one that matters to a person looking at how much room
+    /// this app uses. A transcript of photographs is almost entirely `URLCache`,
+    /// and clearing everything *except* it would leave the number on the
+    /// settings screen barely moving — which reads as a button that does not
+    /// work rather than one whose scope was narrow.
+    func clear() {
+        memory.removeAll()
+        session.configuration.urlCache?.removeAllCachedResponses()
+        URLCache.shared.removeAllCachedResponses()
+    }
+
     nonisolated func cached(_ request: Request) -> UIImage? {
         memory.value(forKey: request.cacheKey)
     }
@@ -319,6 +333,8 @@ nonisolated private final class ImageMemoryCache: @unchecked Sendable {
         cache.countLimit = 500
         cache.totalCostLimit = 64 * 1024 * 1024
     }
+
+    func removeAll() { cache.removeAllObjects() }
 
     func value(forKey key: String) -> UIImage? {
         cache.object(forKey: key as NSString)

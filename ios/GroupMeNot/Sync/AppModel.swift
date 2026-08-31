@@ -1012,6 +1012,10 @@ final class AppModel {
         let rows = (try? await store.conversations.list(limit: 5000)) ?? []
         for row in rows { try? await store.conversations.delete(row.id) }
         await previews.clear()
+        // The pictures, which are the bulk of it. Everything above is rows in a
+        // database and measures in kilobytes; a month of photographs measures in
+        // hundreds of megabytes and lives in `URLCache`.
+        await ImageLoader.shared.clear()
         // The tips are a memory of what the list said a moment ago, and every
         // head they name has just been deleted. Left in place they would make
         // the next list read as "advanced by one" and write a placeholder over
