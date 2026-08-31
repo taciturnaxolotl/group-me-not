@@ -50,6 +50,36 @@ final class AppSettings {
 
     private enum Key {
         static let ownMessageAlignment = "sh.dunkirk.GroupMeNot.settings.ownMessageAlignment"
+        static let pinned = "sh.dunkirk.GroupMeNot.settings.pinnedConversations"
+    }
+
+    /// Conversations kept at the top of the list, by storage key.
+    ///
+    /// A device preference, and only that. GroupMe has no notion of a pinned
+    /// conversation — its `pin` routes are about pinning a *message* inside one
+    /// — so there is nothing to sync this with and nothing that could disagree
+    /// with it. An ordered array rather than a set: the order they were pinned
+    /// in is the order they are drawn in, and a set would shuffle them on every
+    /// launch.
+    private(set) var pinned: [String] {
+        didSet { defaults.set(pinned, forKey: Key.pinned) }
+    }
+
+    /// Past this the strip stops being a shortcut and starts being the list
+    /// again, only smaller and without the previews.
+    static let pinLimit = 12
+
+    func isPinned(_ key: String) -> Bool { pinned.contains(key) }
+
+    var canPinMore: Bool { pinned.count < Self.pinLimit }
+
+    /// Newest pin last, so the strip reads in the order things were put there.
+    func togglePin(_ key: String) {
+        if let index = pinned.firstIndex(of: key) {
+            pinned.remove(at: index)
+        } else if canPinMore {
+            pinned.append(key)
+        }
     }
 
     var ownMessageAlignment: OwnMessageAlignment {
@@ -67,5 +97,6 @@ final class AppSettings {
         // failing, which is what makes it safe to add cases later.
         self.ownMessageAlignment = defaults.string(forKey: Key.ownMessageAlignment)
             .flatMap(OwnMessageAlignment.init(rawValue:)) ?? .sided
+        self.pinned = defaults.stringArray(forKey: Key.pinned) ?? []
     }
 }

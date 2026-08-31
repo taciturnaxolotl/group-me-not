@@ -10,6 +10,7 @@ import SwiftUI
 /// never something the list waits on.
 struct ConversationListView: View {
     @Environment(AppModel.self) private var model
+    @Environment(AppSettings.self) private var settings
 
     @State private var path: [ConversationRow] = []
     @State private var query = ""
@@ -55,6 +56,7 @@ struct ConversationListView: View {
         List {
             titleHeader
             searchField
+            if !pinnedRows.isEmpty && query.isEmpty { pinnedStrip }
             ForEach(entries) { entry in
                 SwiftUI.Group {
                     if entry.isExpandable {
@@ -94,6 +96,20 @@ struct ConversationListView: View {
                         )
                     }
                     .tint(.indigo)
+
+                    if !entry.indented {
+                        let key = entry.row.id.storageKey
+                        let isPinned = settings.isPinned(key)
+                        Button {
+                            settings.togglePin(key)
+                        } label: {
+                            Label(isPinned ? "Unpin" : "Pin", systemImage: isPinned ? "pin.slash.fill" : "pin.fill")
+                        }
+                        .tint(.orange)
+                        // Silently doing nothing at the limit would read as a
+                        // broken swipe, so the action is simply not offered.
+                        .disabled(!isPinned && !settings.canPinMore)
+                    }
                 }
             }
         }
@@ -101,6 +117,7 @@ struct ConversationListView: View {
         // The list is small and entirely local, so the animation is honest:
         // rows really do reorder the instant a message lands.
         .animation(.default, value: entries)
+        .animation(.snappy(duration: 0.25), value: settings.pinned)
     }
 
     /// A local, case- and diacritic-insensitive filter.
@@ -109,6 +126,63 @@ struct ConversationListView: View {
     /// hundreds, so filtering it in memory is a fraction of a millisecond and
     /// spares us a round trip to an actor on every keystroke.
     private var visibleRows: [ConversationRow] { matching }
+
+    /// The pinned conversations, in the order they were pinned.
+    ///
+    /// Resolved against the live list rather than stored whole, so a pinned
+    /// conversation that is renamed or gains an unread is right without the
+    /// preference knowing anything about conversations.
+    private var pinnedRows: [ConversationRow] {
+        let byKey = Dictionary(
+            model.conversations.map { ($0.id.storageKey, $0) },
+            uniquingKeysWith: { first, _ in first })
+        return settings.pinned.compactMap { byKey[$0] }
+    }
+
+    /// Faces along the top, the way iMessage does it.
+    ///
+    /// A picture and a name, and no preview: the point of pinning is to get
+    /// somewhere in one tap, and a preview would make each one as tall as the
+    /// row it replaced. Hidden while searching, because a search should look
+    /// through everything rather than have part of it pinned above the results.
+    private var pinnedStrip: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 76), spacing: 4)], spacing: 12) {
+            ForEach(pinnedRows) { row in
+                NavigationLink(value: row) {
+                    VStack(spacing: 5) {
+                        Avatar(
+                            url: row.avatarURL,
+                            name: row.name,
+                            size: 56,
+                            isGroup: row.isGroup
+                        )
+                        .overlay(alignment: .topTrailing) {
+                            UnreadBadge(count: row.unreadCount, isMuted: row.isMuted)
+                                .offset(x: 6, y: -2)
+                        }
+                        Text(row.name)
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .foregroundStyle(.primary)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    Button(role: .destructive) {
+                        settings.togglePin(row.id.storageKey)
+                    } label: {
+                        Label("Unpin", systemImage: "pin.slash.fill")
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 14)
+        .listRowInsets(EdgeInsets())
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+    }
 
     private func toggle(_ row: ConversationRow) {
         let id = row.id.remoteID
@@ -129,7 +203,7 @@ struct ConversationListView: View {
         guard !byParent.isEmpty else { return rows.map { Entry(row: $0) } }
 
         var out: [Entry] = []
-        for row in rows where !row.isTopic {
+        for row in rows where !row.isTopic && !isPinnedAndShown(row) {
             guard case .group(let id) = row.id, let topics = byParent[id], !topics.isEmpty else {
                 out.append(Entry(row: row))
                 continue
@@ -153,6 +227,13 @@ struct ConversationListView: View {
             .filter { !shown.contains($0.id) }
             .map { Entry(row: $0) })
         return out
+    }
+
+    /// A pinned conversation is drawn in the strip instead of in the list, but
+    /// only while the strip is on screen: a search hides the strip, and hiding
+    /// the row as well would be a search that cannot find a pinned chat.
+    private func isPinnedAndShown(_ row: ConversationRow) -> Bool {
+        query.isEmpty && settings.isPinned(row.id.storageKey)
     }
 
     /// One drawn row. A conversation can appear twice — once as the header for
