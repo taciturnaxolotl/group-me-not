@@ -13,6 +13,13 @@ struct GroupMeNotApp: App {
             RootView()
                 .environment(model)
                 .task { await model.bootstrap() }
+                // The badge follows the unread total wherever it changes: a
+                // sync, a push, or opening a conversation. Driven from here
+                // rather than the model so the model keeps knowing nothing about
+                // UIKit.
+                .onChange(of: model.totalUnread, initial: true) { _, count in
+                    Task { await Notifier.shared.setBadge(count) }
+                }
                 .onChange(of: scenePhase) { _, phase in
                     // Faye replays nothing it missed, so coming back from the
                     // background means running the whole catch-up loop again.
