@@ -168,7 +168,9 @@ struct ConversationListView: View {
         .padding(.vertical, 9)
         .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 12, style: .continuous))
         .padding(.horizontal, 16)
-        .padding(.bottom, 6)
+        // The list rows carry 8 of their own, so this is what actually separates
+        // the field from the first conversation rather than the whole gap.
+        .padding(.bottom, 14)
         .listRowInsets(EdgeInsets())
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
