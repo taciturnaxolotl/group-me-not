@@ -161,6 +161,48 @@ actor GroupMeAPI {
         return page.sorted { Message.isNewer($1.id, than: $0.id) }
     }
 
+    /// This account's contacts.
+    ///
+    /// Blocked people are asked for and then dropped rather than left to the
+    /// server's default, because the default has changed between clients and an
+    /// invite list is the last place a blocked contact should turn up.
+    func relationships() async throws -> [Relationship] {
+        do {
+            let people: [Relationship] = try await client.get(
+                .v4, "/relationships",
+                query: ["include_blocked": "true"], retry: .background)
+            return people.filter { $0.blocked != true && $0.userId != nil }
+        } catch APIError.noContent {
+            return []
+        }
+    }
+
+    /// Invite people to a group.
+    ///
+    /// Answers with a result id rather than a result: the server queues the
+    /// additions and the caller is expected to poll
+    /// `/v4/groups/{id}/members/results/{resultId}`. Nothing here polls, and
+    /// that is deliberate — the membership shows up in the next roster fetch,
+    /// which happens on the next open, and inventing a progress screen for it
+    /// would be inventing a wait the user does not have.
+    func addMembers(_ people: [AddMemberRequest.Person], to groupID: String) async throws {
+        guard !people.isEmpty else { return }
+        try await client.postIgnoringResponse(
+            .v3, "/groups/\(groupID)/members/add",
+            body: AddMemberRequest(members: people), retry: .interactive)
+    }
+
+    nonisolated struct AddMemberRequest: Encodable, Sendable {
+        var members: [Person]
+
+        nonisolated struct Person: Encodable, Sendable {
+            var userId: String
+            /// Required by the endpoint. The person's own name is the only
+            /// honest default; a group can rename them afterwards.
+            var nickname: String
+        }
+    }
+
     /// The topics inside a group.
     ///
     /// The only way to see them. Subgroups never appear in `GET /v3/groups`, and

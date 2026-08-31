@@ -10,7 +10,10 @@ struct ConversationInfoView: View {
     let conversation: ConversationRow
     let members: [Member]
 
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+
+    @State private var isInvitePresented = false
 
     var body: some View {
         NavigationStack {
@@ -38,6 +41,9 @@ struct ConversationInfoView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
+            }
+            .sheet(isPresented: $isInvitePresented) {
+                InvitePeopleView(conversation: conversation, alreadyIn: members)
             }
         }
     }
@@ -69,14 +75,14 @@ struct ConversationInfoView: View {
                     .accessibilityLabel("Join code")
             }
 
-            ShareLink(item: url) {
+            Button {
+                isInvitePresented = true
+            } label: {
                 Label("Invite People", systemImage: "person.badge.plus")
             }
 
-            Button {
-                UIPasteboard.general.url = url
-            } label: {
-                Label("Copy Link", systemImage: "link")
+            ShareLink(item: url) {
+                Label("Share Link", systemImage: "square.and.arrow.up")
             }
             if conversation.requiresApproval == true {
                 Label("New members need approval", systemImage: "checkmark.shield")

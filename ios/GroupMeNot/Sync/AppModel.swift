@@ -592,6 +592,36 @@ final class AppModel {
         await reloadConversations()
     }
 
+    // MARK: - People
+
+    /// This account's contacts, for the invite screen.
+    ///
+    /// Not cached. It is read once when a sheet opens, which is rare enough that
+    /// a column to keep it in would be a column that is wrong more often than it
+    /// is read.
+    func contacts() async -> [Relationship] {
+        (try? await api.relationships()) ?? []
+    }
+
+    /// Add people to a group. True when the server took them.
+    ///
+    /// The roster is not written here. GroupMe queues the additions behind a
+    /// result id, so the membership becomes true a moment later on their side,
+    /// and the next roster fetch is what learns it. Writing an optimistic member
+    /// row would be claiming something we have not been told.
+    func invite(_ people: [GroupMeAPI.AddMemberRequest.Person], to groupID: String) async -> Bool {
+        do {
+            try await api.addMembers(people, to: groupID)
+            // Ask for the roster now rather than at the next open, so the sheet
+            // that raised this closes onto a list that is about to be right.
+            await sync.catchUp(.group(groupID))
+            return true
+        } catch {
+            log.notice("could not add members: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
+    }
+
     // MARK: - Reactions
 
     /// What a tap on a chip or a glyph means.

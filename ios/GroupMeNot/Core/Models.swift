@@ -653,6 +653,21 @@ nonisolated struct Chat: Codable, Hashable, Sendable {
     }
 }
 
+/// Somebody this account knows: a GroupMe contact.
+///
+/// `GET /v4/relationships` is the address book, and it is the only list of
+/// people an invite screen can search that is not simply "everyone in some
+/// other group".
+nonisolated struct Relationship: Codable, Identifiable, Hashable, Sendable {
+    var userId: String?
+    var name: String?
+    var avatarUrl: String?
+    var appInstalled: Bool?
+    var blocked: Bool?
+
+    var id: String { userId ?? name ?? UUID().uuidString }
+}
+
 nonisolated struct CurrentUser: Codable, Hashable, Sendable {
     var id: String
     var name: String?
