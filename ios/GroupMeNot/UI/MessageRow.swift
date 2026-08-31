@@ -585,38 +585,64 @@ private struct AttachmentStack: View {
     /// what keeps the one underneath legible instead of merely hidden.
     @ViewBuilder private var pictureStack: some View {
         if pictures.count == 1 {
-            thumbnail(pictures[0], at: 0)
+            MediaThumbnail(attachment: pictures[0], heightCap: heightCap)
+                .onTapGesture { viewing = ViewableMedia(id: 0, attachment: pictures[0]) }
         } else if !pictures.isEmpty {
-            VStack(alignment: isTrailing ? .trailing : .leading, spacing: -Self.overlap) {
+            // Placed by hand, and sized by hand, because both halves of that
+            // matter. A `VStack` with negative spacing and `.offset` children
+            // leaves the container describing a different rectangle from the one
+            // its contents actually occupy, and the bubble sizes itself to the
+            // description: the photos spill out of the tint and float above the
+            // message they belong to. Here the frame is the arithmetic, so the
+            // bubble cannot disagree with what is drawn inside it.
+            ZStack(alignment: .topLeading) {
                 ForEach(Array(pictures.enumerated()), id: \.offset) { index, attachment in
-                    thumbnail(attachment, at: index)
+                    MediaThumbnail(
+                        attachment: attachment,
+                        heightCap: heightCap,
+                        reserved: boxes[index])
+                        .shadow(color: .black.opacity(0.22), radius: 5, y: 2)
+                        .offset(x: lean(at: index), y: top(of: index))
                         // Later photos sit on top, so the cascade reads front to
                         // back in the order they were sent.
                         .zIndex(Double(index))
-                        .offset(x: stagger(at: index))
+                        .onTapGesture { viewing = ViewableMedia(id: index, attachment: attachment) }
                 }
             }
-            // The stagger pushes the outer edges past the stack's own bounds;
-            // this is the room that costs.
-            .padding(.horizontal, Self.stagger)
+            .frame(width: stackSize.width, height: stackSize.height, alignment: .topLeading)
         }
     }
 
-    private func thumbnail(_ attachment: Message.Attachment, at index: Int) -> some View {
-        MediaThumbnail(attachment: attachment, heightCap: heightCap)
-            .shadow(color: .black.opacity(pictures.count > 1 ? 0.22 : 0), radius: 5, y: 2)
-            .onTapGesture { viewing = ViewableMedia(id: index, attachment: attachment) }
+    /// Every picture's box, worked out once so the cascade can place them.
+    private var boxes: [CGSize] {
+        pictures.map { MediaThumbnail.reservedBox(for: $0, heightCap: heightCap) }
+    }
+
+    /// Where each photo's top edge sits: the one before it, less the overlap.
+    private func top(of index: Int) -> CGFloat {
+        boxes.prefix(index).reduce(0) { $0 + $1.height - Self.overlap }
+    }
+
+    /// Alternating so the pile does not drift, and shifted into positive space
+    /// so the leftmost photo starts at the container's own edge.
+    private func lean(at index: Int) -> CGFloat {
+        let side = index.isMultiple(of: 2) ? -Self.stagger : Self.stagger
+        return Self.stagger + (isTrailing ? -side : side)
+    }
+
+    /// Exactly the rectangle the photos occupy: the widest of them plus the
+    /// room the stagger needs on both sides, and the foot of the last one.
+    private var stackSize: CGSize {
+        guard let last = boxes.indices.last else { return .zero }
+        return CGSize(
+            width: (boxes.map(\.width).max() ?? 0) + Self.stagger * 2,
+            height: top(of: last) + boxes[last].height)
     }
 
     /// How far each photo leans, alternating so the pile does not drift.
     private static let stagger: CGFloat = 14
     /// How much of the photo above stays covered.
     private static let overlap: CGFloat = 22
-
-    private func stagger(at index: Int) -> CGFloat {
-        let lean = index.isMultiple(of: 2) ? -Self.stagger : Self.stagger
-        return isTrailing ? -lean : lean
-    }
 
     /// The pictures, in order, which is also the order the viewer pages through.
     private var pictures: [Message.Attachment] {
@@ -696,21 +722,29 @@ private struct MediaThumbnail: View {
     let attachment: Message.Attachment
     /// The tallest this photo may draw, decided by how many are in the message.
     var heightCap: CGFloat = 320
+    /// The exact box to draw in, when the caller has already worked it out.
+    ///
+    /// A cascade has to know every photo's height to place the next one, so the
+    /// stack computes them all and hands each thumbnail its own. That also
+    /// settles the sizes for good: `measured` is skipped, because a photo that
+    /// resized itself after loading would slide out from under the one drawn on
+    /// top of it.
+    var reserved: CGSize?
 
     /// The widest a photo draws. A little under half the narrowest phone in
     /// portrait, which leaves the gutter, the avatar and the padding room on
     /// every device rather than only on big ones.
-    private static let maxWidth: CGFloat = 240
+    static let maxWidth: CGFloat = 240
     /// Small pictures draw at life size rather than blown up, but not so small
     /// that they stop being a tap target.
-    private static let minWidth: CGFloat = 96
+    static let minWidth: CGFloat = 96
 
     /// The box used when the URL declares no dimensions: older messages, other
     /// hosts, and the local `file://` URL a queued upload points at. Roughly
     /// the 4:3 a phone camera produces. Guessing a shape would be worse than
     /// admitting we do not know one, so this stays the fallback and only the
     /// fallback.
-    private static let fallback = CGSize(width: 232, height: 174)
+    static let fallback = CGSize(width: 232, height: 174)
 
     /// What the pixels turned out to be, for the URLs that declare nothing.
     /// Nil for the ones that do, because then there is nothing to correct.
@@ -752,10 +786,10 @@ private struct MediaThumbnail: View {
     /// means a full-page screenshot. That one is widened to `minWidth` and
     /// allowed to run past the height cap, where it is cropped: a 50-point
     /// ribbon of a screenshot is not a picture anybody can see.
-    private func box(for size: CGSize) -> CGSize {
-        guard size.width > 0, size.height > 0 else { return Self.fallback }
-        let shrink = min(Self.maxWidth / size.width, heightCap / size.height, 1)
-        let width = max(size.width * shrink, Self.minWidth)
+    static func box(for size: CGSize, heightCap: CGFloat) -> CGSize {
+        guard size.width > 0, size.height > 0 else { return fallback }
+        let shrink = min(maxWidth / size.width, heightCap / size.height, 1)
+        let width = max(size.width * shrink, minWidth)
         let height = min(size.height * width / size.width, heightCap)
         return CGSize(width: width.rounded(), height: height.rounded())
     }
@@ -763,15 +797,23 @@ private struct MediaThumbnail: View {
     /// The URL's own account of its shape, or the pixels' if the URL kept quiet,
     /// or the fallback until either turns up.
     private var box: CGSize {
+        if let reserved { return reserved }
         guard let size = MediaDimensions.declared(in: url) ?? measured else { return Self.fallback }
-        return box(for: size)
+        return Self.box(for: size, heightCap: heightCap)
+    }
+
+    /// The box a photo will occupy, without drawing it. The cascade asks this
+    /// for every picture before laying any of them out.
+    static func reservedBox(for attachment: Message.Attachment, heightCap: CGFloat) -> CGSize {
+        guard let size = MediaDimensions.declared(in: url(of: attachment)) else { return fallback }
+        return box(for: size, heightCap: heightCap)
     }
 
     /// Correct the reservation, but only where there was nothing to reserve it
     /// from. A URL that declared its size was right the first time, and letting
     /// the pixels re-decide would move a row that had settled.
     private func adopt(_ size: CGSize) {
-        guard MediaDimensions.declared(in: url) == nil, measured != size else { return }
+        guard reserved == nil, MediaDimensions.declared(in: url) == nil, measured != size else { return }
         measured = size
     }
 
@@ -782,7 +824,9 @@ private struct MediaThumbnail: View {
     /// of these are `file://` URLs into the vault, which the loader reads
     /// exactly as happily as an HTTPS one; that is what lets one renderer draw a
     /// photo that is still on the phone and one that came back from GroupMe.
-    private var url: URL? {
+    private var url: URL? { Self.url(of: attachment) }
+
+    static func url(of attachment: Message.Attachment) -> URL? {
         let candidate = attachment.previewUrl ?? attachment.url ?? attachment.sourceUrl
         return candidate.flatMap(URL.init(string:))
     }
