@@ -89,20 +89,24 @@ struct SettingsView: View {
     private var account: some View {
         Section("Account") {
             if let user = model.currentUser {
-                HStack(spacing: 12) {
-                    Avatar(url: user.imageUrl, name: user.name ?? "?", size: 40)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(user.name ?? "Signed in")
-                            .font(.body)
-                        if let detail = user.email ?? user.phoneNumber {
-                            Text(detail)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                NavigationLink {
+                    ProfileView()
+                } label: {
+                    HStack(spacing: 12) {
+                        Avatar(url: user.imageUrl, name: user.name ?? "?", size: 40)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(user.name ?? "Signed in")
+                                .font(.body)
+                            if let detail = user.email ?? user.phoneNumber {
+                                Text(detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
+                    .padding(.vertical, 2)
                 }
-                .padding(.vertical, 2)
-                .accessibilityElement(children: .combine)
+                .accessibilityHint("Edit your profile")
             } else {
                 Text("Not signed in")
                     .foregroundStyle(.secondary)

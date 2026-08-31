@@ -161,6 +161,53 @@ actor GroupMeAPI {
         return page.sorted { Message.isNewer($1.id, than: $0.id) }
     }
 
+    // MARK: - Profile
+
+    /// Change the parts of your own profile GroupMe lets you change.
+    ///
+    /// On the legacy host, and shaped `{ "user": { … } }`, which is the only
+    /// update route the official client uses: there is no `/v3/users/update`.
+    /// Only the fields passed are sent, so a caller changing a bio cannot
+    /// accidentally blank a name it did not look at.
+    func updateProfile(
+        name: String? = nil, bio: String? = nil, avatarURL: String? = nil,
+        zipCode: String? = nil
+    ) async throws -> CurrentUser? {
+        let id: String
+        if let known = currentUserID {
+            id = known
+        } else {
+            id = try await me().id
+        }
+        var fields: [String: String] = [:]
+        if let name { fields["name"] = name }
+        if let bio { fields["bio"] = bio }
+        if let avatarURL { fields["avatar_url"] = avatarURL }
+        if let zipCode { fields["zip_code"] = zipCode }
+        guard !fields.isEmpty else { return nil }
+
+        try await client.postIgnoringResponse(
+            .legacy, "/users/\(id)", body: ProfileUpdate(user: fields), retry: .interactive)
+        // The response shape is not documented, so the truth comes from asking
+        // again rather than from parsing a guess.
+        return try? await me()
+    }
+
+    private nonisolated struct ProfileUpdate: Encodable, Sendable {
+        var user: [String: String]
+    }
+
+    /// The one account-level preference the client exposes.
+    func setFriendSuggestable(_ suggestable: Bool) async throws {
+        try await client.postIgnoringResponse(
+            .v3, "/users/me/settings",
+            body: FriendSuggestable(friendSuggestable: suggestable), retry: .interactive)
+    }
+
+    private nonisolated struct FriendSuggestable: Encodable, Sendable {
+        var friendSuggestable: Bool
+    }
+
     /// This account's contacts.
     ///
     /// Blocked people are asked for and then dropped rather than left to the

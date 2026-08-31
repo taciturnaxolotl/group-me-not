@@ -118,6 +118,9 @@ final class AppModel {
     private let client: APIClient
     private let api: GroupMeAPI
     private let sends: Outbox
+    /// Shared with the outbox. A profile picture goes up the same way a message
+    /// photo does, and for the same reasons.
+    private let uploads: MediaUploadService
     private let sync: SyncEngine
     private let bayeux: BayeuxClient
     private let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "app")
@@ -175,6 +178,7 @@ final class AppModel {
         let client = APIClient(tokenProvider: provider)
         let api = GroupMeAPI(client: client)
         let uploads = MediaUploadService(tokenProvider: provider)
+        self.uploads = uploads
         let outbox = Outbox(api: api, store: resolved, uploads: uploads)
 
         self.store = resolved
@@ -612,6 +616,68 @@ final class AppModel {
             messages[index] = stored
         }
         await reloadConversations()
+    }
+
+    // MARK: - Profile
+
+    /// Change your own name, bio, photo, or postcode.
+    ///
+    /// The stored identity is replaced with whatever the server says afterwards
+    /// rather than with what was asked for: the two differ when a field is
+    /// rejected or normalised, and the copy every screen reads should be the
+    /// server's.
+    @discardableResult
+    func updateProfile(
+        name: String? = nil, bio: String? = nil, avatarURL: String? = nil,
+        zipCode: String? = nil
+    ) async -> Bool {
+        do {
+            guard let updated = try await api.updateProfile(
+                name: name, bio: bio, avatarURL: avatarURL, zipCode: zipCode)
+            else { return true }
+            remember(updated)
+            return true
+        } catch {
+            log.notice("profile update failed: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
+    }
+
+    /// Put a picked photo up and make it the profile picture.
+    ///
+    /// Two steps because that is what it is: the picture service takes bytes and
+    /// hands back a URL, and the profile takes a URL. Reusing the upload path
+    /// the composer uses means a profile photo is resized on the way out for the
+    /// same reasons a message photo is.
+    func updateAvatar(_ picked: PickedMedia) async -> Bool {
+        do {
+            let media = try await MediaVault.shared.adopt(picked)
+            let uploaded = try await uploads.upload(
+                media, senderID: currentUser?.id, groupID: nil, conversationID: nil)
+            await MediaVault.shared.remove(media)
+            return await updateProfile(avatarURL: uploaded.url)
+        } catch {
+            log.notice("avatar upload failed: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
+    }
+
+    /// Refresh the profile from the server. Used when its screen opens, because
+    /// the fields it shows are ones nothing else in the app reads.
+    func refreshProfile() async {
+        guard let user = try? await api.me() else { return }
+        remember(user)
+    }
+
+    func setFriendSuggestable(_ suggestable: Bool) async -> Bool {
+        do {
+            try await api.setFriendSuggestable(suggestable)
+            await refreshProfile()
+            return true
+        } catch {
+            log.notice("could not change suggestability: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
     }
 
     // MARK: - People

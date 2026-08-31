@@ -674,4 +674,36 @@ nonisolated struct CurrentUser: Codable, Hashable, Sendable {
     var imageUrl: String?
     var email: String?
     var phoneNumber: String?
+    /// A short line about yourself, shown on your profile.
+    var bio: String?
+    var emailVerified: Bool?
+    var createdAt: Int?
+    var locale: String?
+    var zipCode: String?
+    /// Whether GroupMe may offer this account to other people as a suggestion.
+    var friendSuggestable: Bool?
+    var facebookConnected: Bool?
+    var microsoftConnected: Bool?
+    var twitterConnected: Bool?
+    /// The personal link that opens this profile.
+    var shareUrl: String?
+    var mfa: MultiFactor?
+
+    nonisolated struct MultiFactor: Codable, Hashable, Sendable {
+        var enabled: Bool?
+        /// `sms`, `authenticator`, and so on. Named rather than counted, because
+        /// "two-factor is on" is less useful than knowing which second factor.
+        var channels: [Channel]?
+
+        nonisolated struct Channel: Codable, Hashable, Sendable {
+            var type: String?
+            var enabled: Bool?
+        }
+
+        var activeChannels: [String] {
+            (channels ?? []).filter { $0.enabled != false }.compactMap(\.type)
+        }
+    }
+
+    var joined: Date? { createdAt.map { Date(timeIntervalSince1970: TimeInterval($0)) } }
 }
