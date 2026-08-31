@@ -231,6 +231,53 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
             return code
         }
 
+        /// GroupMe is not consistent about the type of these two.
+        ///
+        /// `pack_id` arrives as a JSON number on most messages and as a quoted
+        /// string on some, in the same array, in the same response. The strict
+        /// decoder threw on the string, and because it threw while decoding a
+        /// *page*, one such reaction anywhere in two hundred messages lost the
+        /// entire page: a fresh install would sync seven conversations, fail
+        /// seven times, and show no history at all.
+        ///
+        /// So both are read loosely. A pack id we cannot make a number of
+        /// leaves the reaction without a glyph, which drops that one sticker
+        /// and keeps everything else, and that is the right trade every time.
+        /// Spelled out rather than synthesised, because the custom decoder below
+        /// has to name them and the compiler's version is not visible to it.
+        enum Key: String, CodingKey {
+            case type, code, packId, packIndex, userIds
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: Key.self)
+            type = try container.decodeIfPresent(String.self, forKey: .type)
+            code = try container.decodeIfPresent(String.self, forKey: .code)
+            packId = Self.looseInt(container, .packId)
+            packIndex = Self.looseInt(container, .packIndex)
+            userIds = try container.decodeIfPresent([String].self, forKey: .userIds)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: Key.self)
+            try container.encodeIfPresent(type, forKey: .type)
+            try container.encodeIfPresent(code, forKey: .code)
+            try container.encodeIfPresent(packId, forKey: .packId)
+            try container.encodeIfPresent(packIndex, forKey: .packIndex)
+            try container.encodeIfPresent(userIds, forKey: .userIds)
+        }
+
+        private static func looseInt(
+            _ container: KeyedDecodingContainer<Key>, _ key: Key
+        ) -> Int? {
+            // `try?` flattens the double optional, so a missing key and a
+            // wrong type both arrive here as nil. Neither needs telling apart:
+            // the string attempt answers nil for a missing key too.
+            if let number = try? container.decodeIfPresent(Int.self, forKey: key) { return number }
+            guard let text = try? container.decodeIfPresent(String.self, forKey: key) else { return nil }
+            return Int(text)
+        }
+
         /// Spelled out because the glyph initialiser below suppresses the one
         /// the compiler would have written.
         init(

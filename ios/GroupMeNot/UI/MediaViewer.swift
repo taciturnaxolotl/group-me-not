@@ -87,7 +87,17 @@ struct MediaViewer: View {
             Color.clear.frame(width: 40, height: 40)
         }
         .padding(.horizontal, 16)
-        .padding(.top, 8)
+        .padding(.vertical, 8)
+        // A band, not just floating buttons. White glyphs over an arbitrary
+        // photo are legible on some pictures and invisible on others, and the
+        // one control that must always be findable is the way out. The material
+        // runs up under the status bar so the clock sits on it too, which is
+        // what makes it read as a bar rather than as a smudge.
+        .background {
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .ignoresSafeArea(edges: .top)
+        }
         .opacity(isChromeVisible ? 1 : 0)
         .animation(.easeInOut(duration: 0.2), value: isChromeVisible)
         .allowsHitTesting(isChromeVisible)
@@ -135,6 +145,19 @@ struct MediaViewer: View {
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 12)
+        .padding(.top, 24)
+        // A wash rather than a bar. There is one button down here and it is
+        // already glass, so it needs separation from the picture and nothing
+        // more; a second opaque band would frame the photo on two sides and
+        // make the screen feel smaller than it is.
+        .background {
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.45)],
+                startPoint: .top, endPoint: .bottom
+            )
+            .ignoresSafeArea(edges: .bottom)
+            .allowsHitTesting(false)
+        }
         .opacity(isChromeVisible ? 1 : 0)
         .animation(.easeInOut(duration: 0.2), value: isChromeVisible)
         .allowsHitTesting(isChromeVisible)
