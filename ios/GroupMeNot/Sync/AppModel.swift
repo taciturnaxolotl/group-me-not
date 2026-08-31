@@ -255,7 +255,14 @@ final class AppModel {
         reachedBeginning = false
         olderPageFailed = false
         await markRead(conversation)
-        await bayeux.focus(on: focusChannels(for: conversation))
+
+        // Both started rather than awaited. The transcript is already on screen
+        // by this point and neither of these changes it: one puts subscribe
+        // frames on a socket that may still be handshaking, the other is a
+        // network round trip. Awaiting them only delays the caller, and the
+        // caller is a view's `.task`.
+        let channels = focusChannels(for: conversation)
+        Task { [bayeux] in await bayeux.focus(on: channels) }
         Task { await self.sync.catchUp(conversation) }
     }
 
@@ -415,12 +422,20 @@ final class AppModel {
 
     /// Subscribe to every topic we know about.
     ///
-    /// Done from here because this is the one place that learns the list
-    /// changed, and it is idempotent: the socket compares the set it already
-    /// holds and sends nothing when it matches.
-    private func followTopics() async {
+    /// Started rather than awaited, and that is the whole point of the shape.
+    /// This is called from the list reload, which the transcript reload runs
+    /// *after*; awaiting it put a handful of subscribe frames on the socket
+    /// between a conversation being opened and its messages appearing. On a cold
+    /// start the socket is still handshaking, so those frames wait, and the
+    /// transcript waited with them — a few seconds of an open conversation with
+    /// nothing in it.
+    ///
+    /// Nothing depends on the result. It is idempotent, so a call that overlaps
+    /// another simply finds the set already correct and sends nothing.
+    private func followTopics() {
         let topics = conversations.filter(\.isTopic).map(\.id)
-        await bayeux.follow(topics: topics)
+        guard !topics.isEmpty else { return }
+        Task { [bayeux] in await bayeux.follow(topics: topics) }
     }
 
     /// The conversations to follow while this one is open.
@@ -1036,7 +1051,7 @@ final class AppModel {
 
     private func reloadConversations() async {
         if let rows = try? await store.conversations.list() { conversations = rows }
-        await followTopics()
+        followTopics()
         if let unread = try? await store.conversations.totalUnread() { totalUnread = unread }
         // The roster arrives on the same notification the list does, because a
         // group fetch writes both. Re-reading it here is what lets an open
