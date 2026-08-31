@@ -102,13 +102,6 @@ struct ConversationInfoView: View {
             }
         } header: {
             Text("Share")
-        } footer: {
-            // The promise the link actually makes, which is not the same one in
-            // a group that vets arrivals. Saying "anyone can join" of a group
-            // that queues them for an admin would be plainly untrue.
-            Text(conversation.requiresApproval == true
-                 ? "Anyone with this link can ask to join."
-                 : "Anyone with this link can join.")
         }
     }
 
