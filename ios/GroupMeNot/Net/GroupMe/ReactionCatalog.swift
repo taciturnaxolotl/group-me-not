@@ -1,15 +1,22 @@
 import Foundation
 
-/// The reactions a picker offers.
+/// The reactions a picker offers *first*.
 ///
-/// GroupMe does not hardcode this set; the official client pulls it from
-/// `https://cdn.groupme.com/assets/reactions.json?version=<ecs version>` and
-/// caches it. We ship the current list as a static default instead, because a
-/// picker that is empty until the network answers is a picker that fails on the
-/// subway. Refreshing from the CDN would be a strict improvement and never a
-/// prerequisite, which is why nothing here reaches for it yet.
+/// Not the reactions it is limited to. `like_icon` is `{type: "unicode", code}`
+/// on the wire and the official client fills `code` from a full emoji keyboard
+/// (`EmojiPickerFragment` maps `Glyph.Unicode` straight to `type: "unicode"`),
+/// so any emoji is a valid reaction. This is the quick row: the eighteen
+/// `https://cdn.groupme.com/assets/reactions.json` lists, in its order, because
+/// they are the ones people reach for. Everything else lives behind the
+/// picker's More button and comes from ``EmojiCatalog``.
+///
+/// We ship the eighteen as a static default rather than fetching them, because
+/// a picker that is empty until the network answers is a picker that fails on
+/// the subway. Refreshing from the CDN would be a strict improvement and never
+/// a prerequisite, which is why nothing here reaches for it yet.
 nonisolated struct ReactionCatalog: Sendable, Hashable {
-    /// Unicode glyphs, in the order the picker draws them.
+    /// Glyphs, in the order the picker draws them. Unicode, except for a
+    /// group's own like icon, which may be a pack token (``Message/PackGlyph``).
     var glyphs: [String]
 
     /// The 18 reactions the live CDN document lists, in its order.
@@ -34,6 +41,18 @@ nonisolated struct ReactionCatalog: Sendable, Hashable {
         "\u{1FAE6}",         // 🫦
     ])
 
+    /// This catalog with a group's own like icon at the front.
+    ///
+    /// First, because it is the one reaction the group picked on purpose, and
+    /// deduplicated, because a group whose icon is 🔥 should get one 🔥 in the
+    /// row rather than two. Moving it rather than merely inserting it keeps the
+    /// promise the report asked for: the group's glyph is offered first,
+    /// whatever else the row contains.
+    func withLikeIcon(_ icon: Message.Reaction?) -> ReactionCatalog {
+        guard let glyph = icon?.glyph, !glyph.isEmpty else { return self }
+        return ReactionCatalog(glyphs: [glyph] + glyphs.filter { $0 != glyph })
+    }
+
     /// The glyph a plain, bodyless like means.
     ///
     /// Legacy likes have no icon of their own, and every client draws them as a
@@ -47,7 +66,13 @@ nonisolated struct ReactionCatalog: Sendable, Hashable {
     /// that is what the official composer does, and it keeps the message's
     /// `favorited_by` list, which older clients and the likes endpoints still
     /// read, in agreement with what we drew.
+    ///
+    /// A pack token goes back out as the `emoji` shape it came in as, which is
+    /// what makes reacting with a group's own like icon work at all.
     static func icon(for glyph: String) -> GroupMeAPI.LikeIcon? {
-        glyph == plainLike ? nil : .unicode(glyph)
+        if let pack = Message.PackGlyph(token: glyph) {
+            return .emoji(packId: pack.packID, packIndex: pack.index)
+        }
+        return glyph == plainLike ? nil : .unicode(glyph)
     }
 }

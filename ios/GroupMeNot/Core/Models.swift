@@ -53,8 +53,8 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
     /// then the glyph is a legacy convention rather than something we were told.
     ///
     /// The emptiness test is on the raw array, not on what survives drawing: a
-    /// message whose only reaction is a powerup sticker we have no art for has
-    /// been described, and inventing a heart for it would be attributing a glyph
+    /// message whose only reaction is one we cannot draw has still been
+    /// described, and inventing a heart for it would be attributing a glyph
     /// nobody sent.
     var wireReactions: [Reaction] {
         if let reactions, !reactions.isEmpty { return reactions }
@@ -67,8 +67,9 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
     /// Buckets keep the order the server sent, which is the order the reactions
     /// were first used.
     ///
-    /// Reactions we cannot draw (legacy powerup packs, whose art lives behind a
-    /// CDN we do not talk to) are dropped rather than rendered as a blank.
+    /// Legacy powerup reactions survive as pack tokens (see
+    /// ``Reaction/glyph``); anything with no glyph at all is dropped rather
+    /// than rendered as a blank.
     func reactionSummaries(currentUserID: String?) -> [ReactionSummary] {
         var order: [String] = []
         var buckets: [String: [String]] = [:]
@@ -131,7 +132,7 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
             if let index = buckets.firstIndex(where: { $0.glyph == glyph }) {
                 buckets[index].userIds = (buckets[index].userIds ?? []) + [userID]
             } else {
-                buckets.append(Reaction(type: "unicode", code: glyph, userIds: [userID]))
+                buckets.append(Reaction(glyph: glyph, userIds: [userID]))
             }
         }
 
@@ -212,12 +213,88 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
         var packIndex: Int?
         var userIds: [String]?
 
-        /// What to draw, or nil when the reaction is a pack sticker we have no
-        /// art for.
+        /// The opaque key the rest of the app identifies a reaction by.
+        ///
+        /// A unicode reaction is its own key, which is what lets a glyph travel
+        /// through the picker, the outbox and the chips as a plain `String`.
+        /// Pack reactions need a key too, because the alternative is what we
+        /// used to do: return nil and silently drop every powerup reaction on
+        /// the floor. So they get a token, `gm:{pack}:{index}`, which
+        /// ``PackGlyph`` reads back and ``ReactionCatalog/icon(for:)`` turns
+        /// into the right request body. The colon form cannot collide with a
+        /// real emoji, because a unicode reaction is a single grapheme cluster
+        /// and this is not.
         var glyph: String? {
+            if let packGlyph = PackGlyph(self) { return packGlyph.token }
             guard type == nil || type == "unicode" else { return nil }
             guard let code, !code.isEmpty else { return nil }
             return code
+        }
+
+        /// Spelled out because the glyph initialiser below suppresses the one
+        /// the compiler would have written.
+        init(
+            type: String? = nil, code: String? = nil,
+            packId: Int? = nil, packIndex: Int? = nil, userIds: [String]? = nil
+        ) {
+            self.type = type
+            self.code = code
+            self.packId = packId
+            self.packIndex = packIndex
+            self.userIds = userIds
+        }
+
+        /// The wire bucket a glyph belongs in. The inverse of ``glyph``.
+        init(glyph: String, userIds: [String]? = nil) {
+            if let pack = PackGlyph(token: glyph) {
+                self.init(
+                    type: "emoji", code: nil,
+                    packId: pack.packID, packIndex: pack.index, userIds: userIds)
+            } else {
+                self.init(type: "unicode", code: glyph, userIds: userIds)
+            }
+        }
+    }
+
+    /// A legacy powerup reaction: a cell in a pack's sprite sheet rather than a
+    /// character.
+    ///
+    /// These are not a historical curiosity. A group's own like icon is still
+    /// written this way by the official Android client (`GroupLikeIconRequest`
+    /// hardcodes `type: "emoji"`), so a client that understands only unicode
+    /// cannot draw the one reaction a group chose for itself.
+    nonisolated struct PackGlyph: Hashable, Sendable {
+        var packID: Int
+        var index: Int
+
+        /// Distinguishes the token from a real emoji. See ``Reaction/glyph``.
+        static let prefix = "gm:"
+
+        var token: String { "\(Self.prefix)\(packID):\(index)" }
+
+        init(packID: Int, index: Int) {
+            self.packID = packID
+            self.index = index
+        }
+
+        init?(token: String) {
+            guard token.hasPrefix(Self.prefix) else { return nil }
+            let parts = token.dropFirst(Self.prefix.count).split(separator: ":")
+            guard parts.count == 2, let pack = Int(parts[0]), let index = Int(parts[1])
+            else { return nil }
+            self.init(packID: pack, index: index)
+        }
+
+        /// Reads a wire reaction, or a group's `like_icon`, as a pack cell.
+        ///
+        /// `type` is trusted when it is there and inferred from the coordinates
+        /// when it is not, because the system event that announces a like icon
+        /// change carries only `pack_id` and `pack_index`
+        /// (`Message.ReactionIcon` in the Android model).
+        init?(_ reaction: Reaction) {
+            guard let packID = reaction.packId, let index = reaction.packIndex else { return nil }
+            guard reaction.type == nil || reaction.type == "emoji" else { return nil }
+            self.init(packID: packID, index: index)
         }
     }
 
@@ -233,10 +310,35 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
 
         var id: String { glyph }
         var count: Int { userIDs.count }
+
+        /// What VoiceOver should say for the glyph. A pack cell has no name we
+        /// hold, so it is announced by what it is.
+        var spokenGlyph: String {
+            PackGlyph(token: glyph) == nil ? glyph : "sticker"
+        }
     }
 
     nonisolated struct SystemEvent: Codable, Hashable, Sendable {
         var type: String?
+        /// The structured half of a system notice.
+        ///
+        /// `LocalizedData` on the wire, and it is enormous: one union of every
+        /// field every event family needs. Only what we act on is modelled, so
+        /// adding an event means adding a field here and nothing else.
+        var data: EventData?
+
+        nonisolated struct EventData: Codable, Hashable, Sendable {
+            /// The group's new like icon, on `group.like_icon_set` and
+            /// `group.subgroup_like_icon_change`. Absent on `…_removed`, which
+            /// is how the removal is expressed.
+            var likeIcon: Reaction?
+        }
+
+        /// Event types this app acts on beyond the transcript. The rest of the
+        /// vocabulary is in `SystemMessageFamily`, which only needs the prefix.
+        static let likeIconSet = "group.like_icon_set"
+        static let likeIconRemoved = "group.like_icon_removed"
+        static let subgroupLikeIconChanged = "group.subgroup_like_icon_change"
     }
 
     nonisolated struct Attachment: Codable, Hashable, Sendable {
@@ -279,6 +381,15 @@ nonisolated struct Group: Codable, Identifiable, Hashable, Sendable {
     var membersCount: Int?
     var parentId: String?
     var childrenCount: Int?
+
+    /// The reaction this group chose for itself, if it has one.
+    ///
+    /// Same `{type, code, pack_id, pack_index}` shape as a message reaction, so
+    /// it is the same type: a group like icon and a reaction are the same thing
+    /// pointed at different objects, and `POST /v3/groups/{id}/like_icon` takes
+    /// the body `POST …/like` does. In practice it usually arrives as a pack
+    /// icon rather than a character; see ``Message/PackGlyph``.
+    var likeIcon: Message.Reaction?
 
     /// How long after posting a message may still be edited, in seconds.
     ///

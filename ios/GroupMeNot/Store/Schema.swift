@@ -10,7 +10,7 @@ import OSLog
 /// `Message` never needs a migration.
 nonisolated enum Schema {
     /// Bump this and add a `case` to `apply(step:)` for every change.
-    static let version: Int32 = 6
+    static let version: Int32 = 7
 
     private static let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "schema")
 
@@ -53,6 +53,7 @@ nonisolated enum Schema {
         case 4: try db.execute(addPendingReactions)
         case 5: try db.execute(addOutboxMedia)
         case 6: try db.execute(addHistorySynced)
+        case 7: try db.execute(addLikeIcon)
         default:
             throw SQLError(code: 1, message: "no migration defined for schema \(step)", sql: nil)
         }
@@ -292,6 +293,28 @@ nonisolated enum Schema {
          ORDER BY m.sort_key DESC, m.id DESC
          LIMIT 1
     );
+    """
+
+    // MARK: - Version 7
+
+    /// The reaction a group chose for itself.
+    ///
+    /// On disk rather than in memory for the same reason `message_edit_period`
+    /// is: the picker decides what to offer while it draws, and it draws with
+    /// the radio off. A like icon we only learn from a live `GET /v3/groups`
+    /// would be missing exactly when the app is being useful offline, and the
+    /// group's own glyph would silently fall back to everyone else's.
+    ///
+    /// A JSON blob rather than a text column, because the icon is not always a
+    /// character. The official Android client writes group like icons as
+    /// powerup pack coordinates (`GroupLikeIconRequest` hardcodes
+    /// `type: "emoji"`), so the column has to hold `{type, code, pack_id,
+    /// pack_index}` whole. `Message.Reaction` is that shape already.
+    ///
+    /// NULL means "no custom icon", which is a real state a group can return to
+    /// (`group.like_icon_removed`), not merely "unknown".
+    private static let addLikeIcon = """
+    ALTER TABLE conversations ADD COLUMN like_icon BLOB;
     """
 }
 

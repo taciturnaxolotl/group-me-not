@@ -27,6 +27,12 @@ nonisolated struct ConversationRow: Identifiable, Hashable, Sendable {
     /// The matching window for deletion, same rules. Stored now because it comes
     /// down the same fetch; nothing reads it yet.
     var messageDeletionPeriod: Int?
+    /// The reaction this group chose for itself, if it set one.
+    ///
+    /// Carried on the row for the same reason the edit window is: the reaction
+    /// picker offers it first, and it has to be able to do that from local
+    /// storage on a cold start. Always nil for a DM, which cannot have one.
+    var likeIcon: Message.Reaction?
     /// True while all we know is that the conversation exists, because a
     /// message arrived for it before any list fetch did.
     var isPlaceholder: Bool
@@ -117,6 +123,7 @@ actor ConversationStore {
             SQLValue(Date()),
             SQLValue(row.messageEditPeriod),
             SQLValue(row.messageDeletionPeriod),
+            SQLValue(StoreCoding.encodeIfPresent(row.likeIcon)),
         ])
     }
 
@@ -199,6 +206,25 @@ actor ConversationStore {
             "UPDATE conversations SET unread_count = MAX(0, unread_count + ?) WHERE key = ?",
             [SQLValue(amount), SQLValue(conversation.storageKey)]
         )
+    }
+
+    /// Sets, or with `nil` clears, a group's own like icon.
+    ///
+    /// Unconditional, unlike ``upsert(row:)``, which only ever adds knowledge.
+    /// It has to be: `group.like_icon_removed` is a real event and the only way
+    /// to express it is to write NULL over something. A list fetch that omits
+    /// the field means "I did not say", but this caller means "it is gone".
+    func setLikeIcon(_ icon: Message.Reaction?, for conversation: ConversationID) throws {
+        try db.transaction {
+            try ConversationWrites.ensureExists(conversation, in: db)
+            try db.run(
+                "UPDATE conversations SET like_icon = ? WHERE key = ?",
+                [
+                    SQLValue(StoreCoding.encodeIfPresent(icon)),
+                    SQLValue(conversation.storageKey),
+                ]
+            )
+        }
     }
 
     func setMuted(_ conversation: ConversationID, until date: Date?) throws {
@@ -321,7 +347,8 @@ actor ConversationStore {
     nonisolated private static let columns = """
     kind, remote_id, name, avatar_url, last_message_id, last_message_at,
     last_message_preview, last_message_sender, unread_count, last_read_message_id,
-    muted_until, member_count, placeholder, message_edit_period, message_deletion_period
+    muted_until, member_count, placeholder, message_edit_period, message_deletion_period,
+    like_icon
     """
 
     nonisolated private static func decode(_ row: Row) throws -> ConversationRow {
@@ -343,6 +370,7 @@ actor ConversationStore {
             memberCount: row.intOrNil(11),
             messageEditPeriod: row.intOrNil(13),
             messageDeletionPeriod: row.intOrNil(14),
+            likeIcon: StoreCoding.decodeIfPossible(Message.Reaction.self, from: row.dataOrNil(15)),
             isPlaceholder: row.bool(12)
         )
     }
@@ -378,8 +406,8 @@ actor ConversationStore {
         (key, kind, remote_id, name, avatar_url, last_message_id, last_message_sort,
          last_message_at, last_message_preview, last_message_sender, unread_count,
          last_read_message_id, muted_until, member_count, placeholder, synced_at,
-         message_edit_period, message_deletion_period)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         message_edit_period, message_deletion_period, like_icon)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(key) DO UPDATE SET
         name       = COALESCE(excluded.name, conversations.name),
         avatar_url = COALESCE(excluded.avatar_url, conversations.avatar_url),
@@ -407,7 +435,8 @@ actor ConversationStore {
         placeholder = 0,
         synced_at = excluded.synced_at,
         message_edit_period = COALESCE(excluded.message_edit_period, conversations.message_edit_period),
-        message_deletion_period = COALESCE(excluded.message_deletion_period, conversations.message_deletion_period)
+        message_deletion_period = COALESCE(excluded.message_deletion_period, conversations.message_deletion_period),
+        like_icon = COALESCE(excluded.like_icon, conversations.like_icon)
     """
 
     // MARK: - Wire model to row
@@ -431,6 +460,7 @@ actor ConversationStore {
             memberCount: group.membersCount ?? group.members?.count,
             messageEditPeriod: group.messageEditPeriod,
             messageDeletionPeriod: group.messageDeletionPeriod,
+            likeIcon: group.likeIcon,
             isPlaceholder: false
         )
     }
@@ -454,6 +484,8 @@ actor ConversationStore {
             // `/v3/chats` reports no edit or deletion window for a DM.
             messageEditPeriod: nil,
             messageDeletionPeriod: nil,
+            // A DM has no group settings, so no like icon either.
+            likeIcon: nil,
             isPlaceholder: false
         )
     }

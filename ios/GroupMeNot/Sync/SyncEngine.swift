@@ -601,6 +601,7 @@ actor SyncEngine {
                 log.notice("push message with no addressable conversation on \(push.channel, privacy: .public)")
                 return
             }
+            await applyLikeIconChange(from: message, in: conversation)
             do {
                 let isMine = currentUserID != nil && (message.senderId ?? message.userId) == currentUserID
                 let stored = try await store.messages.message(id: message.id, in: conversation)
@@ -678,6 +679,37 @@ actor SyncEngine {
 
         case .typing, .unrecognised:
             break
+        }
+    }
+
+    /// Fold a like-icon change into the conversation row.
+    ///
+    /// A group changing its like icon is not a push type of its own. It arrives
+    /// the way every group setting change does: an ordinary message with
+    /// `system: true` and an `event.type`, carrying the new icon in
+    /// `event.data.like_icon`. That makes this the cheap path. The expensive
+    /// one, a full `GET /v3/groups/{id}`, is never needed for a change we were
+    /// handed outright.
+    ///
+    /// Absence is the removal. `group.like_icon_removed` carries no icon by
+    /// definition, and `group.subgroup_like_icon_change` uses a missing
+    /// `like_icon` to mean the same thing (`MessageUtils` reads a null there as
+    /// the "icon removed" sentence), so both land on a nil write.
+    private func applyLikeIconChange(from message: Message, in conversation: ConversationID) async {
+        let icon: Message.Reaction?
+        switch message.event?.type {
+        case Message.SystemEvent.likeIconSet, Message.SystemEvent.subgroupLikeIconChanged:
+            icon = message.event?.data?.likeIcon
+        case Message.SystemEvent.likeIconRemoved:
+            icon = nil
+        default:
+            return
+        }
+        do {
+            try await store.conversations.setLikeIcon(icon, for: conversation)
+            continuation.yield(.conversations)
+        } catch {
+            log.error("could not store like icon: \(failureText(error), privacy: .public)")
         }
     }
 

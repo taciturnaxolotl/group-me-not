@@ -171,6 +171,10 @@ private struct BubbleRow: View {
 
     @State private var isPickerPresented = false
     @State private var isEditorPresented = false
+    /// Same sequencing as `editWanted`: a sheet raised while the popover is
+    /// still dismissing is a sheet that never appears.
+    @State private var emojiWanted = false
+    @State private var isEmojiBrowserPresented = false
     /// Set by the Edit action and consumed once the popover has actually gone.
     /// Raising a sheet while a popover is still dismissing loses the sheet, so
     /// the two are sequenced rather than fired together.
@@ -267,13 +271,28 @@ private struct BubbleRow: View {
                     isPickerPresented = false
                     onReact(glyph)
                 },
+                onMore: {
+                    emojiWanted = true
+                    isPickerPresented = false
+                },
                 actions: pickerActions)
                 .presentationCompactAdaptation(.popover)
         }
         .onChange(of: isPickerPresented) { _, shown in
-            guard !shown, editWanted else { return }
-            editWanted = false
-            isEditorPresented = true
+            guard !shown else { return }
+            if editWanted {
+                editWanted = false
+                isEditorPresented = true
+            } else if emojiWanted {
+                emojiWanted = false
+                isEmojiBrowserPresented = true
+            }
+        }
+        .sheet(isPresented: $isEmojiBrowserPresented) {
+            EmojiBrowser(selected: mine) { glyph in
+                isEmojiBrowserPresented = false
+                onReact(glyph)
+            }
         }
         .alert("Edit Message", isPresented: $isEditorPresented) {
             TextField("Message", text: $editDraft)

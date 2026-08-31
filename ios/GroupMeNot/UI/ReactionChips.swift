@@ -40,8 +40,7 @@ struct ReactionChips: View {
 
     private func chip(_ summary: Message.ReactionSummary) -> some View {
         HStack(spacing: 2) {
-            Text(summary.glyph)
-                .font(.system(size: height * 0.5))
+            ReactionGlyph(glyph: summary.glyph, size: height * 0.5)
             if summary.count > 1 {
                 Text("\(summary.count)")
                     .font(.caption2.weight(.semibold))
@@ -82,7 +81,7 @@ struct ReactionChips: View {
     static func label(for summary: Message.ReactionSummary) -> String {
         let people = summary.count == 1 ? "1 person" : "\(summary.count) people"
         return summary.reactedByMe
-            ? "\(summary.glyph), \(people) including you"
-            : "\(summary.glyph), \(people)"
+            ? "\(summary.spokenGlyph), \(people) including you"
+            : "\(summary.spokenGlyph), \(people)"
     }
 }

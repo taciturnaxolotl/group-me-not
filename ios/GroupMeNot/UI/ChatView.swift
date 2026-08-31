@@ -24,6 +24,14 @@ nonisolated enum TranscriptRow: Identifiable, Hashable, Sendable {
         case .unreadMarker: Self.unreadMarkerID
         }
     }
+
+    /// Whether this row is something a person sent. Days, dividers and folded
+    /// notices are furniture, and counting them as arrivals would put a badge
+    /// on the jump button for the passing of midnight.
+    var isMessage: Bool {
+        if case .message = self { return true }
+        return false
+    }
 }
 
 /// Where the unread divider goes, and what it says.
@@ -188,17 +196,48 @@ struct ChatView: View {
 
     // MARK: Scroll state
 
-    /// Close enough to the newest message that following along is what the
-    /// reader wants. Further up than this and they are reading history, and
-    /// nothing that arrives is allowed to move the page under them.
-    private static let nearBottomSlack: CGFloat = 80
+    /// The clear strip that closes the transcript. It is the scroll anchor and
+    /// also the thing whose visibility answers "is the reader at the foot", so
+    /// it needs enough height to be a tolerance rather than a hairline.
+    private static let footHeight: CGFloat = 24
 
+    /// Whether the foot of the transcript is on screen.
+    ///
+    /// Observed, not computed. The old test rebuilt the scroll view's maximum
+    /// offset out of content size, container size and insets, which meant it
+    /// had to know which insets the container already accounted for; it got
+    /// that wrong, and every change to the chrome was another chance to get it
+    /// wrong again. Asking the scroll view whether the last row is visible has
+    /// no arithmetic to keep in step with the bars.
+    ///
     /// Starts true because the transcript opens at the newest message.
-    @State private var isNearBottom = true
+    @State private var isAtFoot = true
 
-    /// Something arrived below the fold while the reader was up in the history.
-    /// Drawn as a mark on the jump button and cleared when they get there.
-    @State private var hasNewBelow = false
+    private var isNearBottom: Bool { isAtFoot }
+
+    /// Whether to draw the way back down. Held apart from `isAtFoot` so it can
+    /// settle: it goes true only after the foot has been gone for a moment, and
+    /// false the instant it returns. A flick that overshoots and drops back
+    /// never shows the button at all.
+    @State private var showsJumpButton = false
+    @State private var jumpRevealTask: Task<Void, Never>?
+
+    /// How long the foot has to stay away before the button is offered.
+    private static let jumpRevealDelay = Duration.milliseconds(400)
+
+    /// How many messages have arrived below the fold since the reader left it.
+    /// Drawn as a count on the button, the way Messages does, and cleared when
+    /// they get back to the foot.
+    @State private var newBelowCount = 0
+
+    /// True while the reader's finger, or its momentum, owns the scroll view.
+    /// Nothing may move the content out from under either one.
+    @State private var isUserScrolling = false
+
+    /// A follow that arrived while the finger was down. Held, not dropped: the
+    /// message did land at the foot, and the reader is standing there. It runs
+    /// the moment the scroll view goes quiet.
+    @State private var followWhenStill = false
 
     /// Which end of the content stays put when the content size changes.
     ///
@@ -237,7 +276,11 @@ struct ChatView: View {
     var body: some View {
         transcript
             .background(Color(.systemBackground))
-            .safeAreaInset(edge: .bottom, spacing: 0) { composer }
+            // `safeAreaBar`, not `safeAreaInset`. It insets the transcript in
+            // the same way, but it also tells the scroll view that what sits
+            // there is a *bar*, which is what lets the edge effect dissolve
+            // content under it instead of stopping it dead against a slab.
+            .safeAreaBar(edge: .bottom, spacing: 0) { composer }
             .navigationTitle(conversation.name)
             .navigationBarTitleDisplayMode(.inline)
             // The header belongs to the same sheet of paper as the transcript.
@@ -257,7 +300,7 @@ struct ChatView: View {
             // should not feel it at all, which is what the missing size-change
             // anchor already guarantees.
             .onChange(of: model.isAnyoneTyping) {
-                guard isNearBottom else { return }
+                guard isNearBottom, !isUserScrolling else { return }
                 bottomRequest += 1
             }
     }
@@ -274,34 +317,42 @@ struct ChatView: View {
                     bottomSpacer
                 }
                 .padding(.horizontal, 10)
-                // Real room under the last bubble. Flush against the composer's
-                // safe-area boundary, the last row's long press competes with
-                // the inset view for the same few points and loses about as
-                // often as it wins.
-                .padding(.bottom, 14)
             }
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             // Deliberately optional, and `nil` nearly all the time. See
             // `sizeChangeAnchor`.
             .defaultScrollAnchor(sizeChangeAnchor, for: .sizeChanges)
             .scrollDismissesKeyboard(.interactively)
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-                let maxOffset = geometry.contentSize.height
-                    + geometry.contentInsets.bottom
-                    - geometry.containerSize.height
-                return maxOffset - geometry.contentOffset.y <= Self.nearBottomSlack
-            } action: { _, nearBottom in
-                isNearBottom = nearBottom
-                if nearBottom { hasNewBelow = false }
+            // Content fades out under the composer rather than sliding beneath
+            // a hard edge. This is the other half of `safeAreaBar`; without it
+            // the bar floats over a transcript that is plainly still there.
+            .scrollEdgeEffectStyle(.soft, for: .bottom)
+            .onScrollPhaseChange { _, phase in
+                // `.animating` is us, not them, and must not lock out the
+                // follow that started it.
+                isUserScrolling = phase == .tracking
+                    || phase == .interacting
+                    || phase == .decelerating
+                guard !isUserScrolling, followWhenStill else { return }
+                followWhenStill = false
+                if isNearBottom { bottomRequest += 1 }
             }
             .overlay(alignment: .bottomTrailing) {
                 // The stack is the stable parent the transition needs; the `if`
                 // lives one level down, inside `jumpButton`.
+                // Animated where the state changes rather than here: the
+                // reveal is deliberately delayed, and an implicit animation
+                // bound to the flag would fire the moment the flag flips
+                // regardless of what else the frame is doing.
                 ZStack { jumpButton }
-                    .animation(.snappy(duration: 0.22), value: isNearBottom)
             }
+            // Short and flat rather than springy. A bouncing settle at the
+            // foot is what reads as the transcript overshooting, and several of
+            // these can overlap during a catch-up.
             .onChange(of: bottomRequest) {
-                withAnimation(.snappy) { proxy.scrollTo(bottomAnchor, anchor: .bottom) }
+                withAnimation(.easeOut(duration: 0.22)) {
+                    proxy.scrollTo(bottomAnchor, anchor: .bottom)
+                }
             }
             // Not animated: this is where the conversation opens, not a
             // movement the reader should see happen.
@@ -317,22 +368,50 @@ struct ChatView: View {
     /// that something has arrived. Small, out of the way, and absent entirely
     /// while they are already at the foot.
     @ViewBuilder private var jumpButton: some View {
-        if !isNearBottom {
+        if showsJumpButton {
             Button { bottomRequest += 1 } label: {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(hasNewBelow ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
-                    .frame(width: 32, height: 32)
-                    .background(.regularMaterial, in: .circle)
-                    .overlay {
-                        Circle().strokeBorder(.quaternary, lineWidth: 0.75)
-                    }
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, height: 34)
+                    .glassEffect(.regular.interactive(), in: .circle)
+                    .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
+                    .overlay(alignment: .topTrailing) { unreadBadge }
             }
             .buttonStyle(.plain)
-            .padding(.trailing, 14)
-            .padding(.bottom, 12)
-            .transition(.scale(scale: 0.8).combined(with: .opacity))
-            .accessibilityLabel(hasNewBelow ? "New messages, jump to latest" : "Jump to latest")
+            // Roomier than it was against the old opaque bar. Glass reads as
+            // floating, and something floating needs air around it or the two
+            // pieces look like one broken control.
+            .padding(.trailing, 16)
+            .padding(.bottom, 16)
+            // Fades, and barely grows. A button that pops in at the edge of
+            // vision reads as an alert; this one is a door left ajar.
+            .transition(.opacity.combined(with: .scale(scale: 0.92)))
+            .accessibilityLabel(accessibleJumpLabel)
+        }
+    }
+
+    /// What arrived while the reader was away. A number, not a tint: a colour
+    /// change on a button nobody is looking at says nothing, and the one thing
+    /// worth saying here is how much they have missed.
+    @ViewBuilder private var unreadBadge: some View {
+        if newBelowCount > 0 {
+            Text(newBelowCount > 99 ? "99+" : "\(newBelowCount)")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 5)
+                .frame(minWidth: 18, minHeight: 18)
+                .background(Color.accentColor, in: .capsule)
+                .offset(x: 7, y: -6)
+                .transition(.scale.combined(with: .opacity))
+        }
+    }
+
+    private var accessibleJumpLabel: String {
+        switch newBelowCount {
+        case 0: "Jump to latest"
+        case 1: "1 new message, jump to latest"
+        default: "\(newBelowCount) new messages, jump to latest"
         }
     }
 
@@ -379,10 +458,36 @@ struct ChatView: View {
         }
     }
 
+    /// The foot of the transcript: real room under the last bubble, the anchor
+    /// everything scrolls to, and the sentinel the whole scroll state is read
+    /// from. Flush against the composer, the last row's long press competes
+    /// with the bar for the same few points and loses about as often as it
+    /// wins, so the room is not decoration.
+    ///
+    /// Deaf to touches, deliberately. It is only ever measured.
     private var bottomSpacer: some View {
         Color.clear
-            .frame(height: 1)
+            .frame(height: Self.footHeight)
+            .allowsHitTesting(false)
             .id(bottomAnchor)
+            .onScrollVisibilityChange(threshold: 0.01, footVisibilityChanged)
+    }
+
+    /// The one place scroll position turns into state.
+    private func footVisibilityChanged(_ visible: Bool) {
+        isAtFoot = visible
+        jumpRevealTask?.cancel()
+
+        guard !visible else {
+            newBelowCount = 0
+            withAnimation(.easeInOut(duration: 0.22)) { showsJumpButton = false }
+            return
+        }
+        jumpRevealTask = Task {
+            try? await Task.sleep(for: Self.jumpRevealDelay)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeInOut(duration: 0.22)) { showsJumpButton = true }
+        }
     }
 
     // MARK: Paging
@@ -393,7 +498,20 @@ struct ChatView: View {
     private static let prefetchDistance = 10
 
     @ViewBuilder private var olderHeader: some View {
-        if model.canLoadOlder {
+        if model.olderPageFailed {
+            // The one case that is neither "more is coming" nor "there is no
+            // more": the radio answered nothing. A spinner here would turn a
+            // failed request into a permanent one, so the reader gets a
+            // sentence and a way to ask again instead.
+            Button { requestOlder(retrying: true) } label: {
+                Label("Couldn't load earlier messages", systemImage: "arrow.clockwise")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity)
+        } else if model.canLoadOlder {
             ProgressView()
                 .controlSize(.small)
                 .padding(.vertical, 12)
@@ -423,8 +541,12 @@ struct ChatView: View {
     /// second one, and the flag is cleared on every path out of the load, so a
     /// page that turns up nothing cannot wedge paging shut. The next row to
     /// appear near the top asks again.
-    private func requestOlder() {
+    private func requestOlder(retrying: Bool = false) {
         guard !isLoadingOlder, model.canLoadOlder else { return }
+        // A failed page stays failed until the reader asks again. Retrying it
+        // on every `onAppear` would hammer a dead radio for as long as the
+        // conversation is open.
+        guard retrying || !model.olderPageFailed else { return }
         isLoadingOlder = true
         Task {
             await model.loadOlder()
@@ -440,22 +562,21 @@ struct ChatView: View {
     /// The send control lives *inside* the capsule rather than beside it so the
     /// field keeps its full width while empty, which is the detail that makes
     /// the whole bar read as native rather than approximately native.
+    ///
+    /// There is no background behind any of this, and that is the point. The
+    /// two controls carry their own glass and nothing else is drawn, so the
+    /// transcript runs underneath the bar and dissolves into it rather than
+    /// ending at an opaque edge. The container is what makes the pair read as
+    /// one piece of glass with a gap in it instead of two unrelated lozenges.
     private var composer: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            attachButton
-            field
+        GlassEffectContainer(spacing: 8) {
+            HStack(alignment: .bottom, spacing: 8) {
+                attachButton
+                field
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
-        // The same paper as the transcript, not a bar laid on top of it. This
-        // still stops scrolled content showing through, because `safeAreaInset`
-        // draws in front; it just does not announce itself while doing so.
-        //
-        // `ignoresSafeArea` is not optional here. `safeAreaInset` seats the
-        // composer *above* the home indicator, and a plain colour, unlike the
-        // `.bar` material this replaced, does not reach down into that strip on
-        // its own. Without it the transcript shows through under the composer.
-        .background(Color(.systemBackground).ignoresSafeArea(edges: .bottom))
         .attachmentPicker(isPresented: $isAttachmentPickerPresented) { picked in
             // Staged rather than sent. Picking a photo and then typing a caption
             // is the common case, and sending on pick would make that
@@ -471,7 +592,7 @@ struct ChatView: View {
                 .font(.system(size: 21, weight: .medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 34, height: 34)
-                .background(.quaternary, in: .circle)
+                .glassEffect(.regular.interactive(), in: .circle)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Add attachment")
@@ -495,10 +616,7 @@ struct ChatView: View {
 
             sendButton
         }
-        .background {
-            Capsule().fill(.quaternary.opacity(0.5))
-            Capsule().strokeBorder(.quaternary, lineWidth: 0.75)
-        }
+        .glassEffect(.regular, in: .capsule)
         .animation(.snappy(duration: 0.18), value: canSend)
     }
 
@@ -627,6 +745,7 @@ struct ChatView: View {
     private func teardown() {
         rebuildTask?.cancel()
         anchorResetTask?.cancel()
+        jumpRevealTask?.cancel()
         model.closeConversation()
     }
 
@@ -695,6 +814,9 @@ struct ChatView: View {
             ? !built.isEmpty
             : built.count > rows.count && built.first?.id != rows.first?.id
         let grewBelow = !built.isEmpty && built.last?.id != rows.last?.id
+        // Counted before the assignment, and only over real messages: this is
+        // what the badge on the jump button says.
+        let arrived = built.count(where: \.isMessage) - rows.count(where: \.isMessage)
 
         // The sixth case: a conversation with unreads opens on the divider
         // rather than at the foot. The end anchor is skipped for that fill,
@@ -710,12 +832,20 @@ struct ChatView: View {
         if opensOnDivider { openingTarget = TranscriptRow.unreadMarkerID }
 
         if grewAbove { return }
-        if grewBelow {
-            if isNearBottom {
-                bottomRequest += 1
-            } else {
-                hasNewBelow = true
+        guard grewBelow else { return }
+        guard isNearBottom else {
+            withAnimation(.snappy(duration: 0.2)) {
+                newBelowCount += max(1, arrived)
             }
+            return
+        }
+        // Following is for a reader who is standing still at the foot. While
+        // they are dragging, or coasting, the scroll view is theirs; the follow
+        // waits for them to stop rather than yanking the content mid-gesture.
+        if isUserScrolling {
+            followWhenStill = true
+        } else {
+            bottomRequest += 1
         }
     }
 

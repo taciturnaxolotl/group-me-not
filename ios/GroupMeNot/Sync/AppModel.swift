@@ -39,13 +39,23 @@ final class AppModel {
     /// Network and socket state, for the offline banner.
     let realtime = RealtimeMonitor()
 
-    /// The glyphs the reaction picker offers.
+    /// The glyphs the reaction picker offers first, for the open conversation.
     ///
-    /// A constant today. The official client refreshes this from a CDN
-    /// document, but a picker must never be empty because a request has not
-    /// come back, so the local list is the source and a refresh would only ever
-    /// be an improvement on it.
-    let reactionCatalog = ReactionCatalog.default
+    /// The standard eighteen, except that a group which chose its own like icon
+    /// gets that one at the front: it is the reaction that group actually means,
+    /// so it should be the one under the thumb. Everything else is still
+    /// reachable, from the picker's More button.
+    ///
+    /// A local constant plus a stored column, never a request. The official
+    /// client refreshes the eighteen from a CDN document, but a picker must
+    /// never be empty because a request has not come back, so the local list is
+    /// the source and a refresh would only ever be an improvement on it.
+    var reactionCatalog: ReactionCatalog {
+        guard let openConversationID,
+              let row = conversations.first(where: { $0.id == openConversationID })
+        else { return .default }
+        return ReactionCatalog.default.withLikeIcon(row.likeIcon)
+    }
 
     /// Link previews for the open transcript.
     ///
@@ -77,7 +87,18 @@ final class AppModel {
     @ObservationIgnored private var needsMessageReload = false
     /// True once paging back has run out of history, so the transcript stops
     /// asking for more.
-    @ObservationIgnored private var reachedBeginning = false
+    ///
+    /// Observed, deliberately. `canLoadOlder` is read from a `body` to decide
+    /// whether to draw the "loading earlier messages" spinner, so a change here
+    /// that nothing is watching leaves that spinner turning over a conversation
+    /// that has already reached its beginning.
+    private var reachedBeginning = false
+
+    /// The last attempt to page back failed on the network. Distinct from
+    /// `reachedBeginning`, which means there is genuinely nothing more: this
+    /// one is temporary, and the transcript offers to try again rather than
+    /// pretending it is still loading.
+    private(set) var olderPageFailed = false
     @ObservationIgnored private var typingSweep: Task<Void, Never>?
 
     /// Where the signed-in user is remembered between launches. Small enough for
@@ -178,6 +199,7 @@ final class AppModel {
         members = (try? await store.conversations.members(of: conversation)) ?? []
 
         reachedBeginning = false
+        olderPageFailed = false
         await markRead(conversation)
         await bayeux.focus(on: conversation)
         Task { await self.sync.catchUp(conversation) }
@@ -194,6 +216,7 @@ final class AppModel {
         members = []
         typingUserIDs = [:]
         reachedBeginning = false
+        olderPageFailed = false
         Task { [bayeux] in await bayeux.focus(on: nil) }
     }
 
@@ -206,6 +229,7 @@ final class AppModel {
     func loadOlder() async {
         guard let conversation = openConversationID, !reachedBeginning else { return }
         let oldest = messages.first?.id
+        olderPageFailed = false
         window += Self.transcriptPage
 
         if let stored = await transcript(conversation), stored.count > messages.count {
@@ -229,6 +253,7 @@ final class AppModel {
             // permanently disable paging for the rest of the session, so the
             // window is put back and the next scroll tries again.
             window -= Self.transcriptPage
+            olderPageFailed = true
             log.notice("could not page back in \(conversation.storageKey, privacy: .public): \(failureText(error), privacy: .public)")
             return
         }
