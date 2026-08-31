@@ -255,6 +255,10 @@ struct ChatView: View {
     /// of its topics. Nil until `.task` resolves the remembered one.
     @State private var activeID: ConversationID?
     @State private var isTopicPickerPresented = false
+    /// Set when the transcript is about to be filled for a conversation the
+    /// scroll view has already laid out once, which is what switching topics
+    /// does. See ``apply(_:)``.
+    @State private var needsOpeningScroll = false
     @FocusState private var composerFocused: Bool
 
     // MARK: Scroll state
@@ -1054,6 +1058,7 @@ struct ChatView: View {
         }
 
         activeID = row.id
+        needsOpeningScroll = true
         rebuildTask?.cancel()
         rows = []
         unread = nil
@@ -1230,6 +1235,21 @@ struct ChatView: View {
         // After the assignment, so the row it scrolls to exists by the time the
         // effect runs.
         if opensOnDivider { openingTarget = TranscriptRow.unreadMarkerID }
+
+        // The first fill after switching topics.
+        //
+        // On the first fill of the *view*, the newest message is on screen
+        // because `defaultScrollAnchor(.bottom, for: .initialOffset)` put it
+        // there. Switching topics does not get that: the scroll view has been
+        // laid out already and keeps the offset it had, so a new transcript
+        // arrives showing its oldest message. Asking for the foot here is the
+        // equivalent of that initial anchor, and it defers to the unread divider
+        // when there is one, because that is a better place to land than either.
+        if needsOpeningScroll, !built.isEmpty {
+            needsOpeningScroll = false
+            if !opensOnDivider { bottomRequest += 1 }
+            return
+        }
 
         if grewAbove { return }
         guard grewBelow else { return }

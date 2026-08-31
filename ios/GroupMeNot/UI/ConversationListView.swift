@@ -307,7 +307,14 @@ struct UnreadBadge: View {
     let count: Int
     let isMuted: Bool
 
-    var body: some View {
+    /// Nothing at zero. A badge exists to say "there is something here", so one
+    /// reading "0" is a badge arguing with itself; the callers should not each
+    /// have to remember that.
+    @ViewBuilder var body: some View {
+        if count > 0 { badge }
+    }
+
+    private var badge: some View {
         Text(count > 99 ? "99+" : "\(count)")
             .font(.caption2.weight(.semibold))
             .monospacedDigit()
