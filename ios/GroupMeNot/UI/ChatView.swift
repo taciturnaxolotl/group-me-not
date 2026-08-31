@@ -1550,6 +1550,7 @@ private struct ReactionRoster: View {
                     HStack(spacing: 12) {
                         Avatar(url: person.imageURL, name: person.name, size: 34)
                         Text(person.name)
+                            .lineLimit(1)
                         if person.isYou {
                             Text("You")
                                 .font(.caption)

@@ -247,6 +247,10 @@ private struct BubbleRow: View {
                     Text(item.senderName)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        // One line, truncated. A long nickname above a bubble
+                        // wrapping onto a second line pushes the whole run down
+                        // and reads as a message of its own.
+                        .lineLimit(1)
                         .padding(.horizontal, 12)
                         .padding(.top, 4)
                 }
@@ -426,6 +430,7 @@ private struct BubbleRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(reply.senderName)
                     .font(.caption.weight(.semibold))
+                    .lineLimit(1)
                 Text(reply.text)
                     .font(.caption)
                     .lineLimit(2)

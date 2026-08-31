@@ -39,6 +39,7 @@ struct ConversationInfoView: View {
                 isGroup: conversation.isGroup
             )
             Text(conversation.name)
+                .lineLimit(2)
                 .font(.title2.weight(.semibold))
                 .multilineTextAlignment(.center)
             if let subtitle {
@@ -58,6 +59,7 @@ struct ConversationInfoView: View {
                 HStack(spacing: 12) {
                     Avatar(url: member.imageUrl, name: displayName(member), size: 34)
                     Text(displayName(member))
+                        .lineLimit(1)
                         .lineLimit(1)
                 }
                 .accessibilityElement(children: .combine)
