@@ -413,6 +413,16 @@ final class AppModel {
         return members.first { $0.identity == me }?.canPostInAnnouncements ?? true
     }
 
+    /// Subscribe to every topic we know about.
+    ///
+    /// Done from here because this is the one place that learns the list
+    /// changed, and it is idempotent: the socket compares the set it already
+    /// holds and sends nothing when it matches.
+    private func followTopics() async {
+        let topics = conversations.filter(\.isTopic).map(\.id)
+        await bayeux.follow(topics: topics)
+    }
+
     /// The conversations to follow while this one is open.
     ///
     /// A topic and the group it belongs to, because a topic's messages could
@@ -1026,6 +1036,7 @@ final class AppModel {
 
     private func reloadConversations() async {
         if let rows = try? await store.conversations.list() { conversations = rows }
+        await followTopics()
         if let unread = try? await store.conversations.totalUnread() { totalUnread = unread }
         // The roster arrives on the same notification the list does, because a
         // group fetch writes both. Re-reading it here is what lets an open

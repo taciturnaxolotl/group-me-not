@@ -167,3 +167,25 @@ POST https://v2.groupme.com/push_registrations/destroy
 ```
 
 Note the asymmetry: register nests under `push_registration`, destroy does not.
+
+
+## `/user/{me}` does not carry topics
+
+The personal channel delivers every group and direct message addressed to the account, which
+is what makes an ordinary conversation light up without being open. **Topics are not among
+them.** Confirmed in use: a message posted to a topic produces nothing on `/user/{me}`, so a
+client relying on it alone sees a topic change only at the next REST sync.
+
+`/group/{topicId}` accepts a subscription and so does the parent's `/group/{parentId}`:
+
+```
+/meta/handshake        → successful
+/user/{me}             → successful
+/group/{topicId}       → successful
+/group/{parentId}      → successful
+```
+
+So a client that wants topics live has to subscribe to them itself, one channel per topic, and
+keep those subscriptions for as long as the topics exist rather than only while one is open.
+Routing is unambiguous either way: a topic message's `group_id` is the **topic's own id**, not
+the parent's, so it files correctly whichever channel it arrives on.

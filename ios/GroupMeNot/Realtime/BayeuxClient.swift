@@ -46,8 +46,12 @@ actor BayeuxClient {
     /// Every channel we want to be on. The set is the truth; the socket is a cache
     /// of it, re-applied after each handshake.
     private var desiredChannels: Set<String> = []
-    /// The one conversation channel `focus(on:)` manages, so it can be swapped.
+    /// The channels `focus(on:)` manages, so they can be swapped as the reader
+    /// moves between conversations.
     private var focusChannels: Set<String> = []
+    /// Channels followed for as long as they exist, rather than only while
+    /// their conversation is on screen. See ``follow(topics:)``.
+    private var standingChannels: Set<String> = []
 
     private var adviceTimeout: TimeInterval = 600
     private var lastDisconnectAt: Date?
@@ -163,10 +167,38 @@ actor BayeuxClient {
         guard let userID else { return }
         let wanted = Set(conversations.map { $0.pushChannel(myUserID: userID) })
         guard wanted != focusChannels else { return }
-        for old in focusChannels.subtracting(wanted) { await unsubscribe(from: old) }
+        for old in focusChannels.subtracting(wanted) where !standingChannels.contains(old) {
+            await unsubscribe(from: old)
+        }
         for new in wanted.subtracting(focusChannels) { await subscribe(to: new) }
         focusChannels = wanted
     }
+
+    /// Keep a standing subscription to conversations `/user/{me}` does not
+    /// carry.
+    ///
+    /// Topics are the reason this exists. The personal channel delivers every
+    /// group and direct message addressed to the account, which is why an
+    /// ordinary conversation lights up without being open — and it does not
+    /// deliver topics. A topic that nobody is looking at therefore stayed silent
+    /// until the next sync, which is minutes of a conversation simply not
+    /// arriving.
+    ///
+    /// Capped, because this is one subscription each and an account could in
+    /// principle belong to a great many. Past the cap the sync loop is still the
+    /// backstop it always was.
+    func follow(topics: [ConversationID]) async {
+        guard let userID else { return }
+        let wanted = Set(topics.prefix(Self.standingLimit).map { $0.pushChannel(myUserID: userID) })
+        guard wanted != standingChannels else { return }
+        for old in standingChannels.subtracting(wanted) where !focusChannels.contains(old) {
+            await unsubscribe(from: old)
+        }
+        for new in wanted.subtracting(standingChannels) { await subscribe(to: new) }
+        standingChannels = wanted
+    }
+
+    private static let standingLimit = 64
 
     // MARK: - Publishing
 

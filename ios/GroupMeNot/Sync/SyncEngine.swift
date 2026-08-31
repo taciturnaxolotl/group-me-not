@@ -194,7 +194,7 @@ actor SyncEngine {
             // push has run out ahead of verified history.
             let heads = try await store.conversations.historyHeads()
             let held = try await store.messages.syncHeads()
-            let plans = plan(groups: groups, chats: chats, heads: heads, held: held)
+            let plans = plan(groups: groups, chats: chats, topics: topics, heads: heads, held: held)
             await execute(plans)
 
             // A 409 tells us a queued send landed but not what id it landed
@@ -337,6 +337,7 @@ actor SyncEngine {
     private func plan(
         groups: [Group],
         chats: [Chat],
+        topics: [Subgroup],
         heads: [ConversationID: String],
         held: [ConversationID: String]
     ) -> [Plan] {
@@ -377,6 +378,27 @@ actor SyncEngine {
                     ? Self.previewMessage(for: group, id: remoteHead)
                     : nil
             ))
+        }
+
+        // Topics get the same diff as anything else, and they only get it here.
+        // They are absent from both list endpoints, so without this a topic's
+        // history is whatever a focused catch-up happened to fetch and nothing
+        // ever notices it falling behind.
+        for topic in topics {
+            let id = ConversationID.group(topic.groupID)
+            guard let summary = topic.messages, let remoteHead = summary.lastMessageId
+            else { continue }
+            let localHead = heads[id]
+            let tip = RemoteTip(messageID: remoteHead, count: summary.count)
+            let previous = lastSeenTips[id]
+            lastSeenTips[id] = tip
+
+            guard moved(remote: remoteHead, local: localHead) else { continue }
+            noteGap(id)
+            // No embedded shortcut. A topic's list entry carries a preview with
+            // no sender, same as a group's, and the placeholder that produces is
+            // a bug this file has already had once.
+            plans.append(Plan(conversation: id, localHead: localHead, embedded: nil))
         }
 
         for chat in chats {
