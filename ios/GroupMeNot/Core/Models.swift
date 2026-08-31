@@ -29,6 +29,30 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
     var event: SystemEvent?
 
     var date: Date { Date(timeIntervalSince1970: TimeInterval(createdAt)) }
+
+    /// The message this one is a reply to, if it is one.
+    ///
+    /// Read off the attachment rather than off `parent_id`, because the
+    /// attachment is what the sender actually said and `parent_id` is only
+    /// sometimes filled in. GroupMe threads are flat: `reply_id` is the message
+    /// being answered and `base_reply_id` is the root of the chain, and a client
+    /// that draws one quote wants the former.
+    var replyTargetID: String? {
+        attachments?.first { $0.type == "reply" }?.replyId ?? parentId
+    }
+
+    /// The pair a reply has to send back. Both, because GroupMe keeps the chain
+    /// root as well as the immediate parent, and a reply to a reply that omits
+    /// the root loses the thread.
+    static func replyAttachment(to message: Message) -> Attachment {
+        Attachment(
+            type: "reply",
+            replyId: message.id,
+            // Answering a reply keeps the original root; answering anything else
+            // makes that message the root.
+            baseReplyId: message.attachments?
+                .first { $0.type == "reply" }?.baseReplyId ?? message.id)
+    }
     var isSystem: Bool { system == true }
     var isDeleted: Bool { (deletedAt ?? 0) > 0 }
     var likeCount: Int { favoritedBy?.count ?? 0 }

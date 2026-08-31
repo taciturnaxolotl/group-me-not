@@ -93,6 +93,10 @@ nonisolated enum Transcript {
         let timeline: [(Message, MessageDisplay.Delivery)] =
             messages.map { ($0, .sent) } + echoes
 
+        // One pass, so resolving a quote is a dictionary lookup rather than a
+        // search of the whole transcript per bubble.
+        let byID = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+
         var rows: [TranscriptRow] = []
         rows.reserveCapacity(timeline.count + 8)
 
@@ -134,7 +138,8 @@ nonisolated enum Transcript {
                 delivery: delivery,
                 text: text,
                 styledText: MessageStyling.style(text, isOwn: own),
-                reactions: message.reactionSummaries(currentUserID: myID)
+                reactions: message.reactionSummaries(currentUserID: myID),
+                reply: replyPreview(for: message, in: byID)
             )))
         }
         // Last, over finished rows: the fold only has to look at neighbours
@@ -152,6 +157,42 @@ nonisolated enum Transcript {
         else { return false }
         guard calendar.isDate(previous.date, inSameDayAs: next.date) else { return false }
         return abs(next.date.timeIntervalSince(previous.date)) < runInterval
+    }
+
+    /// The quote to draw above a reply, or nil if this is not one.
+    ///
+    /// A reply whose parent has scrolled out of the loaded window still gets a
+    /// quote, with the little that is known. The alternative is drawing the
+    /// message as though it answered nothing, which is a different message.
+    private static func replyPreview(
+        for message: Message, in byID: [String: Message]
+    ) -> ReplyPreview? {
+        guard let targetID = message.replyTargetID else { return nil }
+        guard let parent = byID[targetID] else {
+            return ReplyPreview(messageID: nil, senderName: "Message", text: "Not loaded")
+        }
+        return ReplyPreview(
+            messageID: parent.id,
+            senderName: parent.name ?? "Someone",
+            text: summarise(parent))
+    }
+
+    /// One line describing a message, for a quote. Text if it has any, and
+    /// otherwise a word for whatever it is instead, because "" in a quote reads
+    /// as a bug.
+    static func summarise(_ message: Message) -> String {
+        if message.isDeleted { return "Deleted message" }
+        if let text = message.text, !text.isEmpty { return text }
+        guard let type = message.attachments?.first(where: { $0.type != "mentions" })?.type
+        else { return "Message" }
+        switch type {
+        case "image", "linked_image": return "Photo"
+        case "video": return "Video"
+        case "audio": return "Voice message"
+        case "file": return "File"
+        case "location": return "Location"
+        default: return "Attachment"
+        }
     }
 
     private static func isOwn(_ message: Message, myID: String?) -> Bool {
@@ -257,6 +298,8 @@ struct ChatView: View {
     @State private var keyboardWasOpen = false
     @State private var editTarget: MessagePress?
     @State private var editDraft = ""
+    /// The message being answered, if the composer is in reply mode.
+    @State private var replyingTo: Message?
 
     @State private var isAttachmentPickerPresented = false
     /// Media the user picked but has not sent yet, shown above the field.
@@ -435,7 +478,8 @@ struct ChatView: View {
             onPress: { frame in
                 pressed = MessagePress(
                     item: item, frame: frame, canEdit: model.canEdit(item.message))
-            }
+            },
+            onOpenReply: { id in openingTarget = id }
         )
     }
 
@@ -479,6 +523,13 @@ struct ChatView: View {
             actions.append(.init("Copy", symbol: "doc.on.doc") {
                 UIPasteboard.general.string = item.text.plain
                 pressed = nil
+            })
+        }
+        if !item.message.isSystem, !item.message.isDeleted, !item.isPending {
+            actions.append(.init("Reply", symbol: "arrowshape.turn.up.left") {
+                pressed = nil
+                replyingTo = item.message
+                composerFocused = true
             })
         }
         if press.canEdit {
@@ -648,6 +699,10 @@ struct ChatView: View {
 
     private var field: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if let replyingTo {
+                replyBanner(replyingTo)
+                Divider().padding(.leading, 14)
+            }
             if !staged.isEmpty {
                 stagedStrip
                 // The whole reason the tray lives inside the field rather than
@@ -682,6 +737,42 @@ struct ChatView: View {
         .glassEffect(.regular, in: .rect(cornerRadius: 20, style: .continuous))
         .animation(.snappy(duration: 0.18), value: canSend)
         .animation(.snappy(duration: 0.22), value: staged)
+    }
+
+    /// What this message will be answering, with a way out.
+    ///
+    /// In the field rather than above it, for the same reason the attachments
+    /// are: the thing being replied to is part of the message being written.
+    private func replyBanner(_ message: Message) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "arrowshape.turn.up.left.fill")
+                .font(.caption)
+                .foregroundStyle(.tint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(message.name ?? "Someone")
+                    .font(.caption.weight(.semibold))
+                Text(Transcript.summarise(message))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            Button {
+                replyingTo = nil
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20, height: 20)
+                    .background(.quaternary, in: .circle)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cancel reply")
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 9)
+        .padding(.bottom, 8)
+        .accessibilityElement(children: .contain)
     }
 
     /// The photos and videos waiting to go with this message.
@@ -784,10 +875,12 @@ struct ChatView: View {
         // Cleared before the await, like the text: the queued row is what the
         // transcript draws from here on, and leaving the tray populated would
         // show the same photo twice.
+        let parent = replyingTo
         draft = ""
         staged = []
+        replyingTo = nil
         bottomRequest += 1
-        Task { await model.send(text, media: media) }
+        Task { await model.send(text, media: media, replyingTo: parent) }
     }
 
     /// A tapped chip or glyph. The model works out whether that adds, swaps or

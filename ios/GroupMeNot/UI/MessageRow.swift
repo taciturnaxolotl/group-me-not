@@ -45,6 +45,8 @@ nonisolated struct MessageDisplay: Identifiable, Hashable, Sendable {
     /// Reaction buckets, plain likes already folded into the heart, with our
     /// own membership resolved.
     var reactions: [Message.ReactionSummary]
+    /// The message being answered, resolved once when the transcript is built.
+    var reply: ReplyPreview?
 
     var isPending: Bool {
         if case .pending = delivery { return true }
@@ -122,6 +124,8 @@ struct MessageRow: View {
     /// A long press, with the bubble's frame in global space. The row does not
     /// present anything itself; see ``ChatView`` for why.
     var onPress: (CGRect) -> Void = { _ in }
+    /// Called with the id of a quoted message when the reader taps the quote.
+    var onOpenReply: (String) -> Void = { _ in }
 
     var body: some View {
         if item.message.isSystem {
@@ -136,7 +140,8 @@ struct MessageRow: View {
                 onDiscard: onDiscard,
                 canEdit: canEdit,
                 onEdit: onEdit,
-                onPress: onPress)
+                onPress: onPress,
+                onOpenReply: onOpenReply)
         }
     }
 }
@@ -158,6 +163,21 @@ private struct SystemNotice: View {
     }
 }
 
+/// The quoted message above a reply.
+///
+/// A snapshot, not a reference. Resolving it during layout would mean every
+/// bubble searching the transcript for its parent on every pass, and the
+/// transcript is built off the main actor precisely so that work happens once.
+nonisolated struct ReplyPreview: Hashable, Sendable {
+    /// Nil when the message being answered is not in the loaded window, which
+    /// happens whenever somebody replies to something old. The quote still
+    /// draws: a reply with no visible parent is still visibly a reply, and
+    /// hiding it would silently change what the message means.
+    var messageID: String?
+    var senderName: String
+    var text: String
+}
+
 // MARK: - Bubble
 
 private struct BubbleRow: View {
@@ -170,6 +190,7 @@ private struct BubbleRow: View {
     let canEdit: Bool
     let onEdit: (String) -> Void
     let onPress: (CGRect) -> Void
+    let onOpenReply: (String) -> Void
 
     @Environment(AppSettings.self) private var settings
 
@@ -335,6 +356,7 @@ private struct BubbleRow: View {
         item.message.isDeleted
             || !item.text.isEmpty
             || item.isEdited
+            || item.reply != nil
             || !otherAttachments.isEmpty
     }
 
@@ -353,6 +375,7 @@ private struct BubbleRow: View {
                     .padding(.vertical, 2)
             } else {
                 VStack(alignment: isTrailing ? .trailing : .leading, spacing: 6) {
+                    if let reply = item.reply { quote(reply) }
                     ForEach(Array(otherAttachments.enumerated()), id: \.offset) { _, attachment in
                         AttachmentChipFor(attachment: attachment, isOwn: item.isOwn)
                     }
@@ -378,6 +401,42 @@ private struct BubbleRow: View {
         // and merely looks provisional until the server agrees.
         .opacity(item.isPending ? 0.55 : 1)
         .animation(.easeOut(duration: 0.2), value: item.isPending)
+    }
+
+    /// The message being answered, above the answer.
+    ///
+    /// A rule and two lines, dimmed against whatever the bubble is tinted with.
+    /// Tapping it goes to the original, which is the only reason a reader looks
+    /// at a quote they can already read.
+    private func quote(_ reply: ReplyPreview) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Capsule()
+                .fill(quoteInk.opacity(0.5))
+                .frame(width: 2.5)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(reply.senderName)
+                    .font(.caption.weight(.semibold))
+                Text(reply.text)
+                    .font(.caption)
+                    .lineLimit(2)
+            }
+            .foregroundStyle(quoteInk)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .contentShape(.rect)
+        .onTapGesture {
+            guard let id = reply.messageID else { return }
+            onOpenReply(id)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Replying to \(reply.senderName): \(reply.text)")
+    }
+
+    /// Dimmed rather than a second colour. The quote sits inside a bubble whose
+    /// tint is already decided, and introducing a third colour here would make
+    /// the reply louder than the message.
+    private var quoteInk: Color {
+        item.isOwn ? .white.opacity(0.72) : .secondary
     }
 
     /// "Edited", under the text and out of the way.

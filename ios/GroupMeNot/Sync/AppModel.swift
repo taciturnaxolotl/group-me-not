@@ -332,9 +332,9 @@ final class AppModel {
     // MARK: - Sending
 
     /// Queue a message for the open conversation.
-    func send(_ text: String, media: [PickedMedia] = []) async {
+    func send(_ text: String, media: [PickedMedia] = [], replyingTo parent: Message? = nil) async {
         guard let conversation = openConversationID else { return }
-        await send(text: text, media: media, to: conversation)
+        await send(text: text, media: media, to: conversation, replyingTo: parent)
     }
 
     /// Queue a message. Returns as soon as it is durable, which is immediately.
@@ -343,12 +343,20 @@ final class AppModel {
     /// somewhere durable and the queue row is written before any upload starts,
     /// so a photo attached with the radio off is already in the transcript and
     /// already safe; the bytes go up whenever the network next allows.
-    func send(text: String, media: [PickedMedia] = [], to conversation: ConversationID) async {
+    func send(
+        text: String, media: [PickedMedia] = [], to conversation: ConversationID,
+        replyingTo parent: Message? = nil
+    ) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !media.isEmpty else { return }
+        // A reply is an ordinary message with one more attachment on it. Nothing
+        // else in the queue, the retry or the idempotency guarantee has to know
+        // that this one answers another.
+        let attachments = parent.map { [Message.replyAttachment(to: $0)] } ?? []
         do {
             try await sends.send(
-                text: trimmed.isEmpty ? nil : trimmed, media: media, to: conversation)
+                text: trimmed.isEmpty ? nil : trimmed, attachments: attachments,
+                media: media, to: conversation)
         } catch {
             log.error("could not queue a send: \(error)")
         }
