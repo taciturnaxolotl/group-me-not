@@ -960,11 +960,11 @@ struct ChatView: View {
     /// says "this is a control, and it is exactly this big", which is what a
     /// transparent bar takes away and has to give back some other way.
     private var titleLabel: some View {
-        // Negative spacing, so the pill rides up over the foot of the picture
+        // Negative spacing, so the pill tucks up behind the foot of the picture
         // and the two read as one control rather than as a photo with a caption
         // under it. Safe in a way `.offset` would not be: spacing is layout, so
         // the stack reports the shorter height it actually occupies, and the bar
-        // sizes itself to what is drawn. The pill is second, so it draws on top.
+        // sizes itself to what is drawn.
         VStack(spacing: -9) {
             Avatar(
                 url: conversation.avatarURL,
@@ -972,6 +972,10 @@ struct ChatView: View {
                 size: 42,
                 isGroup: conversation.isGroup
             )
+            // A stack draws in order, so the pill would otherwise cover the
+            // photo. Lifting the photo instead puts the overlap the right way
+            // round: the face stays whole and the pill runs behind it.
+            .zIndex(1)
             HStack(spacing: 3) {
                 Text(conversation.name)
                     .font(.caption.weight(.semibold))
