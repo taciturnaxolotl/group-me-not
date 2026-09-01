@@ -36,8 +36,11 @@ struct ConversationInfoView: View {
                     }
                 }
                 if conversation.isGroup { settingsSection }
-                if !people.isEmpty { roster }
+                // Above the roster, not below it. A group of forty puts forty
+                // rows between the reader and the way out, which is the same as
+                // not having one.
                 if conversation.isGroup { leaving }
+                if !people.isEmpty { roster }
             }
             .listStyle(.insetGrouped)
             .navigationTitle("Info")
@@ -284,7 +287,7 @@ struct ConversationInfoView: View {
         }
     }
 
-    /// The way out, at the bottom where destructive things belong.
+    /// The way out.
     ///
     /// Two different things wearing similar words: leaving takes you out, and
     /// deleting ends the group for everybody. Only the owner is offered the
