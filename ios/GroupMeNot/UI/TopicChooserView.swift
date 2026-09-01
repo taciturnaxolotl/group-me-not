@@ -43,22 +43,23 @@ struct TopicChooserView: View {
         .navigationTitle(main.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button("Group Info", systemImage: "info.circle") {
-                        isInfoPresented = true
+            // Buttons rather than a menu behind an ellipsis. A menu earns its
+            // extra tap when it holds a list; holding one item, it is a lid on
+            // an empty box, and for anyone who is not an admin that is all this
+            // ever held.
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if canEdit {
+                    NavigationLink {
+                        NewTopicView(conversation: main)
+                    } label: {
+                        Image(systemName: "plus")
                     }
-                    if canEdit {
-                        NavigationLink {
-                            NewTopicView(conversation: main)
-                        } label: {
-                            Label("Add Topic", systemImage: "plus")
-                        }
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
+                    .accessibilityLabel("Add topic")
                 }
-                .accessibilityLabel("Group options")
+                Button("Group Info", systemImage: "info.circle") {
+                    isInfoPresented = true
+                }
+                .labelStyle(.iconOnly)
             }
         }
         .sheet(isPresented: $isInfoPresented) {
