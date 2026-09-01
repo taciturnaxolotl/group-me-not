@@ -250,6 +250,7 @@ struct ChatView: View {
     @State private var draft = ""
     @State private var isLoadingOlder = false
     @State private var isInfoPresented = false
+    @State private var isPinnedPresented = false
     /// The message whose reactions are being looked at.
     @State private var reactionDetail: MessageDisplay?
     @FocusState private var composerFocused: Bool
@@ -367,7 +368,6 @@ struct ChatView: View {
             // the same way, but it also tells the scroll view that what sits
             // there is a *bar*, which is what lets the edge effect dissolve
             // content under it instead of stopping it dead against a slab.
-            .safeAreaInset(edge: .top, spacing: 0) { pinnedBanner }
             .safeAreaBar(edge: .bottom, spacing: 0) {
                 if model.canPostInOpenConversation {
                     composer
@@ -429,6 +429,18 @@ struct ChatView: View {
             }
             .sheet(isPresented: $isNewPollPresented) { NewPollView() }
             .sheet(isPresented: $isNewEventPresented) { NewEventView() }
+            .sheet(isPresented: $isPinnedPresented) {
+                PinnedMessagesView(
+                    messages: model.pinned,
+                    members: model.members,
+                    onOpen: { id in
+                        isPinnedPresented = false
+                        openingTarget = id
+                    },
+                    onUnpin: { message in
+                        Task { await model.setPinned(false, message: message) }
+                    })
+            }
             .sheet(isPresented: $isInfoPresented) {
                 ConversationInfoView(conversation: current, members: model.members)
             }
@@ -828,43 +840,6 @@ struct ChatView: View {
     /// transcript runs underneath the bar and dissolves into it rather than
     /// ending at an opaque edge. The container is what makes the pair read as
     /// one piece of glass with a gap in it instead of two unrelated lozenges.
-    /// What this conversation has pinned, if anything.
-    ///
-    /// One line, and the newest of them. A pinned message is something somebody
-    /// wanted found later, so it belongs where it can be found without
-    /// scrolling; a stack of them belongs on a screen of its own, which this is
-    /// not trying to be.
-    @ViewBuilder private var pinnedBanner: some View {
-        if let latest = model.pinned.first {
-            Button {
-                openingTarget = latest.id
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "pin.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text(Transcript.summarise(latest))
-                        .font(.caption)
-                        .lineLimit(1)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 4)
-                    if model.pinned.count > 1 {
-                        Text("\(model.pinned.count)")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 7)
-                .frame(maxWidth: .infinity)
-                .background(.bar)
-                .contentShape(.rect)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Pinned: \(Transcript.summarise(latest))")
-        }
-    }
-
     private var composer: some View {
         GlassEffectContainer(spacing: 8) {
             HStack(alignment: .bottom, spacing: 8) {
@@ -1253,6 +1228,16 @@ struct ChatView: View {
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        if !model.pinned.isEmpty {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { isPinnedPresented = true } label: {
+                    Image(systemName: "pin.fill")
+                }
+                .accessibilityLabel(
+                    model.pinned.count == 1
+                        ? "1 pinned message" : "\(model.pinned.count) pinned messages")
+            }
+        }
         ToolbarItem(placement: .principal) {
             Button { isInfoPresented = true } label: { titleLabel }
                 .buttonStyle(.plain)
