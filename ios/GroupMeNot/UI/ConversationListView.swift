@@ -749,7 +749,7 @@ struct ConversationTile: View {
                     // The gap is what makes them read as separate cards rather
                     // than as one wide smear behind the face.
                     .overlay(Circle().strokeBorder(Color(.systemBackground), lineWidth: 2.5))
-                    .offset(x: index == 0 ? -size * 0.17 : size * 0.17, y: 6)
+                    .offset(x: index == 0 ? -size * 0.25 : size * 0.25, y: 7)
             }
         }
     }
