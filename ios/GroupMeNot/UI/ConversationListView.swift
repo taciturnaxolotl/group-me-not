@@ -111,7 +111,7 @@ struct ConversationListView: View {
                 NavigationLink(value: destination(for: entry.row)) {
                     ConversationCell(entry: entry)
                 }
-                .listRowInsets(.init(top: 8, leading: 16, bottom: 8, trailing: 16))
+                .listRowInsets(.init(top: 11, leading: 16, bottom: 11, trailing: 16))
                 // Long press to pin. The swipe is still there; this is the
                 // gesture people reach for.
                 .contextMenu { pinButton(for: entry.row) }
@@ -179,7 +179,7 @@ struct ConversationListView: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .listRowInsets(.init(top: 8, leading: 16, bottom: 8, trailing: 16))
+        .listRowInsets(.init(top: 11, leading: 16, bottom: 11, trailing: 16))
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
     }
