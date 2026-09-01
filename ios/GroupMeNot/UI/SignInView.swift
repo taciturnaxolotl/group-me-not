@@ -1,24 +1,161 @@
 import SwiftUI
 
-/// Token entry.
+/// The way in.
 ///
-/// GroupMe's password flow needs a registered OAuth client and a web redirect,
-/// which is a lot of moving parts for a client one person runs. A personal
-/// access token does the same job: it is the same credential the official app
-/// carries, and dev.groupme.com hands one to any signed-in account.
-///
-/// So the design problem here is not authentication, it is instruction. Most of
-/// this screen is telling the user where to go and what to copy.
+/// One decision on the screen, not five. GroupMe's own web client will hand a
+/// token back to a native app for any of four identity providers, so signing in
+/// is a single tap for nearly everybody; the token route exists for the account
+/// that has no provider at all, and the instructions for it run to three
+/// numbered steps and a paragraph about Web Inspector. Those used to sit on the
+/// first screen, under the buttons, where they were the largest thing on it and
+/// answered a question almost nobody had. They live behind a sheet now, and the
+/// screen asks what it actually wants to ask.
 struct SignInView: View {
     @Environment(AppModel.self) private var model
+
+    @State private var authorising: OAuth.Provider?
+    @State private var isChoosingProvider = false
+    @State private var isTokenSheetPresented = false
+    @State private var oauthError: String?
+
+    var body: some View {
+        ZStack {
+            Color(.systemBackground).ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                Spacer(minLength: 24)
+                banner
+                Spacer(minLength: 24)
+                actions
+            }
+            .padding(.horizontal, 28)
+            .padding(.bottom, 20)
+        }
+        .confirmationDialog("Sign In", isPresented: $isChoosingProvider, titleVisibility: .hidden) {
+            ForEach(OAuth.Provider.allCases.filter { $0 != .apple }, id: \.self) { provider in
+                Button(provider.title) { signIn(with: provider) }
+            }
+            Button("Use an access token") { isTokenSheetPresented = true }
+        }
+        .sheet(isPresented: $isTokenSheetPresented) { TokenSignInView() }
+    }
+
+    // MARK: Pieces
+
+    private var banner: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "bubble.left.and.bubble.right.fill")
+                .font(.system(size: 64))
+                .foregroundStyle(.tint)
+                .accessibilityHidden(true)
+            Text("GroupMeNot")
+                .font(.largeTitle.bold())
+            Text("A faster GroupMe that works without a signal.")
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// One button that most people will press, one that opens the rest.
+    ///
+    /// Four equally weighted buttons is not a choice, it is a form: each one
+    /// has to be read before any can be pressed. Apple is the one this app is
+    /// most likely to be reached through, so it goes first and looks like the
+    /// answer; everything else is one tap further away and costs the first
+    /// screen nothing.
+    private var actions: some View {
+        VStack(spacing: 12) {
+            Button {
+                signIn(with: .apple)
+            } label: {
+                HStack(spacing: 8) {
+                    if authorising == .apple {
+                        ProgressView().tint(.white)
+                    } else {
+                        Image(systemName: "apple.logo")
+                        Text("Continue with Apple").fontWeight(.semibold)
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 30)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(isBusy)
+
+            Button {
+                isChoosingProvider = true
+            } label: {
+                Text("Other ways to sign in")
+                    .frame(maxWidth: .infinity, minHeight: 30)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(isBusy)
+
+            if let provider = authorising, provider != .apple {
+                Label("Waiting for \(provider.rawValue.capitalized)…", systemImage: "hourglass")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let error = oauthError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 2)
+            }
+
+            Text("Opens GroupMe's own sign-in page. Your password is never seen by this app.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+        }
+    }
+
+    // MARK: Actions
+
+    private var isBusy: Bool { authorising != nil }
+
+    /// Hand off to GroupMe's own page. The token comes back through their
+    /// desktop callback scheme; we never see a password.
+    private func signIn(with provider: OAuth.Provider) {
+        guard !isBusy else { return }
+        authorising = provider
+        oauthError = nil
+        Task {
+            do {
+                let token = try await OAuth.signIn(with: provider)
+                await model.signIn(token: token)
+            } catch OAuth.Failure.cancelled {
+                // They closed the sheet. Say nothing.
+            } catch {
+                oauthError = error.localizedDescription
+            }
+            authorising = nil
+        }
+    }
+}
+
+/// The token route, for an account no provider will vouch for.
+///
+/// Mostly instruction rather than authentication: a personal access token is
+/// the same credential the official app carries, and dev.groupme.com hands one
+/// to any signed-in account. The work is telling somebody where to go.
+private struct TokenSignInView: View {
+    @Environment(AppModel.self) private var model
     @Environment(\.openURL) private var openURL
+    @Environment(\.dismiss) private var dismiss
 
     @State private var token = ""
     @State private var isRevealed = false
     @State private var isSigningIn = false
-    @State private var authorising: OAuth.Provider?
-    @State private var isShowingTokenEntry = false
-    @State private var oauthError: String?
     @FocusState private var tokenFieldFocused: Bool
 
     private static let developerURL = URL(string: "https://dev.groupme.com/applications")!
@@ -27,62 +164,12 @@ struct SignInView: View {
         NavigationStack {
             Form {
                 Section {
-                    header
-                        .frame(maxWidth: .infinity)
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                }
-
-                Section {
-                    ForEach(OAuth.Provider.allCases, id: \.self) { provider in
-                        Button {
-                            signIn(with: provider)
-                        } label: {
-                            HStack {
-                                Spacer()
-                                if authorising == provider {
-                                    ProgressView()
-                                } else {
-                                    Label(provider.title, systemImage: provider.symbol)
-                                        .fontWeight(provider == .apple ? .semibold : .regular)
-                                }
-                                Spacer()
-                            }
-                        }
-                        .disabled(isBusy)
-                    }
-                } footer: {
-                    Text("Opens GroupMe's own sign-in page. Your password is never seen by this app.")
-                }
-
-                Section {
-                    DisclosureGroup("Use a token instead", isExpanded: $isShowingTokenEntry) {
-                        tokenField
-                    }
-                } header: {
-                    Text("Advanced")
+                    tokenField
                 } footer: {
                     Text("Stored in the keychain on this device. It is never sent anywhere except GroupMe.")
                 }
 
-                if isTokenEntryVisible {
-                    Section {
-                        Button(action: signIn) {
-                            HStack {
-                                Spacer()
-                                if isSigningIn {
-                                    ProgressView()
-                                } else {
-                                    Text("Sign In").fontWeight(.semibold)
-                                }
-                                Spacer()
-                            }
-                        }
-                        .disabled(!canSubmit)
-                    }
-                }
-
-                if let error = oauthError ?? model.syncState.lastError {
+                if let error = model.syncState.lastError {
                     Section {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
@@ -90,36 +177,30 @@ struct SignInView: View {
                     }
                 }
 
-                Section(OAuth.isConfigured ? "Where to find a token" : "Where to find it") {
+                Section("Where to find it") {
                     instructions
                     Button("Open dev.groupme.com", systemImage: "safari") {
                         openURL(Self.developerURL)
                     }
                 }
             }
-            .navigationTitle("Sign In")
+            .navigationTitle("Access Token")
             .navigationBarTitleDisplayMode(.inline)
             .scrollDismissesKeyboard(.interactively)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if isSigningIn {
+                        ProgressView()
+                    } else {
+                        Button("Sign In", action: signIn).disabled(!canSubmit)
+                    }
+                }
+            }
+            .onAppear { tokenFieldFocused = true }
         }
-    }
-
-    // MARK: Pieces
-
-    private var header: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "bubble.left.and.bubble.right.fill")
-                .font(.system(size: 46))
-                .foregroundStyle(.tint)
-                .accessibilityHidden(true)
-            Text("GroupMeNot")
-                .font(.title2.weight(.semibold))
-            Text("A faster GroupMe that works without a signal.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .padding(.vertical, 20)
-        .accessibilityElement(children: .combine)
     }
 
     /// A `SecureField` by default, with a reveal toggle.
@@ -200,8 +281,6 @@ struct SignInView: View {
         .accessibilityLabel("Step \(number). \(text)")
     }
 
-    // MARK: Actions
-
     /// Tokens arrive with stray whitespace surprisingly often, because they are
     /// copied out of a dialog by hand. Trimming is not being clever; it is
     /// removing a failure the user cannot see.
@@ -209,32 +288,7 @@ struct SignInView: View {
         token.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var canSubmit: Bool { !trimmedToken.isEmpty && !isBusy }
-    private var isBusy: Bool { isSigningIn || authorising != nil }
-
-    /// The token field is always reachable, but it is only the primary path when
-    /// this build has no client id to run OAuth with.
-    private var isTokenEntryVisible: Bool { isShowingTokenEntry }
-
-    /// Hand off to GroupMe's own page. The token comes back through their
-    /// desktop callback scheme; we never see a password.
-    private func signIn(with provider: OAuth.Provider) {
-        guard !isBusy else { return }
-        tokenFieldFocused = false
-        authorising = provider
-        oauthError = nil
-        Task {
-            do {
-                let token = try await OAuth.signIn(with: provider)
-                await model.signIn(token: token)
-            } catch OAuth.Failure.cancelled {
-                // They closed the sheet. Say nothing.
-            } catch {
-                oauthError = error.localizedDescription
-            }
-            authorising = nil
-        }
-    }
+    private var canSubmit: Bool { !trimmedToken.isEmpty && !isSigningIn }
 
     private func signIn() {
         guard canSubmit else { return }
@@ -243,6 +297,9 @@ struct SignInView: View {
         Task {
             await model.signIn(token: trimmedToken)
             isSigningIn = false
+            // The sheet goes when the session does. Staying put on failure is
+            // the point: the error is in the form the token was typed into.
+            if model.isSignedIn { dismiss() }
         }
     }
 }
