@@ -14,6 +14,9 @@ struct ConversationInfoView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var isInvitePresented = false
+    @State private var isLeaving = false
+    @State private var isDeleting = false
+    @State private var removing: Member?
 
     var body: some View {
         NavigationStack {
@@ -34,6 +37,7 @@ struct ConversationInfoView: View {
                 }
                 if conversation.isGroup { settingsSection }
                 if !people.isEmpty { roster }
+                if conversation.isGroup { leaving }
             }
             .listStyle(.insetGrouped)
             .navigationTitle("Info")
@@ -45,6 +49,46 @@ struct ConversationInfoView: View {
             }
             .sheet(isPresented: $isInvitePresented) {
                 InvitePeopleView(conversation: conversation, alreadyIn: members)
+            }
+            .confirmationDialog(
+                "Leave \(conversation.name)?", isPresented: $isLeaving, titleVisibility: .visible
+            ) {
+                Button("Leave", role: .destructive) {
+                    Task {
+                        if await model.leave(conversation.id) { dismiss() }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("You stop receiving messages and the conversation is removed from this phone.")
+            }
+            .confirmationDialog(
+                "Delete \(conversation.name)?", isPresented: $isDeleting, titleVisibility: .visible
+            ) {
+                Button("Delete for Everyone", role: .destructive) {
+                    Task {
+                        if await model.destroy(conversation.id) { dismiss() }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("The group and its messages are gone for every member. This cannot be undone.")
+            }
+            .confirmationDialog(
+                removing.map { "Remove \(displayName($0))?" } ?? "",
+                isPresented: .init(
+                    get: { removing != nil },
+                    set: { if !$0 { removing = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                if let member = removing {
+                    Button("Remove", role: .destructive) {
+                        removing = nil
+                        Task { await model.remove(member, from: conversation.id) }
+                    }
+                    Button("Cancel", role: .cancel) { removing = nil }
+                }
             }
         }
     }
@@ -198,6 +242,7 @@ struct ConversationInfoView: View {
                     Avatar(url: member.imageUrl, name: displayName(member), size: 34)
                     Text(displayName(member))
                         .lineLimit(1)
+                    Spacer(minLength: 4)
                     if let badge = role(of: member) {
                         Text(badge)
                             .font(.caption2.weight(.semibold))
@@ -208,6 +253,51 @@ struct ConversationInfoView: View {
                     }
                 }
                 .accessibilityElement(children: .combine)
+                .contextMenu { memberActions(member) }
+            }
+        }
+    }
+
+    /// What an admin may do to somebody, and nothing at all for anyone else.
+    ///
+    /// A context menu rather than buttons on the row: removing a person is a
+    /// deliberate act and should take a deliberate gesture, and the roster is
+    /// mostly read rather than administered.
+    @ViewBuilder private func memberActions(_ member: Member) -> some View {
+        let isMe = member.identity == model.currentUser?.id
+        if canEditGroup, !isMe {
+            if model.role(in: conversation.id) == .owner {
+                let isAdmin = member.canPostInAnnouncements
+                Button {
+                    Task { await model.setAdmin(!isAdmin, for: member, in: conversation.id) }
+                } label: {
+                    Label(
+                        isAdmin ? "Remove as Admin" : "Make Admin",
+                        systemImage: isAdmin ? "person.badge.minus" : "person.badge.shield.checkmark")
+                }
+            }
+            Button(role: .destructive) {
+                removing = member
+            } label: {
+                Label("Remove from Group", systemImage: "person.fill.xmark")
+            }
+        }
+    }
+
+    /// The way out, at the bottom where destructive things belong.
+    ///
+    /// Two different things wearing similar words: leaving takes you out, and
+    /// deleting ends the group for everybody. Only the owner is offered the
+    /// second, and both ask first.
+    private var leaving: some View {
+        Section {
+            Button(role: .destructive) { isLeaving = true } label: {
+                Label("Leave Group", systemImage: "rectangle.portrait.and.arrow.right")
+            }
+            if model.role(in: conversation.id) == .owner {
+                Button(role: .destructive) { isDeleting = true } label: {
+                    Label("Delete Group", systemImage: "trash")
+                }
             }
         }
     }

@@ -326,6 +326,8 @@ struct ChatView: View {
     @State private var replyingTo: Message?
 
     @State private var isAttachmentPickerPresented = false
+    @State private var isNewPollPresented = false
+    @State private var isNewEventPresented = false
     /// Media the user picked but has not sent yet, shown above the field.
     @State private var staged: [PickedMedia] = []
     /// People named in the draft so far, in the order they were chosen.
@@ -365,6 +367,7 @@ struct ChatView: View {
             // the same way, but it also tells the scroll view that what sits
             // there is a *bar*, which is what lets the edge effect dissolve
             // content under it instead of stopping it dead against a slab.
+            .safeAreaInset(edge: .top, spacing: 0) { pinnedBanner }
             .safeAreaBar(edge: .bottom, spacing: 0) {
                 if model.canPostInOpenConversation {
                     composer
@@ -424,6 +427,8 @@ struct ChatView: View {
             } message: {
                 Text("It is removed for everyone in this conversation.")
             }
+            .sheet(isPresented: $isNewPollPresented) { NewPollView() }
+            .sheet(isPresented: $isNewEventPresented) { NewEventView() }
             .sheet(isPresented: $isInfoPresented) {
                 ConversationInfoView(conversation: current, members: model.members)
             }
@@ -633,6 +638,16 @@ struct ChatView: View {
                 composerFocused = true
             })
         }
+        if model.canPin(item.message) {
+            let pinned = model.isPinned(item.message)
+            actions.append(.init(
+                pinned ? "Unpin" : "Pin",
+                symbol: pinned ? "pin.slash" : "pin"
+            ) {
+                pressed = nil
+                Task { await model.setPinned(!pinned, message: item.message) }
+            })
+        }
         if press.canDelete {
             actions.append(.init("Delete", symbol: "trash", isDestructive: true) {
                 pressed = nil
@@ -793,6 +808,43 @@ struct ChatView: View {
     /// transcript runs underneath the bar and dissolves into it rather than
     /// ending at an opaque edge. The container is what makes the pair read as
     /// one piece of glass with a gap in it instead of two unrelated lozenges.
+    /// What this conversation has pinned, if anything.
+    ///
+    /// One line, and the newest of them. A pinned message is something somebody
+    /// wanted found later, so it belongs where it can be found without
+    /// scrolling; a stack of them belongs on a screen of its own, which this is
+    /// not trying to be.
+    @ViewBuilder private var pinnedBanner: some View {
+        if let latest = model.pinned.first {
+            Button {
+                openingTarget = latest.id
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "pin.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(Transcript.summarise(latest))
+                        .font(.caption)
+                        .lineLimit(1)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    if model.pinned.count > 1 {
+                        Text("\(model.pinned.count)")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .frame(maxWidth: .infinity)
+                .background(.bar)
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Pinned: \(Transcript.summarise(latest))")
+        }
+    }
+
     private var composer: some View {
         GlassEffectContainer(spacing: 8) {
             HStack(alignment: .bottom, spacing: 8) {
@@ -829,15 +881,25 @@ struct ChatView: View {
             .accessibilityElement(children: .combine)
     }
 
+    /// A menu rather than a button, now that there is more than one thing to
+    /// attach. Photos stay at the top because they are what the button was for
+    /// and what it is still mostly used for.
     private var attachButton: some View {
-        Button { isAttachmentPickerPresented = true } label: {
+        Menu {
+            Button("Photo or Video", systemImage: "photo") {
+                isAttachmentPickerPresented = true
+            }
+            if current.isGroup {
+                Button("Poll", systemImage: "chart.bar") { isNewPollPresented = true }
+            }
+            Button("Event", systemImage: "calendar") { isNewEventPresented = true }
+        } label: {
             Image(systemName: "plus")
                 .font(.system(size: 21, weight: .medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 34, height: 34)
                 .glassEffect(.regular.interactive(), in: .circle)
         }
-        .buttonStyle(.plain)
         .accessibilityLabel("Add attachment")
     }
 

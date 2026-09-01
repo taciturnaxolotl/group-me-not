@@ -235,6 +235,121 @@ actor GroupMeAPI {
         return response?.event
     }
 
+    // MARK: - Creating
+
+    /// Start a poll.
+    ///
+    /// `expiration` is epoch seconds and there is a minimum: ten minutes was
+    /// refused with `400` and an hour accepted, so callers should not offer
+    /// anything shorter than an hour without checking.
+    @discardableResult
+    func createPoll(
+        in groupID: String, subject: String, options: [String],
+        expiresAt: Date, allowsMultiple: Bool, anonymous: Bool
+    ) async throws -> Poll? {
+        let response: SinglePollResponse? = try await client.post(
+            .v3, "/poll/\(groupID)",
+            body: NewPoll(
+                subject: subject,
+                options: options.map { NewPoll.Option(title: $0) },
+                expiration: Int(expiresAt.timeIntervalSince1970),
+                type: allowsMultiple ? "multi" : "single",
+                visibility: anonymous ? "anonymous" : "public"),
+            retry: .interactive)
+        return response?.poll?.data
+    }
+
+    private nonisolated struct NewPoll: Encodable, Sendable {
+        var subject: String
+        var options: [Option]
+        var expiration: Int
+        var type: String
+        var visibility: String
+
+        nonisolated struct Option: Encodable, Sendable {
+            var title: String
+        }
+    }
+
+    /// Create an event.
+    ///
+    /// `start_at`, `end_at`, `timezone` and `is_all_day` must be sent together
+    /// — omitting the timezone earns a `400` saying exactly that — and the
+    /// timestamps are ISO 8601 strings rather than the epoch seconds used
+    /// everywhere else in this API.
+    @discardableResult
+    func createEvent(
+        in conversation: ConversationID, name: String, description: String?,
+        location: String?, startAt: Date, endAt: Date, isAllDay: Bool
+    ) async throws -> GroupEvent? {
+        let convID = try await restID(for: conversation)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        let response: EventResponse? = try await client.post(
+            .v3, "/conversations/\(convID)/events/create",
+            body: NewEvent(
+                name: name,
+                description: description,
+                location: location.map { NewEvent.Place(name: $0) },
+                startAt: formatter.string(from: startAt),
+                endAt: formatter.string(from: endAt),
+                timezone: TimeZone.current.identifier,
+                isAllDay: isAllDay),
+            retry: .interactive)
+        return response?.event
+    }
+
+    private nonisolated struct NewEvent: Encodable, Sendable {
+        var name: String
+        var description: String?
+        var location: Place?
+        var startAt: String
+        var endAt: String
+        var timezone: String
+        var isAllDay: Bool
+
+        nonisolated struct Place: Encodable, Sendable {
+            var name: String
+        }
+    }
+
+    /// Start a group.
+    ///
+    /// `POST /v3/groups` is GroupMe's long-standing public route for this. It is
+    /// **not** in the extracted client reference, which only carries the
+    /// subgroup and destroy routes, so this one is documentation rather than
+    /// measurement — the only untested call in this file.
+    @discardableResult
+    func createGroup(name: String, description: String?, imageURL: String?) async throws -> Group? {
+        let response: Group = try await client.post(
+            .v3, "/groups",
+            body: NewGroup(name: name, description: description, imageUrl: imageURL, share: true),
+            retry: .interactive)
+        return response
+    }
+
+    private nonisolated struct NewGroup: Encodable, Sendable {
+        var name: String
+        var description: String?
+        var imageUrl: String?
+        /// Asks the server for a join link, which the share sheet then has.
+        var share: Bool
+    }
+
+    /// Accept or decline a message request from somebody not in your contacts.
+    func respondToChatRequest(_ accept: Bool, from otherUserID: String) async throws {
+        if accept {
+            try await client.postIgnoringResponse(
+                .v3, "/chats/\(otherUserID)/approve",
+                body: Optional<Discard>.none, retry: .interactive)
+        } else {
+            // Declining is deleting the conversation, which is what the route
+            // for it does: there is no "reject" verb.
+            try await client.deleteIgnoringResponse(
+                .v3, "/chats/\(otherUserID)", retry: .interactive)
+        }
+    }
+
     // MARK: - Requests
 
     /// Everything waiting on a decision: message requests and group invitations.
@@ -270,6 +385,113 @@ actor GroupMeAPI {
 
     private nonisolated struct Approval: Encodable, Sendable {
         var approval: Bool
+    }
+
+    // MARK: - Muting
+
+    /// Mute or unmute, on the server rather than only on this phone.
+    ///
+    /// Three things about these routes are worth stating, because none of them
+    /// match the surrounding API:
+    ///
+    /// - A group is muted on the **legacy host**, `v2.groupme.com`, not on
+    ///   `api.groupme.com`. A topic is muted on v3. Same body, different hosts.
+    /// - The verb is in the path rather than the body: `…/mute` and
+    ///   `…/unmute` are two routes, not one route with a flag.
+    /// - `duration` is minutes, and its absence means forever.
+    func setMuted(
+        _ muted: Bool, conversation: ConversationID, parentGroupID: String?,
+        minutes: Int? = nil
+    ) async throws {
+        guard case .group(let id) = conversation else {
+            // DMs have no mute route in this API. The caller keeps its local
+            // preference, which is all there has ever been for them.
+            throw APIError.http(status: 404, meta: nil, retryAfter: nil)
+        }
+        let verb = muted ? "mute" : "unmute"
+        let body = MuteRequest(duration: minutes, recapEnabled: nil)
+
+        if let parentGroupID {
+            try await client.postIgnoringResponse(
+                .v3, "/groups/\(parentGroupID)/subgroups/\(id)/\(verb)",
+                body: body, retry: .interactive)
+        } else {
+            try await client.postIgnoringResponse(
+                .legacy, "/groups/\(id)/memberships/\(verb)",
+                body: body, retry: .interactive)
+        }
+    }
+
+    private nonisolated struct MuteRequest: Encodable, Sendable {
+        var duration: Int?
+        var recapEnabled: Bool?
+    }
+
+    // MARK: - Pinned messages
+
+    /// The messages pinned in a conversation.
+    func pinnedMessages(in conversation: ConversationID) async -> [Message] {
+        do {
+            switch conversation {
+            case .group(let groupID):
+                let page: GroupMessagesPage = try await client.get(
+                    .v3, "/pinned/groups/\(groupID)/messages", retry: .background)
+                return page.messages ?? []
+            case .direct(let otherUserID):
+                let page: DirectMessagesPage = try await client.get(
+                    .v3, "/pinned/direct_messages",
+                    query: ["other_user_id": otherUserID], retry: .background)
+                return page.directMessages ?? []
+            }
+        } catch {
+            return []
+        }
+    }
+
+    func setPinned(
+        _ pinned: Bool, message messageID: String, in conversation: ConversationID
+    ) async throws {
+        let convID = try await restID(for: conversation)
+        try await client.postIgnoringResponse(
+            .v3, "/conversations/\(convID)/messages/\(messageID)/\(pinned ? "pin" : "unpin")",
+            body: Optional<Discard>.none, retry: .interactive)
+    }
+
+    // MARK: - Membership
+
+    /// Leave a group by removing your own membership.
+    ///
+    /// Addressed by *membership* id, which is not the user id. `destroy` is the
+    /// other thing that could be meant by "leave" and is not this: it deletes
+    /// the group for everybody and only the owner may do it.
+    func leaveGroup(_ groupID: String, membershipID: String) async throws {
+        try await client.postIgnoringResponse(
+            .v3, "/groups/\(groupID)/members/\(membershipID)/remove",
+            body: Optional<Discard>.none, retry: .interactive)
+    }
+
+    /// Delete a group outright. Owner only, and there is no undoing it.
+    func destroyGroup(_ groupID: String) async throws {
+        try await client.postIgnoringResponse(
+            .v3, "/groups/\(groupID)/destroy",
+            body: Optional<Discard>.none, retry: .interactive)
+    }
+
+    func removeMember(_ membershipID: String, from groupID: String) async throws {
+        try await client.postIgnoringResponse(
+            .v3, "/groups/\(groupID)/members/\(membershipID)/remove",
+            body: Optional<Discard>.none, retry: .interactive)
+    }
+
+    /// Promote to admin, or demote back to a plain member.
+    func setRole(_ role: String, for membershipID: String, in groupID: String) async throws {
+        try await client.postIgnoringResponse(
+            .v3, "/groups/\(groupID)/members/\(membershipID)/update",
+            body: RoleUpdate(role: role), retry: .interactive)
+    }
+
+    private nonisolated struct RoleUpdate: Encodable, Sendable {
+        var role: String
     }
 
     // MARK: - Group settings

@@ -273,6 +273,8 @@ final class AppModel {
         messages = await transcript(conversation) ?? []
         outbox = await sends.pending(in: conversation)
         members = (try? await store.conversations.members(of: conversation)) ?? []
+        pinned = []
+        Task { await self.refreshPinned() }
 
         reachedBeginning = false
         olderPageFailed = false
@@ -371,9 +373,29 @@ final class AppModel {
 
     /// Mute or unmute, locally. GroupMe's mute route is not one we speak yet, so
     /// this is a device preference until it is.
+    /// Mute or unmute, here and on every other device.
+    ///
+    /// Local first so the row changes on the next frame, then the server. A
+    /// refusal puts the row back: a mute that only this phone believes in is
+    /// exactly what this used to be, and it is worse than none because it looks
+    /// like it worked.
+    ///
+    /// A DM has no mute route in this API, so for those the local preference is
+    /// still the whole story — and correctly so, rather than by omission.
     func setMuted(_ muted: Bool, for conversation: ConversationID) async {
+        let was = conversations.first { $0.id == conversation }?.mutedUntil
         try? await store.conversations.setMuted(conversation, until: muted ? .distantFuture : nil)
         await reloadConversations()
+
+        guard case .group = conversation else { return }
+        let parent = conversations.first { $0.id == conversation }?.parentID
+        do {
+            try await api.setMuted(muted, conversation: conversation, parentGroupID: parent)
+        } catch {
+            log.notice("could not \(muted ? "mute" : "unmute", privacy: .public): \(diagnosticText(error), privacy: .public)")
+            try? await store.conversations.setMuted(conversation, until: was)
+            await reloadConversations()
+        }
     }
 
     // MARK: - Sending
@@ -651,6 +673,181 @@ final class AppModel {
             optionIDs, in: pollID, groupID: groupID, multiple: multiple)
         else { return }
         polls[pollID] = updated
+    }
+
+    // MARK: - Pinned messages
+
+    /// The pinned messages in the open conversation.
+    private(set) var pinned: [Message] = []
+
+    func refreshPinned() async {
+        guard let conversation = openConversationID else { return }
+        pinned = await api.pinnedMessages(in: conversation)
+    }
+
+    func canPin(_ message: Message) -> Bool {
+        !message.isDeleted && !message.isSystem && !message.isListPreview
+    }
+
+    func isPinned(_ message: Message) -> Bool {
+        pinned.contains { $0.id == message.id }
+    }
+
+    @discardableResult
+    func setPinned(_ pin: Bool, message: Message) async -> Bool {
+        guard let conversation = openConversationID else { return false }
+        do {
+            try await api.setPinned(pin, message: message.id, in: conversation)
+            await refreshPinned()
+            return true
+        } catch {
+            log.notice("could not pin: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
+    }
+
+    // MARK: - Membership
+
+    /// Your own membership id in a group, which the leave and role routes take
+    /// in place of a user id.
+    private func myMembershipID(in conversation: ConversationID) -> String? {
+        guard let me = currentUser?.id else { return nil }
+        return members.first { $0.identity == me }?.id
+    }
+
+    /// Leave a group. Removes it locally too, since it is about to stop
+    /// appearing in any list fetch.
+    @discardableResult
+    func leave(_ conversation: ConversationID) async -> Bool {
+        guard case .group(let groupID) = conversation,
+              let membership = myMembershipID(in: conversation)
+        else { return false }
+        do {
+            try await api.leaveGroup(groupID, membershipID: membership)
+            try? await store.conversations.delete(conversation)
+            if openConversationID == conversation { closeConversation() }
+            await reloadConversations()
+            return true
+        } catch {
+            log.notice("could not leave: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
+    }
+
+    /// Delete a group for everybody. Owner only.
+    @discardableResult
+    func destroy(_ conversation: ConversationID) async -> Bool {
+        guard case .group(let groupID) = conversation, role(in: conversation) == .owner
+        else { return false }
+        do {
+            try await api.destroyGroup(groupID)
+            try? await store.conversations.delete(conversation)
+            if openConversationID == conversation { closeConversation() }
+            await reloadConversations()
+            return true
+        } catch {
+            log.notice("could not delete the group: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func remove(_ member: Member, from conversation: ConversationID) async -> Bool {
+        guard case .group(let groupID) = conversation,
+              role(in: conversation).canEditGroup, let membership = member.id
+        else { return false }
+        do {
+            try await api.removeMember(membership, from: groupID)
+            await sync.catchUp(conversation)
+            return true
+        } catch {
+            log.notice("could not remove a member: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
+    }
+
+    /// Promote to admin or demote back. Owner only: an admin promoting admins
+    /// is not something the server allows and not something to offer.
+    @discardableResult
+    func setAdmin(_ isAdmin: Bool, for member: Member, in conversation: ConversationID) async -> Bool {
+        guard case .group(let groupID) = conversation, role(in: conversation) == .owner,
+              let membership = member.id
+        else { return false }
+        do {
+            try await api.setRole(isAdmin ? "admin" : "user", for: membership, in: groupID)
+            await sync.catchUp(conversation)
+            return true
+        } catch {
+            log.notice("could not change a role: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
+    }
+
+    // MARK: - Creating
+
+    @discardableResult
+    func createPoll(
+        subject: String, options: [String], expiresAt: Date,
+        allowsMultiple: Bool, anonymous: Bool
+    ) async -> Bool {
+        guard case .group(let groupID)? = openConversationID else { return false }
+        do {
+            try await api.createPoll(
+                in: groupID, subject: subject, options: options,
+                expiresAt: expiresAt, allowsMultiple: allowsMultiple, anonymous: anonymous)
+            await sync.catchUp(.group(groupID))
+            return true
+        } catch {
+            log.notice("could not create a poll: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func createEvent(
+        name: String, description: String?, location: String?,
+        startAt: Date, endAt: Date, isAllDay: Bool
+    ) async -> Bool {
+        guard let conversation = openConversationID else { return false }
+        do {
+            try await api.createEvent(
+                in: conversation, name: name, description: description,
+                location: location, startAt: startAt, endAt: endAt, isAllDay: isAllDay)
+            await sync.catchUp(conversation)
+            return true
+        } catch {
+            log.notice("could not create an event: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func createGroup(name: String, description: String?) async -> ConversationID? {
+        do {
+            guard let group = try await api.createGroup(
+                name: name, description: description, imageURL: nil)
+            else { return nil }
+            try? await store.conversations.upsert(groups: [group])
+            await reloadConversations()
+            return .group(group.id)
+        } catch {
+            log.notice("could not create a group: \(diagnosticText(error), privacy: .public)")
+            return nil
+        }
+    }
+
+    /// Accept or decline a message request.
+    @discardableResult
+    func respondToRequest(_ accept: Bool, from otherUserID: String) async -> Bool {
+        do {
+            try await api.respondToChatRequest(accept, from: otherUserID)
+            await refreshRequests()
+            if accept { await sync.sync(reason: .manual) }
+            return true
+        } catch {
+            log.notice("could not answer a request: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
     }
 
     // MARK: - Events

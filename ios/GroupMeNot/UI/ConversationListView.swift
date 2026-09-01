@@ -21,6 +21,7 @@ struct ConversationListView: View {
     /// The tile a long press landed on, named in the sheet that follows so
     /// there is no doubt which one is about to change.
     @State private var pinTarget: ConversationRow?
+    @State private var isNewGroupPresented = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -49,6 +50,15 @@ struct ConversationListView: View {
                 }
                 .sheet(isPresented: $isRequestsPresented) {
                     RequestsView()
+                }
+                .sheet(isPresented: $isNewGroupPresented) {
+                    NewGroupView { created in
+                        // Straight into it. A group made and then left in a list
+                        // is a group whose first act was to hide.
+                        guard let row = model.conversations.first(where: { $0.id == created })
+                        else { return }
+                        path.append(.chat(row))
+                    }
                 }
                 .confirmationDialog(
                     pinTarget?.name ?? "",
@@ -345,6 +355,17 @@ struct ConversationListView: View {
             Text("Chats")
                 .font(.largeTitle.bold())
             Spacer(minLength: 12)
+            Button {
+                isNewGroupPresented = true
+            } label: {
+                Image(systemName: "square.and.pencil")
+                    .font(.title3)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tint)
+            .alignmentGuide(.firstTextBaseline) { $0.height * 0.78 }
+            .accessibilityLabel("New group")
+            .padding(.trailing, 14)
             accountButton
                 // Pulled back to the cap line so the avatar centres against the
                 // title rather than hanging off its baseline.
