@@ -707,9 +707,7 @@ struct ConversationTile: View {
     var body: some View {
         Button(action: action) {
             VStack(spacing: 6) {
-                Avatar(url: row.avatarURL, name: name, size: size, isGroup: row.isGroup)
-                    // The topics themselves, clustered around the face.
-                    .overlay { understudy }
+                face
                     .overlay(alignment: .topTrailing) {
                         UnreadBadge(count: unread, isMuted: row.isMuted)
                             .offset(x: 6, y: -2)
@@ -732,37 +730,20 @@ struct ConversationTile: View {
         .accessibilityLabel(spokenLabel)
     }
 
-    /// The topics, clustered around the group's own face.
+    /// One picture, or the whole group in one.
     ///
-    /// Their real photographs rather than a symbol standing in for them. A badge
-    /// is a coloured mark that has to be learned before it means anything, and
-    /// it was competing with the unread count on the opposite corner; small
-    /// faces gathered around a face need no key at all, and they are the very
-    /// faces waiting on the other side of the tap.
-    ///
-    /// Kept to the left and the foot, which are the two corners nothing else
-    /// wants: the unread count owns the top right and the posting-policy hint
-    /// owns the bottom right.
-    @ViewBuilder private var understudy: some View {
-        ForEach(Array(topics.prefix(Self.clusterPositions.count).enumerated()), id: \.element.id) { index, topic in
-            let spot = Self.clusterPositions[index]
-            Avatar(url: topic.avatarURL, name: topic.name, size: size * 0.34, isGroup: true)
-                // The ring is what separates one face from the one it sits on.
-                // Without it the cluster is a single dark shape with lighter
-                // patches in it.
-                .overlay(Circle().strokeBorder(Color(.systemBackground), lineWidth: 2))
-                .offset(x: spot.x * size, y: spot.y * size)
+    /// A group with topics is not one conversation, and a single photograph
+    /// says it is. Drawing every conversation under it as a bubble packed into
+    /// the same circle says what the tile actually opens, using the very faces
+    /// waiting on the other side of the tap: no badge to learn, and nothing
+    /// hanging outside the circle to crowd the tiles either side.
+    @ViewBuilder private var face: some View {
+        if leadsToChooser {
+            TopicCluster(faces: [row] + topics, size: size)
+        } else {
+            Avatar(url: row.avatarURL, name: name, size: size, isGroup: row.isGroup)
         }
     }
-
-    /// Where each satellite sits, as a fraction of the face it orbits. Fixed
-    /// rather than computed around a circle: three points chosen by eye read as
-    /// a group of friends, and three points at even angles read as a diagram.
-    private static let clusterPositions: [CGPoint] = [
-        CGPoint(x: -0.38, y: -0.30),
-        CGPoint(x: -0.33, y: 0.34),
-        CGPoint(x: 0.10, y: 0.47),
-    ]
 
     /// Whether this tile opens a choice of topics rather than a conversation.
     private var leadsToChooser: Bool { !topics.isEmpty }
