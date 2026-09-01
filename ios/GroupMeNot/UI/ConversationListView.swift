@@ -428,7 +428,7 @@ struct ConversationListView: View {
             Avatar(
                 url: model.currentUser?.imageUrl,
                 name: model.currentUser?.name ?? "?",
-                size: 28
+                size: 34
             )
         }
         .buttonStyle(.plain)
