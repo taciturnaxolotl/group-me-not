@@ -1813,19 +1813,31 @@ private struct TranscriptScrollTuning: UIViewRepresentable {
             defer { lastBottomInset = bottom }
             guard let previous = lastBottomInset else { return }
 
-            // Only growth, and only growth worth the name: this fires for every
-            // inset change, including the ones this very adjustment settles.
+            // Both directions, which is what makes it hold on close as well as
+            // on open.
+            //
+            // This used to compensate growth only, and the asymmetry was
+            // visible: opening the keyboard held the reader's place, and
+            // closing it let the content ride up by the keyboard's height,
+            // because the space it vacated became transcript while the offset
+            // stayed put. The rule is relative in both directions and does not
+            // care where in the history the reader is standing.
             let delta = bottom - previous
-            guard delta > 1 else { return }
+            guard abs(delta) > 1 else { return }
             // A finger on the glass owns the scroll view. Nothing here outranks
             // that.
             guard !scroll.isDragging, !scroll.isDecelerating else { return }
 
-            let furthest = max(
-                -scroll.adjustedContentInset.top,
+            let lowest = -scroll.adjustedContentInset.top
+            let highest = max(
+                lowest,
                 scroll.contentSize.height + bottom - scroll.bounds.height)
-            let target = min(scroll.contentOffset.y + delta, furthest)
-            guard target > scroll.contentOffset.y + 0.5 else { return }
+            let target = min(max(scroll.contentOffset.y + delta, lowest), highest)
+            guard abs(target - scroll.contentOffset.y) > 0.5 else { return }
+            // No animation of its own, so it inherits the keyboard's. Giving it
+            // a curve here would be giving it a *different* curve, and the
+            // content would visibly slide against a keyboard moving at another
+            // rate.
             scroll.setContentOffset(
                 CGPoint(x: scroll.contentOffset.x, y: target), animated: false)
         }
