@@ -16,7 +16,14 @@ struct ReactionGlyph: View {
         if let pack = Message.PackGlyph(token: glyph) {
             PackSprite(pack: pack, size: size)
         } else {
-            Text(glyph).font(.system(size: size))
+            // `fixedSize` because an emoji paints outside the box its font
+            // reports — 😤 above the ascender, 🤦 wider than its advance — and a
+            // `Text` free to be compressed by a fixed frame around it loses the
+            // overhang. Asking for its ideal size and letting the frame centre
+            // it keeps the whole glyph.
+            Text(glyph)
+                .font(.system(size: size))
+                .fixedSize()
         }
     }
 }

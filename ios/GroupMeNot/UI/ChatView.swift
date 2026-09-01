@@ -250,8 +250,8 @@ struct ChatView: View {
     @State private var draft = ""
     @State private var isLoadingOlder = false
     @State private var isInfoPresented = false
-    /// The reaction whose people are being looked at.
-    @State private var reactionDetail: Message.ReactionSummary?
+    /// The message whose reactions are being looked at.
+    @State private var reactionDetail: MessageDisplay?
     @FocusState private var composerFocused: Bool
 
     // MARK: Scroll state
@@ -441,9 +441,11 @@ struct ChatView: View {
     private var lifecycle: some View {
         chrome
             .task { await model.openConversation(conversation.id) }
-            .sheet(item: $reactionDetail) { summary in
+            .sheet(item: $reactionDetail) { item in
                 ReactionRoster(
-                    summary: summary, members: model.members, meID: model.currentUser?.id)
+                    summaries: item.reactions,
+                    members: model.members,
+                    meID: model.currentUser?.id)
             }
             .onDisappear(perform: teardown)
             .onChange(of: model.messages, initial: true) { messagesChanged() }
@@ -585,7 +587,7 @@ struct ChatView: View {
                     canDelete: model.canDelete(item.message))
             },
             onOpenReply: { id in openingTarget = id },
-            onInspectReaction: { summary in reactionDetail = summary }
+            onInspectReaction: { _ in reactionDetail = item }
         )
     }
 
@@ -1776,47 +1778,56 @@ private struct TranscriptScrollTuning: UIViewRepresentable {
     }
 }
 
-/// Who reacted with one glyph.
+/// Who reacted to a message, and with what.
 ///
-/// A sheet raised by holding a chip. The chip can only ever show a number, and a
-/// number is the least interesting thing about a reaction in a group of forty
-/// people: the question is always *who*.
+/// One panel for the whole message rather than one per glyph. A message with
+/// four reactions used to mean four sheets to open in turn, each answering a
+/// question nobody asks glyph by glyph: what people want is the room, not one
+/// corner of it.
+///
+/// Glyphs run along the top with their counts, and picking one narrows the list.
+/// "All" is the default and is what a message with a single reaction shows
+/// without any of this getting in the way.
 private struct ReactionRoster: View {
-    let summary: Message.ReactionSummary
+    let summaries: [Message.ReactionSummary]
     let members: [Member]
     /// So the reader can find themselves in a long list without reading it.
     let meID: String?
 
     @Environment(\.dismiss) private var dismiss
+    @State private var filter: String?
 
     var body: some View {
         NavigationStack {
-            List {
-                ForEach(Array(people.enumerated()), id: \.offset) { _, person in
-                    HStack(spacing: 12) {
-                        Avatar(url: person.imageURL, name: person.name, size: 34)
-                        Text(person.name)
-                            .lineLimit(1)
-                        if person.isYou {
-                            Text("You")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                if summaries.count > 1 { glyphs }
+                List {
+                    ForEach(Array(people.enumerated()), id: \.offset) { _, person in
+                        HStack(spacing: 12) {
+                            Avatar(url: person.imageURL, name: person.name, size: 34)
+                            Text(person.name)
+                                .lineLimit(1)
+                            if person.isYou {
+                                Text("You")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 8)
+                            // Which glyph this person used, when the list is not
+                            // already filtered to one.
+                            if filter == nil {
+                                ReactionGlyph(glyph: person.glyph, size: 18)
+                            }
                         }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("\(person.name), reacted with \(person.spokenGlyph)")
                     }
-                    .accessibilityElement(children: .combine)
                 }
+                .listStyle(.plain)
             }
-            // Empty, because the principal item below carries the title along
-            // with the glyph it is about. Setting both draws one over the other.
-            .navigationTitle("")
+            .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .principal) {
-                    HStack(spacing: 6) {
-                        ReactionGlyph(glyph: summary.glyph, size: 18)
-                        Text(title).font(.headline)
-                    }
-                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
@@ -1825,28 +1836,84 @@ private struct ReactionRoster: View {
         .presentationDetents([.medium, .large])
     }
 
-    private var title: String {
-        summary.count == 1 ? "1 reaction" : "\(summary.count) reactions"
+    private var glyphs: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                chip(nil, label: "All", count: total)
+                ForEach(summaries) { summary in
+                    chip(summary.glyph, label: nil, count: summary.count)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
+        .scrollIndicators(.hidden)
+        .scrollBounceBehavior(.basedOnSize)
     }
 
+    private func chip(_ glyph: String?, label: String?, count: Int) -> some View {
+        let isOn = filter == glyph
+        return Button {
+            filter = glyph
+        } label: {
+            HStack(spacing: 5) {
+                if let glyph {
+                    ReactionGlyph(glyph: glyph, size: 17)
+                } else if let label {
+                    Text(label).font(.subheadline.weight(.medium))
+                }
+                Text("\(count)")
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(isOn ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .background(
+                isOn ? AnyShapeStyle(Color.accentColor.opacity(0.22)) : AnyShapeStyle(.quaternary),
+                in: .capsule)
+            .overlay(
+                Capsule().strokeBorder(
+                    isOn ? Color.accentColor.opacity(0.5) : .clear, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isOn ? [.isButton, .isSelected] : .isButton)
+    }
+
+    private var total: Int { summaries.reduce(0) { $0 + $1.count } }
+
+    private var title: String {
+        total == 1 ? "1 reaction" : "\(total) reactions"
+    }
+
+    /// Everybody who reacted, in glyph order, each paired with what they used.
+    ///
     /// The roster is the group's, so anybody who has since left it is an id with
-    /// no name. They are still listed: dropping them would make the sheet
+    /// no name. They are still listed: dropping them would make the panel
     /// disagree with the count on the chip it came from.
     private var people: [Person] {
         let byID = Dictionary(
             members.map { ($0.identity, $0) }, uniquingKeysWith: { first, _ in first })
-        return summary.userIDs.map { id in
-            let member = byID[id]
-            return Person(
-                name: member?.nickname ?? member?.name ?? "Someone",
-                imageURL: member?.imageUrl,
-                isYou: id == meID)
-        }
+        return summaries
+            .filter { filter == nil || $0.glyph == filter }
+            .flatMap { summary in
+                summary.userIDs.map { id in
+                    let member = byID[id]
+                    return Person(
+                        name: member?.nickname ?? member?.name ?? "Someone",
+                        imageURL: member?.imageUrl,
+                        isYou: id == meID,
+                        glyph: summary.glyph,
+                        spokenGlyph: summary.spokenGlyph)
+                }
+            }
     }
 
     private struct Person {
         let name: String
         let imageURL: String?
         let isYou: Bool
+        let glyph: String
+        let spokenGlyph: String
     }
 }
+
