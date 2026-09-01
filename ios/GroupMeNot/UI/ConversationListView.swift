@@ -442,7 +442,7 @@ struct ConversationListView: View {
                 Button {
                     isNewGroupPresented = true
                 } label: {
-                    Image(systemName: "square.and.pencil")
+                    Image(systemName: "plus")
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(.tint)
                         .frame(width: Self.avatarSize, height: Self.avatarSize)
