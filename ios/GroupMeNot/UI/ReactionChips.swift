@@ -42,6 +42,15 @@ struct ReactionChips: View {
             }
             if overflow > 0 { overflowChip }
         }
+        // Ideal width, not the bubble's.
+        //
+        // These are drawn in an overlay, so the bubble's width is what gets
+        // proposed to them — and a narrow bubble with a short message proposed
+        // less than the chips needed, which `Text` answers by truncating itself
+        // to nothing. The counts vanished while the glyphs stayed, because a
+        // glyph has no truncation to do. Asking for the ideal size lets the row
+        // run past the bubble's edge, which is where a tapback belongs anyway.
+        .fixedSize()
         // A ring in the background colour, so the chips read as sitting on top
         // of the bubble rather than being part of it.
         .padding(2)
