@@ -878,11 +878,15 @@ struct ChatView: View {
         // room above is what separates it from the transcript; the room below
         // is only there to keep it off the edge.
         .padding(.top, 7)
-        // Negative, and deliberately. `safeAreaBar` parks the bar clear of the
-        // home indicator, which leaves more room under it than under anything
-        // else on screen. Taking back part of that closes the gap without
-        // putting the field where a swipe up would catch it.
-        .padding(.bottom, -14)
+        // Negative, and only against the home indicator.
+        //
+        // `safeAreaBar` parks the bar clear of whatever is below it, and when
+        // that is the home indicator it leaves more room than anything else on
+        // screen gets — so part of it is taken back. When the keyboard is up it
+        // is the keyboard down there instead, and there is nothing spare to
+        // reclaim: the same negative padding drives the field into the keys.
+        .padding(.bottom, composerFocused ? 0 : -14)
+        .animation(.easeOut(duration: 0.2), value: composerFocused)
         .attachmentPicker(isPresented: $isAttachmentPickerPresented) { picked in
             // Staged rather than sent. Picking a photo and then typing a caption
             // is the common case, and sending on pick would make that
