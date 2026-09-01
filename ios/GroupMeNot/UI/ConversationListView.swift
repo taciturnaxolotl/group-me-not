@@ -22,6 +22,12 @@ struct ConversationListView: View {
     /// there is no doubt which one is about to change.
     @State private var pinTarget: ConversationRow?
     @State private var isNewGroupPresented = false
+    /// The width one pin gets, worked out from the grid rather than guessed.
+    @State private var tileSize: CGFloat = 96
+
+    /// The gap between pin columns, which is also what the tile width is
+    /// measured against.
+    private static let tileGap: CGFloat = 16
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -210,26 +216,32 @@ struct ConversationListView: View {
     /// row it replaced. Hidden while searching, because a search should look
     /// through everything rather than have part of it pinned above the results.
     private var pinnedStrip: some View {
-        VStack(spacing: 10) {
-            HStack {
-                Text("Pinned")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            .padding(.horizontal, 4)
-
-            // Three fixed columns rather than an adaptive fit, so the grid is
-            // the same shape on every phone and a pin does not move when the
-            // one before it is removed.
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 14) {
-                ForEach(pinnedRows) { row in
-                    pinnedTile(row)
-                }
+        // Three fixed columns rather than an adaptive fit, so the grid is the
+        // same shape on every phone and a pin does not move when the one before
+        // it is removed.
+        //
+        // No heading. Faces this size at the top of a list of rows are not
+        // ambiguous about what they are, and a grey word above them is a line
+        // of furniture explaining something nobody was confused by.
+        LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: Self.tileGap), count: 3),
+            spacing: 18
+        ) {
+            ForEach(pinnedRows) { row in
+                pinnedTile(row)
             }
         }
+        // Measured rather than fixed, so a pin is as big as its column allows.
+        // A face is the entire content of a tile and the whole reason to pin
+        // something: shrink it and the tile becomes a small picture with a lot
+        // of air around it, which is the arrangement it replaced.
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+            guard width > 0 else { return }
+            tileSize = max(56, (width - Self.tileGap * 2) / 3)
+        }
         .padding(.horizontal, 16)
-        .padding(.bottom, 16)
+        .padding(.top, 2)
+        .padding(.bottom, 18)
         .listRowInsets(EdgeInsets())
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
@@ -247,7 +259,7 @@ struct ConversationListView: View {
             row: row,
             name: row.name,
             unread: unreadTotal(for: row),
-            size: 60,
+            size: tileSize,
             leadsToChooser: hasTopics(row),
             onLongPress: { pinTarget = row }
         ) {
@@ -688,9 +700,12 @@ struct ConversationTile: View {
                     }
                     .overlay(alignment: .bottomTrailing) { hints }
                 Text(name)
-                    .font(.caption2)
+                    .font(.caption)
                     .lineLimit(1)
-                    .foregroundStyle(.primary)
+                    // Secondary, like every caption under a picture: the face
+                    // is the thing being read, and a name in full-strength text
+                    // competes with it for the eye.
+                    .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity)
             .contentShape(.rect)
