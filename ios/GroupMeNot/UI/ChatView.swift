@@ -351,6 +351,8 @@ struct ChatView: View {
     /// The row the transcript opens on, when that is not the newest message.
     /// Set once, consumed once, by the effect inside the `ScrollViewReader`.
     @State private var openingTarget: String?
+    /// A jump whose row has not been built yet. See `focus(on:)`.
+    @State private var pendingTarget: String?
 
     /// A quarter of the way down rather than hard against the top edge, so a
     /// little of what was already read stays visible above the divider. Landing
@@ -434,8 +436,9 @@ struct ChatView: View {
                     messages: model.pinned,
                     members: model.members,
                     onOpen: { id in
-                        isPinnedPresented = false
-                        openingTarget = id
+                        guard await model.reveal(id) else { return false }
+                        focus(on: id)
+                        return true
                     },
                     onUnpin: { message in
                         Task { await model.setPinned(false, message: message) }
@@ -444,6 +447,17 @@ struct ChatView: View {
             .sheet(isPresented: $isInfoPresented) {
                 ConversationInfoView(conversation: current, members: model.members)
             }
+    }
+
+    /// Scroll to a message, waiting for its row if the rebuild has not caught
+    /// up. Paging back changes `model.messages`; the rows follow a beat later,
+    /// and scrolling to an id that does not exist yet is a silent no-op.
+    private func focus(on id: String) {
+        if rows.contains(where: { $0.id == id }) {
+            openingTarget = id
+        } else {
+            pendingTarget = id
+        }
     }
 
     /// Split off `body` purely so the type checker can finish. Two chains of a
@@ -1391,9 +1405,18 @@ struct ChatView: View {
         // since holding the content's end for the next few frames is the one
         // thing that would drag the view back down off the divider.
         let opensOnDivider = rows.isEmpty && !built.isEmpty && unread != nil
+        // The seventh: a jump that has been waiting for its row. This is the
+        // one fill that grows above *and* wants the view to move, so it opts
+        // out of holding the content's end for the same reason the divider does.
+        let arriving = pendingTarget.map { target in built.contains { $0.id == target } } ?? false
 
-        if grewAbove, !opensOnDivider { holdContentEnd() }
+        if grewAbove, !opensOnDivider, !arriving { holdContentEnd() }
         rows = built
+
+        if arriving {
+            openingTarget = pendingTarget
+            pendingTarget = nil
+        }
 
         // After the assignment, so the row it scrolls to exists by the time the
         // effect runs.

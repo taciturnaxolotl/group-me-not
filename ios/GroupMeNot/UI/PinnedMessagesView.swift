@@ -10,22 +10,27 @@ import SwiftUI
 struct PinnedMessagesView: View {
     let messages: [Message]
     let members: [Member]
-    /// Jump to it in the transcript.
-    let onOpen: (String) -> Void
+    /// Jump to it in the transcript. Returns whether it could be found: a pin
+    /// can sit further back than we are willing to page.
+    let onOpen: (String) async -> Bool
     let onUnpin: (Message) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    /// The pin currently being dug out of the history.
+    @State private var opening: String?
+    @State private var tooFarBack = false
 
     var body: some View {
         NavigationStack {
             List {
                 ForEach(messages, id: \.id) { message in
                     Button {
-                        onOpen(message.id)
+                        open(message)
                     } label: {
                         row(message)
                     }
                     .buttonStyle(.plain)
+                    .disabled(opening != nil)
                     .swipeActions(edge: .trailing) {
                         Button(role: .destructive) {
                             onUnpin(message)
@@ -54,6 +59,22 @@ struct PinnedMessagesView: View {
             }
         }
         .presentationDetents([.medium, .large])
+        .alert("Too Far Back", isPresented: $tooFarBack) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("This message sits deeper in the history than we can reach right now.")
+        }
+    }
+
+    /// Digging can take a moment and can come up empty, so the row says which
+    /// pin it is working on rather than leaving the tap looking unheard.
+    private func open(_ message: Message) {
+        opening = message.id
+        Task {
+            let found = await onOpen(message.id)
+            opening = nil
+            if found { dismiss() } else { tooFarBack = true }
+        }
     }
 
     private var title: String {
@@ -78,6 +99,9 @@ struct PinnedMessagesView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if opening == message.id {
+                ProgressView().controlSize(.small)
             }
         }
         .padding(.vertical, 4)

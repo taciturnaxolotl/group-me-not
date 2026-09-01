@@ -320,6 +320,38 @@ final class AppModel {
     /// which is the only honest way to know: no endpoint reports a total.
     var canLoadOlder: Bool { !reachedBeginning && !messages.isEmpty }
 
+    /// How far back a jump will page before giving up. Deep enough for any pin
+    /// worth keeping, shallow enough that a miss does not spend the afternoon.
+    private static let revealPageLimit = 10
+
+    /// Whether a jump is currently digging for its message.
+    private(set) var revealing = false
+
+    /// Bring a message into the loaded window so the transcript can scroll to it.
+    ///
+    /// Pins outlive the window: something pinned in March is thousands of
+    /// messages behind the fifty we opened with. No endpoint returns the
+    /// messages *around* an id, only the ones before one, so the web and
+    /// Android clients answer a jump the only way it can be answered, by
+    /// paging backwards until the message turns up. So do we.
+    ///
+    /// Returns whether it was found. False means it is further back than
+    /// `revealPageLimit` pages, or the radio gave out on the way.
+    @discardableResult
+    func reveal(_ messageID: String) async -> Bool {
+        guard openConversationID != nil else { return false }
+        if messages.contains(where: { $0.id == messageID }) { return true }
+        revealing = true
+        defer { revealing = false }
+        for _ in 0..<Self.revealPageLimit {
+            await loadOlder()
+            if messages.contains(where: { $0.id == messageID }) { return true }
+            // Nothing more to dig through, or the dig itself failed.
+            if !canLoadOlder || olderPageFailed { break }
+        }
+        return false
+    }
+
     /// Page backwards. Local history first; the network only when we run out.
     func loadOlder() async {
         guard let conversation = openConversationID, !reachedBeginning else { return }
