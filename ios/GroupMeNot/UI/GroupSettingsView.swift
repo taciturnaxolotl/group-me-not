@@ -66,8 +66,6 @@ struct GroupSettingsView: View {
                 .textInputAutocapitalization(.words)
         } header: {
             Text("Your Nickname")
-        } footer: {
-            Text("Only changes how you appear here.")
         }
     }
 
