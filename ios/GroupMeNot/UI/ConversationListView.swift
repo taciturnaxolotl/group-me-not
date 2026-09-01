@@ -266,7 +266,7 @@ struct ConversationListView: View {
             name: row.name,
             unread: unreadTotal(for: row),
             size: tileSize,
-            leadsToChooser: hasTopics(row),
+            topics: topics(of: row),
             onLongPress: { pinTarget = row }
         ) {
             path.append(destination(for: row))
@@ -285,8 +285,14 @@ struct ConversationListView: View {
     }
 
     private func hasTopics(_ row: ConversationRow) -> Bool {
-        guard case .group(let id) = row.id else { return false }
-        return model.conversations.contains { $0.parentID == id }
+        !topics(of: row).isEmpty
+    }
+
+    /// The topics under a group.
+
+    private func topics(of row: ConversationRow) -> [ConversationRow] {
+        guard case .group(let id) = row.id else { return [] }
+        return model.conversations.filter { $0.parentID == id }
     }
 
     private func destination(for row: ConversationRow) -> Route {
@@ -685,8 +691,10 @@ struct ConversationTile: View {
     let name: String
     let unread: Int
     var size: CGFloat = 56
-    /// Marks a tile that opens a choice rather than a conversation.
-    var leadsToChooser = false
+    /// The topics under this group, if it has any. A tile with topics opens a
+    /// choice rather than a conversation, and says so by showing two of them
+    /// stacked behind the group's own face.
+    var topics: [ConversationRow] = []
     /// Held rather than long-pressed into a `contextMenu`.
     ///
     /// A `contextMenu` declared inside a `List` row is installed on the *row*,
@@ -700,9 +708,8 @@ struct ConversationTile: View {
         Button(action: action) {
             VStack(spacing: 6) {
                 Avatar(url: row.avatarURL, name: name, size: size, isGroup: row.isGroup)
-                    // A card peeking out from behind the face, for a group that
-                    // opens a choice of topics rather than a conversation.
-                    .background(alignment: .bottom) { understudy }
+                    // The topics themselves, peeking out from behind the face.
+                    .background { understudy }
                     .overlay(alignment: .topTrailing) {
                         UnreadBadge(count: unread, isMuted: row.isMuted)
                             .offset(x: 6, y: -2)
@@ -725,22 +732,30 @@ struct ConversationTile: View {
         .accessibilityLabel(unread > 0 ? "\(name), \(unread) unread" : name)
     }
 
-    /// The hint that a tile holds more than one conversation.
+    /// The topics, fanned out behind the group's own face.
     ///
-    /// A second circle, slightly smaller, showing a sliver at the foot of the
-    /// face. It says the same thing the blue stack badge said and asks for none
-    /// of the attention: a badge is a coloured mark competing with the unread
-    /// count on the other corner, while a card behind a card is a thing people
-    /// already read as "there is another one under this".
+    /// Their real photographs rather than a symbol standing in for them. A badge
+    /// is a coloured mark that has to be learned before it means anything, and
+    /// it was competing with the unread count on the opposite corner; two faces
+    /// behind a face need no key at all, and they are the very faces waiting on
+    /// the other side of the tap.
+    ///
+    /// Two, and no more. A third adds no information and the fan would have to
+    /// grow wider than its column to hold it.
     @ViewBuilder private var understudy: some View {
-        if leadsToChooser {
-            Circle()
-                .fill(Color(.tertiarySystemFill))
-                .overlay(Circle().strokeBorder(Color(.systemBackground), lineWidth: 2))
-                .frame(width: size * 0.9, height: size * 0.9)
-                .offset(y: 6)
+        ZStack {
+            ForEach(Array(topics.prefix(2).enumerated()), id: \.element.id) { index, topic in
+                Avatar(url: topic.avatarURL, name: topic.name, size: size * 0.82, isGroup: true)
+                    // The gap is what makes them read as separate cards rather
+                    // than as one wide smear behind the face.
+                    .overlay(Circle().strokeBorder(Color(.systemBackground), lineWidth: 2.5))
+                    .offset(x: index == 0 ? -size * 0.17 : size * 0.17, y: 6)
+            }
         }
     }
+
+    /// Whether this tile opens a choice of topics rather than a conversation.
+    private var leadsToChooser: Bool { !topics.isEmpty }
 
     /// Worth knowing before tapping: that this is a conversation nobody but an
     /// admin can post in.
