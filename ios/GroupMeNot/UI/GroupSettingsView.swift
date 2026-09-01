@@ -113,9 +113,7 @@ struct GroupSettingsView: View {
 
     private var joiningSection: some View {
         Section {
-            Toggle("Approve New Members", isOn: $requiresApproval)
-        } footer: {
-            Text("People using the share link wait for an admin.")
+            Toggle("Require approval for new members", isOn: $requiresApproval)
         }
     }
 
