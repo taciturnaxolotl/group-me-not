@@ -150,13 +150,26 @@ actor SyncEngine {
     /// Run the whole catch-up. Two syncs never overlap: a caller arriving while
     /// one is in flight waits for that one and returns.
     func sync(reason: SyncReason = .manual) async {
-        if let running {
+        // Join a sync already in flight rather than starting a second one. The
+        // handle is cleared inside the task rather than after awaiting it,
+        // because a caller that goes away mid-await would otherwise leave a
+        // finished task sitting here forever — and every later sync would then
+        // "join" it, return at once, and do nothing. An app backgrounded during
+        // its first sync is exactly how that happens, and it wedges the whole
+        // thing until relaunch.
+        if let running, !running.isCancelled {
             await running.value
             return
         }
-        let task = Task { await perform(reason: reason) }
+        let task = Task { [self] in
+            await perform(reason: reason)
+            clearRunning()
+        }
         running = task
         await task.value
+    }
+
+    private func clearRunning() {
         running = nil
     }
 

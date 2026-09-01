@@ -331,12 +331,32 @@ struct ConversationListView: View {
     }
 
     /// Shown before the first sync finishes, and for the rare account with
-    /// nothing in it. Either way there is nothing useful to do here, so it says
-    /// so plainly instead of spinning.
+    /// nothing in it.
+    ///
+    /// The two are different states and used to be drawn the same. An account
+    /// that has simply not synced yet is not an account with no conversations,
+    /// and saying so on the first frame of every cold start — before the sync
+    /// has even set itself to `syncing` — is both wrong and alarming.
+    /// `lastSyncedAt` is what tells them apart: until there has been one
+    /// successful sync there is nothing to make a claim from.
     @ViewBuilder private var emptyState: some View {
-        if model.syncState.isRefreshing {
-            ProgressView("Loading conversations")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        if model.syncState.isRefreshing || model.syncState.lastSyncedAt == nil {
+            VStack(spacing: 14) {
+                ProgressView()
+                Text("Loading conversations")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                // A first sync that failed leaves a spinner with nothing behind
+                // it, so the way out is offered rather than waited for.
+                if !model.syncState.isRefreshing, let error = model.syncState.lastError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Try Again") { Task { await model.refresh() } }
+                        .buttonStyle(.bordered)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ContentUnavailableView {
                 Label("No Conversations", systemImage: "bubble.left.and.bubble.right")
