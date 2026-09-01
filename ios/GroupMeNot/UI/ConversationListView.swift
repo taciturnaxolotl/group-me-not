@@ -29,6 +29,9 @@ struct ConversationListView: View {
     /// measured against.
     private static let tileGap: CGFloat = 16
 
+    /// As big as a pin gets, whatever the column allows.
+    private static let tileCap: CGFloat = 88
+
     var body: some View {
         NavigationStack(path: $path) {
             content
@@ -237,7 +240,10 @@ struct ConversationListView: View {
         // of air around it, which is the arrangement it replaced.
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
             guard width > 0 else { return }
-            tileSize = max(56, (width - Self.tileGap * 2) / 3)
+            // Capped, and the cap is the point: a column three across a phone
+            // is wider than a face wants to be, and a pin filling it edge to
+            // edge reads as a photo gallery rather than as a shortcut.
+            tileSize = min(Self.tileCap, max(56, (width - Self.tileGap * 2) / 3))
         }
         .padding(.horizontal, 16)
         .padding(.top, 2)
