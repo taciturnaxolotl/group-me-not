@@ -1762,8 +1762,11 @@ private struct TranscriptScrollTuning: UIViewRepresentable {
 
     final class Probe: UIView {
         private weak var scrollView: UIScrollView?
-        private var observation: NSKeyValueObservation?
-        private var lastBottomInset: CGFloat?
+        private var insetObservation: NSKeyValueObservation?
+        private var boundsObservation: NSKeyValueObservation?
+        /// The height actually available to draw content in, which is what the
+        /// keyboard takes away — by whichever means it happens to use.
+        private var lastVisibleHeight: CGFloat?
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
@@ -1796,9 +1799,23 @@ private struct TranscriptScrollTuning: UIViewRepresentable {
             scroll.scrollsToTop = false
 
             // 2. Keep the view still when the keyboard arrives.
-            lastBottomInset = scroll.adjustedContentInset.bottom
-            observation = scroll.observe(\.adjustedContentInset, options: [.new]) { scroll, _ in
-                MainActor.assumeIsolated { [weak self] in self?.bottomInsetChanged(on: scroll) }
+            //
+            // Watched two ways, because there are two. A keyboard can take room
+            // from a scroll view by growing its bottom inset or by shrinking its
+            // frame, and which one happens is SwiftUI's business rather than
+            // ours: `safeAreaBar` and the keyboard between them have used both.
+            // Watching only the inset means the compensation silently does
+            // nothing whenever the other one is used, which is exactly what a
+            // reader sees as the transcript sliding under the keyboard.
+            //
+            // So the thing tracked is neither: it is the height left over,
+            // which is what actually determines what can be seen.
+            lastVisibleHeight = visibleHeight(of: scroll)
+            insetObservation = scroll.observe(\.adjustedContentInset, options: [.new]) { scroll, _ in
+                MainActor.assumeIsolated { [weak self] in self?.visibleHeightChanged(on: scroll) }
+            }
+            boundsObservation = scroll.observe(\.bounds, options: [.new]) { scroll, _ in
+                MainActor.assumeIsolated { [weak self] in self?.visibleHeightChanged(on: scroll) }
             }
         }
 
@@ -1811,21 +1828,25 @@ private struct TranscriptScrollTuning: UIViewRepresentable {
         /// actually requires. It is applied without an animation of its own so
         /// it inherits the keyboard's, which is what makes the two look like one
         /// movement rather than a scroll chasing a keyboard.
-        private func bottomInsetChanged(on scroll: UIScrollView) {
-            let bottom = scroll.adjustedContentInset.bottom
-            defer { lastBottomInset = bottom }
-            guard let previous = lastBottomInset else { return }
+        private func visibleHeight(of scroll: UIScrollView) -> CGFloat {
+            scroll.bounds.height
+                - scroll.adjustedContentInset.top
+                - scroll.adjustedContentInset.bottom
+        }
 
-            // Both directions, which is what makes it hold on close as well as
-            // on open.
+        private func visibleHeightChanged(on scroll: UIScrollView) {
+            let visible = visibleHeight(of: scroll)
+            defer { lastVisibleHeight = visible }
+            guard let previous = lastVisibleHeight else { return }
+            // Room lost, which is what the offset has to make up.
             //
-            // This used to compensate growth only, and the asymmetry was
-            // visible: opening the keyboard held the reader's place, and
-            // closing it let the content ride up by the keyboard's height,
-            // because the space it vacated became transcript while the offset
-            // stayed put. The rule is relative in both directions and does not
-            // care where in the history the reader is standing.
-            let delta = bottom - previous
+            // `bounds` also fires on every scroll, but its *origin* moving is
+            // not this: only a change in height counts, and a scroll does not
+            // change one. Both directions, so it holds on close as well as on
+            // open — room gained is taken back off the offset. The rule is
+            // purely relative; it never refers to "the bottom" and so holds
+            // from anywhere in the history.
+            let delta = previous - visible
             guard abs(delta) > 1 else { return }
             // A finger on the glass owns the scroll view. Nothing here outranks
             // that.
@@ -1834,7 +1855,9 @@ private struct TranscriptScrollTuning: UIViewRepresentable {
             let lowest = -scroll.adjustedContentInset.top
             let highest = max(
                 lowest,
-                scroll.contentSize.height + bottom - scroll.bounds.height)
+                scroll.contentSize.height
+                    + scroll.adjustedContentInset.bottom
+                    - scroll.bounds.height)
             let target = min(max(scroll.contentOffset.y + delta, lowest), highest)
             guard abs(target - scroll.contentOffset.y) > 0.5 else { return }
             // No animation of its own, so it inherits the keyboard's. Giving it
