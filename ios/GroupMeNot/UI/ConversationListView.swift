@@ -729,7 +729,7 @@ struct ConversationTile: View {
         .buttonStyle(.plain)
         .onLongPressGesture(minimumDuration: 0.35) { onLongPress?() }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(unread > 0 ? "\(name), \(unread) unread" : name)
+        .accessibilityLabel(spokenLabel)
     }
 
     /// The topics, fanned out behind the group's own face.
@@ -756,6 +756,17 @@ struct ConversationTile: View {
 
     /// Whether this tile opens a choice of topics rather than a conversation.
     private var leadsToChooser: Bool { !topics.isEmpty }
+
+    /// The fan behind the face is the only thing saying this tile holds several
+    /// conversations, and a picture says nothing out loud, so it is said here.
+    private var spokenLabel: String {
+        var parts = [name]
+        if unread > 0 { parts.append("\(unread) unread") }
+        if leadsToChooser {
+            parts.append(topics.count == 1 ? "1 topic" : "\(topics.count) topics")
+        }
+        return parts.joined(separator: ", ")
+    }
 
     /// Worth knowing before tapping: that this is a conversation nobody but an
     /// admin can post in.
