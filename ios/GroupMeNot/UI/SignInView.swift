@@ -2,17 +2,20 @@ import SwiftUI
 
 /// The way in.
 ///
-/// One decision on the screen, not five. GroupMe's own web client hands a token
-/// back to a native app for any of four identity providers, which between them
-/// cover every way an account can exist, so signing in is a tap and a password
-/// page. There used to be a pasted-token route beneath all this, with three
-/// numbered steps and a paragraph about the Web Inspector; it was the largest
-/// thing on the screen and it answered a question the providers already answer.
+/// One decision on the screen, not five. There are three ways in and they are
+/// not equal in likelihood, so they are not equal on the page: a provider hand
+/// off through GroupMe's own web client, an email and password straight to
+/// their login endpoint, and the remaining providers one tap further down.
+///
+/// There used to be a pasted-token route beneath all this, with three numbered
+/// steps and a paragraph about the Web Inspector. It was the largest thing on
+/// the screen and it answered a question the other routes already answer.
 struct SignInView: View {
     @Environment(AppModel.self) private var model
 
     @State private var authorising: OAuth.Provider?
     @State private var isChoosingProvider = false
+    @State private var isEmailPresented = false
     @State private var oauthError: String?
 
     var body: some View {
@@ -33,6 +36,7 @@ struct SignInView: View {
                 Button(provider.title) { signIn(with: provider) }
             }
         }
+        .sheet(isPresented: $isEmailPresented) { EmailSignInView() }
     }
 
     // MARK: Pieces
@@ -45,7 +49,7 @@ struct SignInView: View {
                 .accessibilityHidden(true)
             Text("GroupMeNot")
                 .font(.largeTitle.bold())
-            Text("A faster GroupMe that works without a signal.")
+            Text("The better, faster, nicer, all around best GroupMe client.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -81,14 +85,19 @@ struct SignInView: View {
             .disabled(isBusy)
 
             Button {
-                isChoosingProvider = true
+                isEmailPresented = true
             } label: {
-                Text("Other ways to sign in")
+                Text("Email & Password")
                     .frame(maxWidth: .infinity, minHeight: 30)
             }
             .buttonStyle(.bordered)
             .controlSize(.large)
             .disabled(isBusy)
+
+            Button("Other ways to sign in") { isChoosingProvider = true }
+                .font(.subheadline)
+                .padding(.top, 2)
+                .disabled(isBusy)
 
             if let provider = authorising, provider != .apple {
                 Label("Waiting for \(provider.rawValue.capitalized)…", systemImage: "hourglass")
@@ -104,13 +113,6 @@ struct SignInView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 2)
             }
-
-            Text("Opens GroupMe's own sign-in page. Your password is never seen by this app.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 6)
         }
     }
 
