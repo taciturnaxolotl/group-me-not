@@ -1514,7 +1514,7 @@ struct ChatView: View {
 // MARK: - Pieces
 
 /// The date heading between days.
-private struct DaySeparator: View {
+struct DaySeparator: View {
     let date: Date
 
     var body: some View {
@@ -1573,7 +1573,7 @@ private struct UnreadDivider: View {
 /// own sentences, verbatim. The lid keeps its own state, so a run the reader
 /// opened stays open across rebuilds; `SystemMessageRun.id` is what makes that
 /// identity hold.
-private struct SystemRunRow<Row: View>: View {
+struct SystemRunRow<Row: View>: View {
     let run: SystemMessageRun
     @ViewBuilder let row: (MessageDisplay) -> Row
 
