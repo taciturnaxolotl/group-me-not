@@ -873,7 +873,12 @@ struct ChatView: View {
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 7)
+        // Asymmetric, so the bar sits down against the home indicator rather
+        // than floating in the middle of the space the safe area leaves. The
+        // room above is what separates it from the transcript; the room below
+        // is only there to keep it off the edge.
+        .padding(.top, 7)
+        .padding(.bottom, 2)
         .attachmentPicker(isPresented: $isAttachmentPickerPresented) { picked in
             // Staged rather than sent. Picking a photo and then typing a caption
             // is the common case, and sending on pick would make that
@@ -951,8 +956,8 @@ struct ChatView: View {
                 TextField("Message", text: $draft, axis: .vertical)
                     .textInputAutocapitalization(.sentences)
                     .lineLimit(1...6)
-                    .padding(.leading, 14)
-                    .padding(.vertical, 7)
+                    .padding(.leading, 16)
+                    .padding(.vertical, 11)
                     .focused($composerFocused)
                     .accessibilityLabel("Message")
                     .onChange(of: draft) { _, text in
@@ -978,8 +983,10 @@ struct ChatView: View {
         // A rounded rectangle rather than a capsule, because a capsule around a
         // field carrying a row of photos is a stadium: the radius follows the
         // height, and the taller it gets the more the ends bow out. At a single
-        // line's height this is within a point of the capsule it replaces.
-        .glassEffect(.regular, in: .rect(cornerRadius: 20, style: .continuous))
+        // line's height this radius is indistinguishable from one, which is the
+        // point — round like the buttons beside it, and still sane when the
+        // attachment tray makes it four times as tall.
+        .glassEffect(.regular, in: .rect(cornerRadius: 24, style: .continuous))
     }
 
     /// Members matching the name being typed after an `@`.
@@ -1147,8 +1154,8 @@ struct ChatView: View {
                     .background(Color.accentColor, in: .circle)
             }
             .buttonStyle(.plain)
-            .padding(.trailing, 4)
-            .padding(.bottom, 3)
+            .padding(.trailing, 5)
+            .padding(.bottom, 6)
             .transition(.scale.combined(with: .opacity))
             .accessibilityLabel("Send")
         } else {
