@@ -475,22 +475,37 @@ actor SyncEngine {
     /// The preview carries text, nickname, image and attachments but no sender
     /// id, so this is marked with ``previewSenderType`` and replaced by the real
     /// message the first time anybody opens the conversation.
+    ///
+    /// Nil unless the preview actually describes a message. **A system notice
+    /// previews as all nulls** — measured 31 August 2026 against a group whose
+    /// newest message was `membership.announce.joined`: `nickname`, `text` and
+    /// `image_url` were every one of them null, while the message itself was an
+    /// ordinary `system: true` notice from "GroupMe". Building from that gives a
+    /// message with no sender and nothing to say, which the transcript can only
+    /// draw as an empty bubble attributed to "Someone". Returning nil instead
+    /// leaves the conversation looking behind, which is exactly what it is, and
+    /// the next pass pages the real notice in.
     private static func previewMessage(for group: Group, id: String) -> Message? {
-        guard let summary = group.messages else { return nil }
-        let preview = summary.preview
+        guard let summary = group.messages, let preview = summary.preview else { return nil }
+        // A name is the part that cannot be recovered later. Text can be empty
+        // on a message that is only a photograph, but a preview that will not
+        // say who wrote it can only ever be drawn as a stranger.
+        guard let nickname = preview.nickname, !nickname.isEmpty else { return nil }
+        let hasText = !(preview.text ?? "").isEmpty
+        guard hasText || !(preview.attachments ?? []).isEmpty else { return nil }
         return Message(
             id: id,
             sourceGuid: nil,
             createdAt: summary.lastMessageCreatedAt ?? Int(Date().timeIntervalSince1970),
             userId: nil,
             senderId: nil,
-            name: preview?.nickname,
-            avatarUrl: preview?.imageUrl,
+            name: nickname,
+            avatarUrl: preview.imageUrl,
             senderType: previewSenderType,
-            text: preview?.text,
+            text: preview.text,
             system: false,
             favoritedBy: nil,
-            attachments: preview?.attachments,
+            attachments: preview.attachments,
             groupId: group.id,
             chatId: nil,
             recipientId: nil,

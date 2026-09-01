@@ -56,6 +56,14 @@ Better still: the chats list embeds the *entire* last message, and the groups li
 skip the follow-up entirely. That is a meaningful saving on the common case of "phone woke
 up, three chats have one new message each": three conversations changed, zero message calls.
 
+One catch, measured 31 August 2026: **the `preview` of a system notice is all nulls.** A
+group whose newest message was a `membership.announce.joined` reported
+`preview: {nickname: null, text: null, image_url: null, attachments: []}`, while
+`GET /v3/groups/{id}/messages` returned it as an ordinary `system: true` message from
+"GroupMe" with the full sentence in `text`. So the shortcut has to check that the preview
+actually describes something before trusting it; an empty preview means "fetch it properly",
+not "a message with no sender said nothing".
+
 `after_id` paging is gap-free and ordered ascending, so resuming a partial catch-up is just
 "keep going from the last id you stored". No cursor state to persist beyond a message id per
 conversation.
