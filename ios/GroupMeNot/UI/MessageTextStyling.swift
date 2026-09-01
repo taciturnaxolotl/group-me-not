@@ -9,9 +9,20 @@ import SwiftUI
 /// scroll never pays for it.
 nonisolated enum MessageStyling {
 
-    /// The size an emoji-only message is drawn at. Big enough to read as a
-    /// gesture, small enough that eight of them still fit a line.
-    static let emojiFontSize: CGFloat = 44
+    /// The size an emoji-only message is drawn at.
+    ///
+    /// Scaled by how many there are. One emoji is a gesture and should land like
+    /// one; eight are closer to a sentence and have to fit a line. A single size
+    /// for both makes the lone one look timid and the row of eight look like a
+    /// mistake.
+    static func emojiFontSize(count: Int) -> CGFloat {
+        switch count {
+        case ...1: 68
+        case 2: 56
+        case 3: 48
+        default: 40
+        }
+    }
 
     /// Links tinted and underlined, mentions tinted and bold.
     ///

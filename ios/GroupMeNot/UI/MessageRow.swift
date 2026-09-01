@@ -401,7 +401,7 @@ private struct BubbleRow: View {
                 // compressing the line back down, which is the other half of the
                 // same problem and the one that read as "not expanding".
                 Text(item.text.plain)
-                    .font(.system(size: MessageStyling.emojiFontSize))
+                    .font(.system(size: MessageStyling.emojiFontSize(count: item.text.emojiCount)))
                     .lineSpacing(6)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 6)

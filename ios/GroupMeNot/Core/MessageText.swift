@@ -55,6 +55,9 @@ nonisolated struct MessageText: Hashable, Sendable {
     /// True when the message is a handful of emoji and nothing else, which is
     /// the one case that renders bigger and without a bubble tint.
     var isEmojiOnly: Bool
+    /// How many, when it is. Counted in grapheme clusters, so a face with a
+    /// skin tone and a gender is one emoji rather than four scalars.
+    var emojiCount: Int = 0
 
     var isEmpty: Bool { plain.isEmpty }
 
@@ -86,6 +89,7 @@ nonisolated enum MessageTextParser {
 
         var attributed = AttributedString(text)
         var links: [URL] = []
+        let count = emojiCount(text)
 
         // Links first. A mention never contains a URL, so ordering only matters
         // for the pathological case of a link inside a display name, where the
@@ -111,7 +115,8 @@ nonisolated enum MessageTextParser {
             attributed: attributed,
             plain: text,
             links: links,
-            isEmojiOnly: isEmojiOnly(text))
+            isEmojiOnly: count > 0,
+            emojiCount: count)
     }
 
     // MARK: Links
@@ -238,15 +243,19 @@ nonisolated enum MessageTextParser {
     /// U+FFFD counts, because that is the placeholder a legacy powerup sticker
     /// leaves behind in `text`; a message that is one sticker should read as
     /// one sticker.
-    static func isEmojiOnly(_ text: String) -> Bool {
+    static func isEmojiOnly(_ text: String) -> Bool { emojiCount(text) > 0 }
+
+    /// How many emoji a message is made of, or zero if it is made of anything
+    /// else. Grapheme clusters, so a ZWJ sequence counts once.
+    static func emojiCount(_ text: String) -> Int {
         var count = 0
         for character in text {
             if character.isWhitespace { continue }
-            guard character.isEmojiLike else { return false }
+            guard character.isEmojiLike else { return 0 }
             count += 1
-            if count > emojiOnlyLimit { return false }
+            if count > emojiOnlyLimit { return 0 }
         }
-        return count > 0
+        return count
     }
 }
 
