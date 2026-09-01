@@ -371,7 +371,7 @@ struct ConversationListView: View {
 
     /// The account photo in the header. Large enough to read as a photograph
     /// of a person rather than as an icon of one.
-    private static let avatarSize: CGFloat = 44
+    private static let avatarSize: CGFloat = 38
 
     /// Large title and account avatar on one line, scrolling with the list.
     var titleHeader: some View {
