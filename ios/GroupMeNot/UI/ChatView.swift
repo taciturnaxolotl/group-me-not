@@ -878,7 +878,11 @@ struct ChatView: View {
         // room above is what separates it from the transcript; the room below
         // is only there to keep it off the edge.
         .padding(.top, 7)
-        .padding(.bottom, 2)
+        // Negative, and deliberately. `safeAreaBar` parks the bar clear of the
+        // home indicator, which leaves more room under it than under anything
+        // else on screen. Taking back part of that closes the gap without
+        // putting the field where a swipe up would catch it.
+        .padding(.bottom, -14)
         .attachmentPicker(isPresented: $isAttachmentPickerPresented) { picked in
             // Staged rather than sent. Picking a photo and then typing a caption
             // is the common case, and sending on pick would make that
@@ -921,12 +925,21 @@ struct ChatView: View {
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 21, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 34, height: 34)
-                .glassEffect(.regular.interactive(), in: .circle)
+                .frame(width: Self.composerHeight, height: Self.composerHeight)
+                // The same shape and size as the field beside it, so the two
+                // read as one control split in half rather than a button parked
+                // next to a box.
+                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 24, style: .continuous))
         }
+        // On the `Menu`, not on the label. A menu tints its label with the
+        // accent colour and overrides whatever the label asked for, which is
+        // why this went blue the moment it stopped being a plain button.
+        .foregroundStyle(.primary)
         .accessibilityLabel("Add attachment")
     }
+
+    /// One line's worth of composer, which the attach button matches.
+    private static let composerHeight: CGFloat = 44
 
     private var field: some View {
         VStack(alignment: .leading, spacing: 0) {
