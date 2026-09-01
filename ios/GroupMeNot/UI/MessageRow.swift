@@ -601,7 +601,7 @@ private struct Tombstone: View {
 /// No tint, no padding, no bubble. Photos draw at their real shape and still
 /// never resize on arrival, because the shape comes out of the URL rather than
 /// out of the pixels. See `MediaDimensions`.
-private struct PhotoCascade: View {
+struct PhotoCascade: View {
     let pictures: [Message.Attachment]
     /// Which edge the message hangs off, which decides which way the pile leans.
     let isTrailing: Bool
@@ -843,7 +843,7 @@ private struct MediaThumbnail: View {
 
 /// An attachment the transcript cannot draw inline, named rather than rendered.
 /// These stay inside the bubble: a chip is part of a message, not the message.
-private struct AttachmentChipFor: View {
+struct AttachmentChipFor: View {
     let attachment: Message.Attachment
     let isOwn: Bool
 
