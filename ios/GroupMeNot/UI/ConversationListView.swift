@@ -22,7 +22,6 @@ struct ConversationListView: View {
     /// there is no doubt which one is about to change.
     @State private var pinTarget: ConversationRow?
     @State private var isNewGroupPresented = false
-    @State private var isPinnedPresented = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -51,17 +50,6 @@ struct ConversationListView: View {
                 }
                 .sheet(isPresented: $isRequestsPresented) {
                     RequestsView()
-                }
-                .sheet(isPresented: $isPinnedPresented) {
-                    PinnedView(
-                        rows: pinnedRows,
-                        unread: unreadTotal(for:),
-                        leadsToChooser: hasTopics(_:),
-                        onUnpin: { settings.togglePin($0.id.storageKey) },
-                        onOpen: { row in
-                            isPinnedPresented = false
-                            path.append(destination(for: row))
-                        })
                 }
                 .sheet(isPresented: $isNewGroupPresented) {
                     NewGroupView { created in
@@ -109,6 +97,7 @@ struct ConversationListView: View {
             titleHeader
             searchField
             if model.waitingRequests > 0 && query.isEmpty { requestsRow }
+            if !pinnedRows.isEmpty && query.isEmpty { pinnedStrip }
             ForEach(entries) { entry in
                 NavigationLink(value: destination(for: entry.row)) {
                     ConversationCell(entry: entry)
@@ -214,6 +203,58 @@ struct ConversationListView: View {
         return settings.pinned.compactMap { byKey[$0] }
     }
 
+    /// Faces along the top, the way iMessage does it.
+    ///
+    /// A picture and a name, and no preview: the point of pinning is to get
+    /// somewhere in one tap, and a preview would make each one as tall as the
+    /// row it replaced. Hidden while searching, because a search should look
+    /// through everything rather than have part of it pinned above the results.
+    private var pinnedStrip: some View {
+        VStack(spacing: 10) {
+            HStack {
+                Text("Pinned")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 4)
+
+            // Three fixed columns rather than an adaptive fit, so the grid is
+            // the same shape on every phone and a pin does not move when the
+            // one before it is removed.
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 14) {
+                ForEach(pinnedRows) { row in
+                    pinnedTile(row)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 16)
+        .listRowInsets(EdgeInsets())
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+    }
+
+    /// A plain `Button`, not a `NavigationLink`.
+    ///
+    /// A link inside a grid inside a `List` row is drawn as a list row: it takes
+    /// the disclosure chevron, and it resolves its destination against the row
+    /// it is nested in rather than the value it was given, which is why tapping
+    /// a pinned chat opened somebody else's messages. Pushing the route by hand
+    /// has neither problem.
+    private func pinnedTile(_ row: ConversationRow) -> some View {
+        ConversationTile(
+            row: row,
+            name: row.name,
+            unread: unreadTotal(for: row),
+            size: 60,
+            leadsToChooser: hasTopics(row),
+            onLongPress: { pinTarget = row }
+        ) {
+            path.append(destination(for: row))
+        }
+    }
+
     /// A pinned group answers for its topics, the same way a collapsed one does
     /// in the list. A tile has nothing to expand, so if it did not carry their
     /// unread the only sign of a message in a topic would be a conversation the
@@ -247,16 +288,7 @@ struct ConversationListView: View {
             .mapValues { $0.reduce(0) { $0 + $1.unreadCount } }
 
         return rows
-            .filter { !$0.isTopic }
-            .sorted { a, b in
-                // Pinned first, and otherwise the order the list already had,
-                // which is by recency. `sorted` is not stable, so the tiebreak
-                // has to be written down rather than assumed.
-                let pinnedA = settings.isPinned(a.id.storageKey)
-                let pinnedB = settings.isPinned(b.id.storageKey)
-                guard pinnedA == pinnedB else { return pinnedA }
-                return (a.lastMessageAt ?? .distantPast) > (b.lastMessageAt ?? .distantPast)
-            }
+            .filter { !$0.isTopic && !isPinnedAndShown($0) }
             .map { row in
                 guard case .group(let id) = row.id, let waiting = topicUnread[id] else {
                     return Entry(row: row)
@@ -267,7 +299,16 @@ struct ConversationListView: View {
             }
     }
 
-    /// One drawn row.
+    /// A pinned conversation is drawn in the strip instead of in the list, but
+    /// only while the strip is on screen: a search hides the strip, and hiding
+    /// the row as well would be a search that cannot find a pinned chat.
+    private func isPinnedAndShown(_ row: ConversationRow) -> Bool {
+        query.isEmpty && settings.isPinned(row.id.storageKey)
+    }
+
+    /// One drawn row. A conversation can appear twice — once as the header for
+    /// its topics and once as "Main" beneath them — so identity is the pairing
+    /// of the conversation with its role, not the conversation alone.
     struct Entry: Identifiable, Hashable {
         let row: ConversationRow
         /// Set where the row has to answer for conversations that are not on
@@ -339,7 +380,6 @@ struct ConversationListView: View {
             // same height nor the same baseline, so the two sat at different
             // heights with an arbitrary gap between them.
             HStack(spacing: 10) {
-                if !pinnedRows.isEmpty { pinnedButton }
                 newGroupButton
                 accountButton
             }
@@ -390,35 +430,6 @@ struct ConversationListView: View {
         .listRowInsets(EdgeInsets())
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
-    }
-
-    /// The pins, behind a button rather than spread across the top.
-    ///
-    /// A row of faces under the title pushed the search field and the whole list
-    /// down and made the header a second screen. Pinned conversations are still
-    /// at the top of the list where they belong; this is the fast way to one
-    /// without reading the list at all.
-    private var pinnedButton: some View {
-        Button {
-            isPinnedPresented = true
-        } label: {
-            Image(systemName: "pin.fill")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.tint)
-                .frame(width: 34, height: 34)
-                .glassEffect(.regular.interactive(), in: .circle)
-                .overlay(alignment: .topTrailing) {
-                    UnreadBadge(count: pinnedUnread, isMuted: false)
-                        .scaleEffect(0.85)
-                        .offset(x: 5, y: -3)
-                }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Pinned")
-    }
-
-    private var pinnedUnread: Int {
-        pinnedRows.reduce(0) { $0 + unreadTotal(for: $1) }
     }
 
     /// The same circle as the account button beside it.
@@ -702,70 +713,3 @@ struct ConversationTile: View {
 }
 
 
-
-/// The pinned conversations, as a grid of faces.
-///
-/// A sheet rather than a strip under the title. Nine faces above the search
-/// field pushed the list down far enough that the header stopped reading as a
-/// header, and the pins were on screen constantly to serve a tap that happens
-/// occasionally.
-struct PinnedView: View {
-    let rows: [ConversationRow]
-    let unread: (ConversationRow) -> Int
-    let leadsToChooser: (ConversationRow) -> Bool
-    let onUnpin: (ConversationRow) -> Void
-    let onOpen: (ConversationRow) -> Void
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var unpinning: ConversationRow?
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                LazyVGrid(
-                    columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3),
-                    spacing: 18
-                ) {
-                    ForEach(rows) { row in
-                        ConversationTile(
-                            row: row,
-                            name: row.name,
-                            unread: unread(row),
-                            size: 64,
-                            leadsToChooser: leadsToChooser(row),
-                            onLongPress: { unpinning = row }
-                        ) {
-                            onOpen(row)
-                        }
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 12)
-            }
-            .navigationTitle("Pinned")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            .confirmationDialog(
-                unpinning?.name ?? "",
-                isPresented: .init(
-                    get: { unpinning != nil },
-                    set: { if !$0 { unpinning = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                if let row = unpinning {
-                    Button("Unpin", role: .destructive) {
-                        unpinning = nil
-                        withAnimation(.snappy(duration: 0.25)) { onUnpin(row) }
-                    }
-                    Button("Cancel", role: .cancel) { unpinning = nil }
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
-    }
-}
