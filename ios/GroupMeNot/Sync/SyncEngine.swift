@@ -35,6 +35,9 @@ nonisolated enum SyncReason: String, Sendable {
     case reconnect
     case signIn
     case push
+    /// The periodic sync that runs while the app is in front. See
+    /// `AppModel.startHeartbeat()`.
+    case heartbeat
 }
 
 /// What changed in local storage. The UI layer reloads from the stores when one

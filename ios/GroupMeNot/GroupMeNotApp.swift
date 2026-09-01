@@ -28,7 +28,10 @@ struct GroupMeNotApp: App {
                 .onChange(of: scenePhase) { _, phase in
                     // Faye replays nothing it missed, so coming back from the
                     // background means running the whole catch-up loop again.
-                    guard phase == .active else { return }
+                    guard phase == .active else {
+                        model.backgrounded()
+                        return
+                    }
                     Task { await model.foregrounded() }
                 }
         }

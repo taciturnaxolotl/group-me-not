@@ -131,6 +131,8 @@ final class AppModel {
 
     @ObservationIgnored private var didBootstrap = false
     @ObservationIgnored private var observers: [Task<Void, Never>] = []
+    /// The periodic sync, running only while the app is in front.
+    @ObservationIgnored private var heartbeat: Task<Void, Never>?
     @ObservationIgnored private var reloadTask: Task<Void, Never>?
     @ObservationIgnored private var needsConversationReload = false
     @ObservationIgnored private var needsMessageReload = false
@@ -241,6 +243,7 @@ final class AppModel {
         Task { await self.sends.drain() }
         Task { await self.drainReactions() }
         Task { await self.sync.sync(reason: .launch) }
+        startHeartbeat()
         Task { await self.refreshIdentity() }
         Task { await self.refreshRequests() }
     }
@@ -250,7 +253,49 @@ final class AppModel {
     func foregrounded() async {
         guard isSignedIn else { return }
         if let user = currentUser { await bayeux.start(as: user.id) }
+        // `start` is idempotent, which is exactly the problem: it is happy to
+        // report success over a socket the system killed while we were
+        // suspended. Only the client can tell whether it has heard anything
+        // lately, so it is asked.
+        await bayeux.reconnectIfStale()
+        startHeartbeat()
         await sync.sync(reason: .foreground)
+    }
+
+    /// Call when the app leaves the screen. Nothing here needs to keep ticking
+    /// once nobody is looking.
+    func backgrounded() {
+        heartbeat?.cancel()
+        heartbeat = nil
+    }
+
+    /// How often the app syncs on its own while somebody is looking at it.
+    private static let heartbeatInterval: TimeInterval = 90
+
+    /// Sync on a timer, quietly, for as long as the app is in front.
+    ///
+    /// Everything else that syncs is an event: a launch, a foreground, a
+    /// reconnect, a pull. That is a fine design right up until one of those
+    /// events fails to fire, and the realtime socket is a thing that can stop
+    /// working without ever reporting so. When it does, the app has no reason
+    /// left to ask the server anything, and it will sit there with a badge and
+    /// a list that were right an hour ago until the user thinks to background
+    /// it. A sync a minute and a half is cheap, and it is the difference
+    /// between a wrong badge that heals itself and one that does not.
+    private func startHeartbeat() {
+        guard heartbeat == nil else { return }
+        heartbeat = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Self.heartbeatInterval))
+                guard !Task.isCancelled else { return }
+                await self?.beat()
+            }
+        }
+    }
+
+    private func beat() async {
+        guard isSignedIn, realtime.reachability != .offline else { return }
+        await sync.sync(reason: .heartbeat)
     }
 
     /// Pull to refresh.

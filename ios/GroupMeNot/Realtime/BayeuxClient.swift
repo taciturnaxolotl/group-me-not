@@ -4,8 +4,11 @@ import os
 /// GroupMe's realtime feed: Faye speaking Bayeux over a WebSocket.
 ///
 /// Lifecycle, in one place: `start(as:)` opens a socket, handshakes, subscribes
-/// to `/user/{me}`, and keeps the socket alive with a `/meta/connect` every
-/// `advice.timeout - 30s`. If anything drops it reconnects with jittered
+/// to `/user/{me}`, and keeps one `/meta/connect` outstanding at all times: the
+/// server answers it when it has something to say or when `advice.timeout` runs
+/// out, and each answer asks for the next. A watchdog reconnects if that promise
+/// is ever broken, since a socket can die without saying so. If anything drops
+/// it reconnects with jittered
 /// exponential backoff and re-subscribes, because Faye has no replay: on every
 /// resume it emits `.connectionDidResume(afterGap:)` so the sync layer can close
 /// the hole over REST. This client stores nothing and calls no REST endpoint.
@@ -33,7 +36,10 @@ actor BayeuxClient {
 
     private var socket: URLSessionWebSocketTask?
     private var supervisor: Task<Void, Never>?
-    private var keepalive: Task<Void, Never>?
+    /// The next `/meta/connect`, waiting out `advice.interval`.
+    private var connectLoop: Task<Void, Never>?
+    /// Watches for a socket that is open and saying nothing.
+    private var watchdog: Task<Void, Never>?
     private var backoffSleep: Task<Void, Error>?
 
     private var running = false
@@ -54,6 +60,12 @@ actor BayeuxClient {
     private var standingChannels: Set<String> = []
 
     private var adviceTimeout: TimeInterval = 600
+    /// How long the server asks us to wait before the next connect. Observed 0.
+    private var adviceInterval: TimeInterval = 0
+    /// When a frame of any kind last arrived. The only honest evidence that the
+    /// socket is alive: a TCP connection that has quietly died looks exactly
+    /// like a healthy one that nobody is talking on.
+    private var lastFrameAt: Date?
     private var lastDisconnectAt: Date?
     private var hasEverConnected = false
     private var lastTypingSentAt: [String: Date] = [:]
@@ -115,7 +127,8 @@ actor BayeuxClient {
     private func stopNow() {
         running = false
         generation &+= 1
-        keepalive?.cancel(); keepalive = nil
+        connectLoop?.cancel(); connectLoop = nil
+        watchdog?.cancel(); watchdog = nil
         backoffSleep?.cancel(); backoffSleep = nil
         supervisor?.cancel(); supervisor = nil
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
@@ -127,6 +140,41 @@ actor BayeuxClient {
     /// waiting out a sleep that was sized for a network that is now back.
     func networkDidBecomeAvailable() {
         guard running else { return }
+        backoffSleep?.cancel()
+    }
+
+    /// Start a fresh session unless this one has proved itself recently.
+    ///
+    /// For coming back from the background, where `start(as:)` is no help: it is
+    /// idempotent for the same user, so it returns at once and reports success
+    /// over a socket the system quietly killed while we were suspended. A dead
+    /// socket does not announce itself — `receive()` simply never returns — so
+    /// nothing reconnects, no resume is emitted, and the app runs on with a
+    /// realtime feed that will never deliver anything again.
+    ///
+    /// Silence is the test, and it is cheap to get wrong in the safe direction:
+    /// a needless reconnect costs one handshake, and a missed one costs every
+    /// message until the next launch.
+    func reconnectIfStale(maxSilence: TimeInterval = 30) {
+        guard running else { return }
+        if state == .connected,
+           let last = lastFrameAt,
+           Date().timeIntervalSince(last) < maxSilence { return }
+        log.info("faye reconnecting: nothing heard for a while")
+        dropSession()
+    }
+
+    /// Abandon the current socket and let `supervise()` open another.
+    ///
+    /// The generation bump is what makes this safe: `runSession` is parked in
+    /// `receive()`, and cancelling the socket throws it out of there into a
+    /// check that finds the session superseded.
+    private func dropSession() {
+        generation &+= 1
+        connectLoop?.cancel(); connectLoop = nil
+        watchdog?.cancel(); watchdog = nil
+        socket?.cancel(with: .goingAway, reason: nil)
+        // A supervisor sitting out a backoff should stop sitting.
         backoffSleep?.cancel()
     }
 
@@ -248,7 +296,8 @@ actor BayeuxClient {
                 continuation.yield(.connectionDidDrop(.transport(String(describing: error))))
             }
 
-            keepalive?.cancel(); keepalive = nil
+            connectLoop?.cancel(); connectLoop = nil
+            watchdog?.cancel(); watchdog = nil
             socket?.cancel(with: .goingAway, reason: nil); socket = nil
             clientID = nil
             if didHandshakeThisSession { lastDisconnectAt = Date() }
@@ -295,6 +344,7 @@ actor BayeuxClient {
                 throw RealtimeError.transport(String(describing: error))
             }
             guard self.generation == generation else { return }
+            lastFrameAt = Date()
             for frame in decodeFrames(message) {
                 try await handle(frame, generation: generation)
             }
@@ -328,7 +378,7 @@ actor BayeuxClient {
             let gap = hasEverConnected ? Date().timeIntervalSince(lastDisconnectAt ?? Date()) : nil
             hasEverConnected = true
             continuation.yield(.connectionDidResume(afterGap: gap))
-            startKeepalive(generation: generation)
+            startWatchdog(generation: generation)
 
         case "/meta/connect":
             apply(frame.advice)
@@ -337,6 +387,13 @@ actor BayeuxClient {
                 // start over rather than sending into a session the server forgot.
                 throw RealtimeError.clientExpired
             }
+            // Bayeux is a loop, not a heartbeat: a connect response is the
+            // request for the next connect. The server holds one open and
+            // answers it when it has something to say or when the timeout runs
+            // out, and a client with none outstanding is a client the server
+            // expires — after which the socket stays open, no error is ever
+            // raised, and messages simply stop arriving.
+            scheduleConnect(generation: generation)
 
         case "/meta/subscribe":
             if frame.successful == false {
@@ -374,6 +431,9 @@ actor BayeuxClient {
         if let timeout = advice?.timeout, timeout > 0 {
             adviceTimeout = timeout / 1000
         }
+        if let interval = advice?.interval, interval >= 0 {
+            adviceInterval = interval / 1000
+        }
     }
 
     // MARK: - Sending
@@ -405,18 +465,49 @@ actor BayeuxClient {
         }
     }
 
-    /// Keepalive is a `/meta/connect` every `advice.timeout - 30s`. At the observed
-    /// 600000ms that is one frame roughly every nine and a half minutes.
-    private func startKeepalive(generation: Int) {
-        keepalive?.cancel()
-        let interval = max(30, adviceTimeout - 30)
-        keepalive = Task { [weak self] in
+    /// Queue the next `/meta/connect`, waiting out `advice.interval` first.
+    ///
+    /// Floored well below anything that would delay a message. Deliveries are
+    /// frames of their own and do not wait on this; the floor only stops a
+    /// server that answers instantly from turning the loop into a spin.
+    private func scheduleConnect(generation: Int) {
+        connectLoop?.cancel()
+        let wait = max(adviceInterval, 0.25)
+        connectLoop = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(wait))
+            if Task.isCancelled { return }
+            await self?.pingIfCurrent(generation: generation)
+        }
+    }
+
+    /// Notice a socket that is open and silent.
+    ///
+    /// The connect loop keeps one request outstanding at all times, so the
+    /// server is contractually obliged to answer within `advice.timeout`.
+    /// Passing that with nothing heard means the other end is gone, whatever
+    /// the socket believes, and only a reconnect emits the resume that fetches
+    /// what was missed.
+    private func startWatchdog(generation: Int) {
+        watchdog?.cancel()
+        watchdog = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(interval))
+                try? await Task.sleep(for: .seconds(Self.watchdogTick))
                 if Task.isCancelled { return }
-                await self?.pingIfCurrent(generation: generation)
+                await self?.checkForSilence(generation: generation)
             }
         }
+    }
+
+    private static let watchdogTick: TimeInterval = 30
+
+    private func checkForSilence(generation: Int) {
+        guard self.generation == generation, running, state == .connected else { return }
+        // Grace on top of the server's own promise, so a slow answer is not
+        // mistaken for a dead one.
+        let limit = adviceTimeout + 60
+        guard let last = lastFrameAt, Date().timeIntervalSince(last) > limit else { return }
+        log.notice("faye heard nothing for \(Date().timeIntervalSince(last), format: .fixed(precision: 0))s; reconnecting")
+        dropSession()
     }
 
     private func pingIfCurrent(generation: Int) async {
