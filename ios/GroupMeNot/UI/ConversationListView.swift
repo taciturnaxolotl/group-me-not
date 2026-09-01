@@ -369,23 +369,20 @@ struct ConversationListView: View {
         }
     }
 
+    /// The account photo in the header. Large enough to read as a photograph
+    /// of a person rather than as an icon of one.
+    private static let avatarSize: CGFloat = 44
+
     /// Large title and account avatar on one line, scrolling with the list.
     var titleHeader: some View {
         HStack(alignment: .firstTextBaseline) {
             Text("Chats")
                 .font(.largeTitle.bold())
             Spacer(minLength: 12)
-            // One pair, one guide. Separately aligned they drifted: the avatar's
-            // guide is measured off a circle and a bare glyph has neither the
-            // same height nor the same baseline, so the two sat at different
-            // heights with an arbitrary gap between them.
-            HStack(spacing: 10) {
-                newGroupButton
-                accountButton
-            }
-            // Pulled back to the cap line so the row centres against the title
-            // rather than hanging off its baseline.
-            .alignmentGuide(.firstTextBaseline) { $0.height * 0.78 }
+            accountControls
+                // Pulled back to the cap line so the row centres against the
+                // title rather than hanging off its baseline.
+                .alignmentGuide(.firstTextBaseline) { $0.height * 0.78 }
         }
         .padding(.horizontal, 20)
         .padding(.top, 4)
@@ -432,23 +429,35 @@ struct ConversationListView: View {
         .listRowBackground(Color.clear)
     }
 
-    /// The same circle as the account button beside it.
+    /// New chat and the account photo, in one capsule.
     ///
-    /// A bare glyph next to a photograph is two different kinds of control
-    /// pretending to be a pair. Giving it the app's own glass circle makes them
-    /// one row of two buttons, which is what they are.
-    private var newGroupButton: some View {
-        Button {
-            isNewGroupPresented = true
-        } label: {
-            Image(systemName: "square.and.pencil")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.tint)
-                .frame(width: 34, height: 34)
-                .glassEffect(.regular.interactive(), in: .circle)
+    /// Two glass circles side by side were a pair only by proximity: nothing
+    /// said they belonged together, and the gap between them was arbitrary
+    /// enough that it had to be tuned by eye. One capsule around both makes the
+    /// grouping structural rather than a coincidence of spacing, and the photo
+    /// carries it, since the photo is the thing the eye lands on.
+    private var accountControls: some View {
+        GlassEffectContainer(spacing: 0) {
+            HStack(spacing: 10) {
+                Button {
+                    isNewGroupPresented = true
+                } label: {
+                    Image(systemName: "square.and.pencil")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.tint)
+                        .frame(width: Self.avatarSize, height: Self.avatarSize)
+                        .contentShape(.circle)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("New group")
+
+                accountButton
+            }
+            .padding(.leading, 6)
+            .padding(.trailing, 4)
+            .padding(.vertical, 4)
+            .glassEffect(.regular.interactive(), in: .capsule)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("New group")
     }
 
     /// Straight to Settings. A menu holding a single item is a tap that buys
@@ -463,7 +472,7 @@ struct ConversationListView: View {
             Avatar(
                 url: model.currentUser?.imageUrl,
                 name: model.currentUser?.name ?? "?",
-                size: 34
+                size: Self.avatarSize
             )
         }
         .buttonStyle(.plain)
