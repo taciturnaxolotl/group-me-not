@@ -728,6 +728,11 @@ struct ChatView: View {
     /// settle or delay.
     private func footVisibilityChanged(_ visible: Bool) {
         isAtFoot = visible
+        // Reaching the foot is what reading a conversation means. Opening one
+        // is not: a conversation with unread opens on the divider, well above
+        // this, and stays unread until the reader comes down to it.
+        guard visible else { return }
+        Task { await model.markRead(current.id) }
     }
 
     // MARK: Paging
@@ -1283,8 +1288,11 @@ struct ChatView: View {
 
     private func messagesChanged() {
         rebuild()
-        // Anything that lands while the conversation is on screen has, by any
-        // reasonable definition, been read.
+        // Only for a reader standing at the foot. Something that lands while
+        // they are up in the history has not been read by anybody, and saying it
+        // has both clears a badge they still want and moves the read cursor past
+        // messages they have not seen — which every other device then believes.
+        guard isNearBottom else { return }
         Task { await model.markRead(current.id) }
     }
 

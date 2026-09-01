@@ -278,7 +278,13 @@ final class AppModel {
 
         reachedBeginning = false
         olderPageFailed = false
-        await markRead(conversation)
+        // Deliberately not marked read here.
+        //
+        // Opening a conversation is not reading it. A conversation with twenty
+        // unread opens *on the divider*, twenty messages back, and zeroing the
+        // count at that moment throws away the one fact the divider is drawn
+        // from — while every other device still says twenty. Reaching the foot
+        // is what counts as having read it, and ``ChatView`` says so.
 
         // Both started rather than awaited. The transcript is already on screen
         // by this point and neither of these changes it: one puts subscribe
@@ -357,10 +363,18 @@ final class AppModel {
 
     /// Clear the badge locally, then tell the server whenever it is willing to
     /// listen. The order matters: the badge is the user's, not GroupMe's.
+    /// Mark a conversation read up to its newest message.
+    ///
+    /// Idempotent and cheap when there is nothing to do, which matters because
+    /// the transcript calls it whenever the reader is standing at the foot.
     func markRead(_ conversation: ConversationID) async {
         let head = conversation == openConversationID
             ? messages.last?.id
             : conversations.first { $0.id == conversation }?.lastMessageID
+        // Nothing to say, and saying it anyway is a read receipt per arriving
+        // message for a conversation somebody is simply sitting in.
+        let row = conversations.first { $0.id == conversation }
+        if row?.unreadCount == 0, row?.lastReadMessageID == head { return }
         try? await store.conversations.markRead(conversation, upTo: head)
         await reloadConversations()
         guard let head else { return }
