@@ -539,6 +539,7 @@ struct ChatView: View {
                 VStack(spacing: 0) {
                     LazyVStack(spacing: 0) {
                         olderHeader
+                            .padding(.top, Self.headroom)
                         messageRows
                         typingRow
                     }
@@ -782,6 +783,17 @@ struct ChatView: View {
     /// asks for the page above it. Ten rows is roughly a screen, so the fetch
     /// is usually finished by the time the reader gets there.
     private static let prefetchDistance = 10
+
+    /// Room above the head of the history for the part of the header that hangs
+    /// below the bar.
+    ///
+    /// The title is a 62pt photograph with a pill tucked under it, so it stands
+    /// a good deal taller than the bar the safe area is measured from. Messages
+    /// dissolving under that overhang while scrolling is the intended effect;
+    /// the top of the history coming to rest beneath it is not, because there is
+    /// nothing above it left to scroll and "Beginning of conversation" simply
+    /// never appears.
+    private static let headroom: CGFloat = 46
 
     @ViewBuilder private var olderHeader: some View {
         if model.olderPageFailed {
