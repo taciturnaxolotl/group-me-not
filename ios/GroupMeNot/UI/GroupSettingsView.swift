@@ -22,6 +22,7 @@ struct GroupSettingsView: View {
     @State private var isPickingPhoto = false
     @State private var isUploadingPhoto = false
     @State private var failure: String?
+    @State private var isDeleting = false
 
     private var canEditGroup: Bool { model.role(in: conversation.id).canEditGroup }
     private var isTopic: Bool { conversation.isTopic }
@@ -35,6 +36,7 @@ struct GroupSettingsView: View {
                 // Joining is settled at the group. A topic inherits whoever is
                 // already in it and has no rule of its own to set.
                 if !isTopic { joiningSection }
+                if isTopic { removal }
             }
             if let failure {
                 Section {
@@ -59,6 +61,18 @@ struct GroupSettingsView: View {
             uploadPhoto(first)
         }
         .onAppear(perform: reset)
+        .confirmationDialog(
+            "Delete \(conversation.name)?", isPresented: $isDeleting, titleVisibility: .visible
+        ) {
+            Button("Delete Topic", role: .destructive) {
+                Task {
+                    if await model.deleteTopic(conversation.id) { dismiss() }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The topic and its messages go for everyone. The group itself is unaffected.")
+        }
     }
 
     // MARK: Sections
@@ -119,6 +133,15 @@ struct GroupSettingsView: View {
     private var joiningSection: some View {
         Section {
             Toggle("Require approval for new members", isOn: $requiresApproval)
+        }
+    }
+
+    /// Removing one room, which is not the same as ending the group.
+    private var removal: some View {
+        Section {
+            Button(role: .destructive) { isDeleting = true } label: {
+                Label("Delete Topic", systemImage: "trash")
+            }
         }
     }
 

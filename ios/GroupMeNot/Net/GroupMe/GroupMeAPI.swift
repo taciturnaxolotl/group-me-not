@@ -654,6 +654,16 @@ actor GroupMeAPI {
             body: body, retry: .interactive)
     }
 
+    /// Delete a topic.
+    ///
+    /// `DELETE` on the same path that reads and updates one. Not to be confused
+    /// with `groups/{id}/destroy`, which ends the whole group; this removes one
+    /// room and leaves the rest standing.
+    func deleteSubgroup(_ topicID: String, in parentGroupID: String) async throws {
+        try await client.deleteIgnoringResponse(
+            .v3, "/groups/\(parentGroupID)/subgroups/\(topicID)", retry: .interactive)
+    }
+
     /// Start a topic inside a group.
     ///
     /// `group_type` is the posting rule: `announcement` for admins only,

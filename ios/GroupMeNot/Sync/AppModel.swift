@@ -1006,6 +1006,29 @@ final class AppModel {
         }
     }
 
+    /// Delete a topic. Admins and the owner only.
+    ///
+    /// The conversation goes locally as well as remotely, because it is about
+    /// to stop appearing in any subgroup fetch and a row that outlives its
+    /// subject is a row that leads nowhere.
+    @discardableResult
+    func deleteTopic(_ conversation: ConversationID) async -> Bool {
+        guard case .group(let topicID) = conversation,
+              let parent = conversations.first(where: { $0.id == conversation })?.parentID,
+              role(in: conversation).canEditGroup
+        else { return false }
+        do {
+            try await api.deleteSubgroup(topicID, in: parent)
+            try? await store.conversations.delete(conversation)
+            if openConversationID == conversation { closeConversation() }
+            await reloadConversations()
+            return true
+        } catch {
+            log.notice("could not delete a topic: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
+    }
+
     /// Start a topic inside a group. Admins and the owner only.
     @discardableResult
     func createTopic(
