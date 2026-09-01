@@ -14,6 +14,11 @@ struct TopicChooserView: View {
 
     @Environment(AppModel.self) private var model
 
+    @State private var roster: [Member] = []
+    @State private var isInfoPresented = false
+
+    private var canEdit: Bool { model.role(in: group.id).canEditGroup }
+
     var body: some View {
         List {
             Section { row(for: group, named: "Main") }
@@ -25,11 +30,70 @@ struct TopicChooserView: View {
         }
         .navigationTitle(group.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button("Group Info", systemImage: "info.circle") {
+                        isInfoPresented = true
+                    }
+                    if canEdit {
+                        NavigationLink {
+                            NewTopicView(conversation: group)
+                        } label: {
+                            Label("Add Topic", systemImage: "plus")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .accessibilityLabel("Group options")
+            }
+        }
+        .sheet(isPresented: $isInfoPresented) {
+            ConversationInfoView(conversation: group, members: roster)
+        }
+        // The roster is read here because nothing is open: `model.members`
+        // belongs to whatever transcript is on screen, and on this page there
+        // is not one.
+        .task { roster = await model.roster(of: group.id) }
     }
 
     private var topics: [ConversationRow] {
         guard case .group(let id) = group.id else { return [] }
         return model.conversations.filter { $0.parentID == id }
+    }
+
+    /// What can be done to one of these without opening it.
+    ///
+    /// Muting is the common one and belongs on the row rather than three screens
+    /// in. The rest is admin work, and a topic is the only thing here that can
+    /// be deleted — Main is the group.
+    @ViewBuilder private func actions(for conversation: ConversationRow) -> some View {
+        Button {
+            Task { await model.setMuted(!conversation.isMuted, for: conversation.id) }
+        } label: {
+            Label(
+                conversation.isMuted ? "Unmute" : "Mute",
+                systemImage: conversation.isMuted ? "bell.fill" : "bell.slash.fill")
+        }
+        if canEdit {
+            NavigationLink {
+                GroupSettingsView(
+                    conversation: conversation,
+                    myNickname: nickname(in: conversation))
+            } label: {
+                Label(
+                    conversation.isTopic ? "Topic Settings" : "Group Settings",
+                    systemImage: "slider.horizontal.3")
+            }
+        }
+    }
+
+    private func nickname(in conversation: ConversationRow) -> String {
+        guard let me = model.currentUser?.id,
+              let mine = roster.first(where: { $0.identity == me })
+        else { return "" }
+        return mine.nickname ?? mine.name ?? ""
     }
 
     private func row(for conversation: ConversationRow, named name: String) -> some View {
@@ -71,6 +135,7 @@ struct TopicChooserView: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
+        .contextMenu { actions(for: conversation) }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
     }

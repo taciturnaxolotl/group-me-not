@@ -919,6 +919,17 @@ final class AppModel {
     /// Read from the roster rather than assumed. The server enforces it anyway,
     /// so this is about not offering an action that is going to be refused,
     /// which is the same rule the edit window follows.
+    /// One conversation's roster, read straight from storage.
+    ///
+    /// Distinct from `members`, which is the *open* conversation's and is what
+    /// the transcript draws names from. A screen that is not a transcript — the
+    /// topic chooser, an info sheet reached from it — needs the roster of
+    /// something it has not opened.
+    func roster(of conversation: ConversationID) async -> [Member] {
+        let source = rosterSource(of: conversation)
+        return (try? await store.conversations.members(of: source)) ?? []
+    }
+
     /// The group whose membership governs a conversation: itself, or the parent
     /// for a topic.
     func rosterSource(of conversation: ConversationID) -> ConversationID {
