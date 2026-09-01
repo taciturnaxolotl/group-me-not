@@ -1775,6 +1775,14 @@ private struct TranscriptScrollTuning: UIViewRepresentable {
         /// The height actually available to draw content in, which is what the
         /// keyboard takes away — by whichever means it happens to use.
         private var lastVisibleHeight: CGFloat?
+        /// Whether we are the ones moving the scroll view right now.
+        ///
+        /// `setContentOffset` moves `bounds.origin`, which is the very property
+        /// the compensation is observing, and the observer fires *inside* the
+        /// call. Without this the compensation answers its own movement, and
+        /// since the answer is identical every time it recurses until the stack
+        /// runs out.
+        private var isCompensating = false
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
@@ -1843,9 +1851,14 @@ private struct TranscriptScrollTuning: UIViewRepresentable {
         }
 
         private func visibleHeightChanged(on scroll: UIScrollView) {
+            guard !isCompensating else { return }
             let visible = visibleHeight(of: scroll)
-            defer { lastVisibleHeight = visible }
-            guard let previous = lastVisibleHeight else { return }
+            let previous = lastVisibleHeight
+            // Recorded before anything is applied, not after. A `defer` runs
+            // once the frame unwinds, which is far too late for an observer
+            // that fires part way through.
+            lastVisibleHeight = visible
+            guard let previous else { return }
             // Room lost, which is what the offset has to make up.
             //
             // `bounds` also fires on every scroll, but its *origin* moving is
@@ -1872,8 +1885,10 @@ private struct TranscriptScrollTuning: UIViewRepresentable {
             // a curve here would be giving it a *different* curve, and the
             // content would visibly slide against a keyboard moving at another
             // rate.
+            isCompensating = true
             scroll.setContentOffset(
                 CGPoint(x: scroll.contentOffset.x, y: target), animated: false)
+            isCompensating = false
         }
     }
 }
