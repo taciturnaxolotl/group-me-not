@@ -460,7 +460,20 @@ struct ChatView: View {
             // anchor already guarantees.
             .onChange(of: model.isAnyoneTyping) {
                 guard isNearBottom, !isUserScrolling else { return }
+                // Twice, and the second one is the one that works.
+                //
+                // The indicator changes the content height by about a bubble,
+                // and this fires on the change rather than after the row it adds
+                // has been laid out — so the first request scrolls to where the
+                // foot was a frame ago and lands short, leaving the dots under
+                // the composer. The second lands after layout. Both go to the
+                // same anchor, so when the first was enough the second is free.
                 bottomRequest += 1
+                Task {
+                    try? await Task.sleep(for: .milliseconds(120))
+                    guard isNearBottom, !isUserScrolling else { return }
+                    bottomRequest += 1
+                }
             }
             // The keyboard takes half the screen, and the scroll view answers a
             // growing bottom inset by keeping its offset: the content stays
@@ -1630,6 +1643,22 @@ private struct TypingIndicator: View {
                         .zIndex(Double(Self.visibleFaces - index))
                 }
             }
+            // A count over the pile rather than a fourth face. Past three the
+            // faces stop being recognisable anyway, and "and four more" is the
+            // only part still worth saying.
+            .overlay(alignment: .topTrailing) {
+                if people.count > Self.visibleFaces {
+                    Text("+\(people.count - Self.visibleFaces)")
+                        .font(.system(size: 10, weight: .bold))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 4)
+                        .frame(minWidth: 17, minHeight: 17)
+                        .background(Color.accentColor, in: .capsule)
+                        .overlay(Capsule().strokeBorder(Color(.systemBackground), lineWidth: 1.5))
+                        .offset(x: 6, y: -5)
+                }
+            }
         }
     }
 
@@ -1638,7 +1667,8 @@ private struct TypingIndicator: View {
         case 0: "Typing…"
         case 1: "\(names[0]) is typing…"
         case 2: "\(names[0]) and \(names[1]) are typing…"
-        default: "Several people are typing…"
+        case 3: "\(names[0]), \(names[1]) and \(names[2]) are typing…"
+        default: "\(names[0]), \(names[1]) and \(names.count - 2) others are typing…"
         }
     }
 }
