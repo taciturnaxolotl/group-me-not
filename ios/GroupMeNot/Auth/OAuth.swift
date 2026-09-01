@@ -34,6 +34,9 @@ nonisolated enum OAuth {
         case notConfigured
         case cancelled
         case noToken
+        /// The session ended on a `groupme://` link that was not the sign-in
+        /// callback. See `signIn(with:)`.
+        case divertedToApp
         case session(String)
         case stateMismatch
 
@@ -45,6 +48,8 @@ nonisolated enum OAuth {
                 nil  // The user closed the sheet; not worth a message.
             case .noToken:
                 "GroupMe finished sign-in without returning a token."
+            case .divertedToApp:
+                "That was GroupMe's own \"Open app\" link, which cannot finish signing in here. Use Continue instead."
             case .stateMismatch:
                 "That sign-in response did not match this request."
             case .session(let detail):
@@ -184,7 +189,20 @@ nonisolated enum OAuth {
             Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "auth")
                 .notice("sign-in callback carried no state; parameters were \(parameterNames(of: callback).joined(separator: ", "), privacy: .public)")
         }
-        guard let token = token(from: callback) else { throw Failure.noToken }
+        // Every `groupme://` link on that page ends the session, not just the
+        // one we are waiting for, because the callback scheme is what
+        // `ASWebAuthenticationSession` matches on and GroupMe's scheme is the
+        // only scheme their handoff has. Their mobile web pages carry an "Open
+        // app" button that goes to `groupme://` to launch the real client, so
+        // pressing it hands us a callback with no token in it and the sign-in
+        // dies for no visible reason. Their "Continue" button runs the sign-in
+        // proper, which ends at `groupme://oauth/callback#access_token=…`.
+        //
+        // Nothing here can stop the diversion, so the least it can do is say
+        // which button to press.
+        guard let token = token(from: callback) else {
+            throw isOAuthCallback(callback) ? Failure.noToken : Failure.divertedToApp
+        }
         return token
     }
 
@@ -223,6 +241,12 @@ nonisolated enum OAuth {
     /// GroupMe returns `groupmenot://oauth?access_token=…`. Some OAuth servers
     /// use the fragment instead, so check both rather than assume.
     static func token(from url: URL) -> String? { value(named: "access_token", in: url) }
+
+    /// Whether a callback is the one the handoff promises, rather than some
+    /// other `groupme://` link the page happened to offer.
+    private static func isOAuthCallback(_ url: URL) -> Bool {
+        (url.host ?? "").lowercased() == "oauth"
+    }
 }
 
 /// `ASWebAuthenticationSession` needs a window to hang the sheet on. SwiftUI has
