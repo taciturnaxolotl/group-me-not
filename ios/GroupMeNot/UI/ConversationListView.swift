@@ -700,6 +700,9 @@ struct ConversationTile: View {
         Button(action: action) {
             VStack(spacing: 6) {
                 Avatar(url: row.avatarURL, name: name, size: size, isGroup: row.isGroup)
+                    // A card peeking out from behind the face, for a group that
+                    // opens a choice of topics rather than a conversation.
+                    .background(alignment: .bottom) { understudy }
                     .overlay(alignment: .topTrailing) {
                         UnreadBadge(count: unread, isMuted: row.isMuted)
                             .offset(x: 6, y: -2)
@@ -722,12 +725,27 @@ struct ConversationTile: View {
         .accessibilityLabel(unread > 0 ? "\(name), \(unread) unread" : name)
     }
 
-    /// Two things worth knowing before tapping: that this leads to a choice
-    /// rather than a conversation, and that it is one nobody can post in.
-    @ViewBuilder private var hints: some View {
+    /// The hint that a tile holds more than one conversation.
+    ///
+    /// A second circle, slightly smaller, showing a sliver at the foot of the
+    /// face. It says the same thing the blue stack badge said and asks for none
+    /// of the attention: a badge is a coloured mark competing with the unread
+    /// count on the other corner, while a card behind a card is a thing people
+    /// already read as "there is another one under this".
+    @ViewBuilder private var understudy: some View {
         if leadsToChooser {
-            badge("square.stack.3d.up.fill", tint: Color.accentColor)
-        } else if row.postingPolicy == .adminsOnly {
+            Circle()
+                .fill(Color(.tertiarySystemFill))
+                .overlay(Circle().strokeBorder(Color(.systemBackground), lineWidth: 2))
+                .frame(width: size * 0.9, height: size * 0.9)
+                .offset(y: 6)
+        }
+    }
+
+    /// Worth knowing before tapping: that this is a conversation nobody but an
+    /// admin can post in.
+    @ViewBuilder private var hints: some View {
+        if row.postingPolicy == .adminsOnly {
             badge("megaphone.fill", tint: .secondary)
         }
     }
