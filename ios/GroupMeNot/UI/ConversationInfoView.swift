@@ -17,35 +17,34 @@ struct ConversationInfoView: View {
     @State private var isLeaving = false
     @State private var isDeleting = false
     @State private var removing: Member?
+    @State private var memberQuery = ""
+
+    private var isSearching: Bool {
+        !memberQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         NavigationStack {
-            List {
-                Section { header.listRowSeparator(.hidden) }
-                if let summary = conversation.summary, !summary.isEmpty {
-                    Section("About") {
-                        Text(summary)
-                            .font(.subheadline)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                if let invite { share(invite) }
-                if let created = conversation.createdAt {
-                    Section {
-                        LabeledContent("Created", value: created.formatted(date: .abbreviated, time: .omitted))
-                    }
-                }
-                if conversation.isGroup { settingsSection }
-                // Above the roster, not below it. A group of forty puts forty
-                // rows between the reader and the way out, which is the same as
-                // not having one.
-                //
-                // Not for a topic: there is nothing to leave. Membership is the
-                // parent group's, and "Delete Group" pointed at a topic id is
-                // either a 404 or, much worse, not one.
-                if conversation.isGroup, !isTopic { leaving }
-                if !people.isEmpty { roster }
+            // Two branches for one modifier, because `.searchable` cannot be
+            // applied conditionally and a search bar over a roster of one is
+            // furniture. Everything else is shared.
+            if isSearchable {
+                decorated.searchable(text: $memberQuery, prompt: "Search members")
+            } else {
+                decorated
             }
+        }
+    }
+
+    /// Below this a roster is quicker to read than to search.
+    private static let searchThreshold = 12
+
+    private var isSearchable: Bool {
+        conversation.isGroup && people.count >= Self.searchThreshold
+    }
+
+    private var decorated: some View {
+        content
             .listStyle(.insetGrouped)
             .navigationTitle("Info")
             .navigationBarTitleDisplayMode(.inline)
@@ -96,6 +95,44 @@ struct ConversationInfoView: View {
                     }
                     Button("Cancel", role: .cancel) { removing = nil }
                 }
+            }
+    }
+
+    @ViewBuilder private var content: some View {
+        List {
+            // While searching, the roster is the point and everything above it
+            // is in the way.
+            if !isSearching {
+                Section { header.listRowSeparator(.hidden) }
+                if let summary = conversation.summary, !summary.isEmpty {
+                    Section("About") {
+                        Text(summary)
+                            .font(.subheadline)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                if let invite { share(invite) }
+                if let created = conversation.createdAt {
+                    Section {
+                        LabeledContent(
+                            "Created",
+                            value: created.formatted(date: .abbreviated, time: .omitted))
+                    }
+                }
+                if conversation.isGroup { settingsSection }
+                // Above the roster, not below it. A group of forty puts forty
+                // rows between the reader and the way out, which is the same as
+                // not having one.
+                //
+                // Not for a topic: there is nothing to leave. Membership is the
+                // parent group's, and "Delete Group" pointed at a topic id is
+                // either a 404 or, much worse, not one.
+                if conversation.isGroup, !isTopic { leaving }
+            }
+            if !matchingPeople.isEmpty {
+                roster
+            } else if isSearching {
+                ContentUnavailableView.search(text: memberQuery)
             }
         }
     }
@@ -265,8 +302,8 @@ struct ConversationInfoView: View {
     }
 
     @ViewBuilder private var roster: some View {
-        Section(conversation.isGroup ? "Members" : "Conversation") {
-            ForEach(orderedPeople, id: \.identity) { member in
+        Section(rosterTitle) {
+            ForEach(matchingPeople, id: \.identity) { member in
                 HStack(spacing: 12) {
                     Avatar(url: member.imageUrl, name: displayName(member), size: 34)
                     Text(displayName(member))
@@ -333,6 +370,13 @@ struct ConversationInfoView: View {
 
     // MARK: Content
 
+    private var rosterTitle: String {
+        guard conversation.isGroup else { return "Conversation" }
+        guard isSearching else { return "Members" }
+        let found = matchingPeople.count
+        return found == 1 ? "1 Member" : "\(found) Members"
+    }
+
     /// A DM has no roster worth listing, so the other person stands in for one.
     private var people: [Member] {
         guard members.isEmpty else { return members }
@@ -363,6 +407,20 @@ struct ConversationInfoView: View {
             return nil
         }
         return member.identity == conversation.creatorUserID ? "Owner" : nil
+    }
+
+    /// The roster, filtered by what is typed.
+    ///
+    /// Matches nickname *and* name, because those differ in a group where
+    /// somebody has renamed themselves and the one you remember is as likely to
+    /// be either.
+    private var matchingPeople: [Member] {
+        let term = memberQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return orderedPeople }
+        return orderedPeople.filter { member in
+            (member.nickname?.localizedStandardContains(term) ?? false)
+                || (member.name?.localizedStandardContains(term) ?? false)
+        }
     }
 
     /// Sorted so the people running the group are at the top of it.
