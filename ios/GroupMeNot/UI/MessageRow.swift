@@ -392,12 +392,20 @@ private struct BubbleRow: View {
             } else if item.message.isDeleted {
                 Tombstone()
             } else if item.isEmojiOnly {
-                // No tint, no padding worth speaking of: a lone emoji is its
-                // own bubble.
+                // No tint: a lone emoji is its own bubble.
+                //
+                // The padding is not decoration. An emoji drawn at 44 points
+                // paints outside the line box its font reports — tall glyphs
+                // above it, flags and combining sequences below — so a box sized
+                // to that report clips them. `fixedSize` then stops the row
+                // compressing the line back down, which is the other half of the
+                // same problem and the one that read as "not expanding".
                 Text(item.text.plain)
                     .font(.system(size: MessageStyling.emojiFontSize))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 2)
+                    .lineSpacing(6)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 8)
             } else {
                 VStack(alignment: isTrailing ? .trailing : .leading, spacing: 6) {
                     if let reply = item.reply { quote(reply) }
