@@ -19,16 +19,28 @@ struct TopicChooserView: View {
 
     private var canEdit: Bool { model.role(in: group.id).canEditGroup }
 
+    /// The group as the store holds it *now*, not as it was when this page was
+    /// pushed.
+    ///
+    /// `group` is a value copied out of the list at navigation time, and its
+    /// unread count is a number that was true then. The topics below it are
+    /// read live from the model and update themselves; Main was the one row on
+    /// this page still quoting a snapshot, so reading Main and swiping back
+    /// left its badge sitting there until something else reloaded the list.
+    private var main: ConversationRow {
+        model.conversations.first { $0.id == group.id } ?? group
+    }
+
     var body: some View {
         List {
-            Section { row(for: group, named: "Main") }
+            Section { row(for: main, named: "Main") }
             if !topics.isEmpty {
                 Section("Topics") {
                     ForEach(topics) { topic in row(for: topic, named: topic.name) }
                 }
             }
         }
-        .navigationTitle(group.name)
+        .navigationTitle(main.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -38,7 +50,7 @@ struct TopicChooserView: View {
                     }
                     if canEdit {
                         NavigationLink {
-                            NewTopicView(conversation: group)
+                            NewTopicView(conversation: main)
                         } label: {
                             Label("Add Topic", systemImage: "plus")
                         }
@@ -50,7 +62,7 @@ struct TopicChooserView: View {
             }
         }
         .sheet(isPresented: $isInfoPresented) {
-            ConversationInfoView(conversation: group, members: roster)
+            ConversationInfoView(conversation: main, members: roster)
         }
         // The roster is read here because nothing is open: `model.members`
         // belongs to whatever transcript is on screen, and on this page there

@@ -30,6 +30,27 @@ nonisolated enum OAuth {
     /// hide the button rather than offer one that cannot work.
     static var isConfigured: Bool { !clientID.isEmpty }
 
+    private static let forgetKey = "oauth.forgetsWebSession"
+
+    /// Whether the next sign-in should run in a browser that remembers nothing.
+    ///
+    /// The auth sheet shares Safari's cookies by design: that is what turns a
+    /// second sign-in into one tap instead of a password and a second factor.
+    /// It is also state this app cannot reach — the jar belongs to the system,
+    /// and there is no API that lets an app empty it — so a sign-out that only
+    /// clears our own keychain leaves GroupMe still signed in behind that
+    /// sheet, and the next sign-in walks straight back into the same account
+    /// with no way to choose another.
+    ///
+    /// So signing out sets this. The sheet that follows is ephemeral, keeps
+    /// nothing, and asks who you are. Sharing resumes once somebody has
+    /// answered, which is the point at which convenience is worth more than a
+    /// clean slate again.
+    static var forgetsWebSession: Bool {
+        get { UserDefaults.standard.bool(forKey: forgetKey) }
+        set { UserDefaults.standard.set(newValue, forKey: forgetKey) }
+    }
+
     nonisolated enum Failure: LocalizedError {
         case notConfigured
         case cancelled
@@ -91,7 +112,7 @@ nonisolated enum OAuth {
                 continuation.resume(returning: token)
             }
             session.presentationContextProvider = anchor
-            session.prefersEphemeralWebBrowserSession = false
+            session.prefersEphemeralWebBrowserSession = forgetsWebSession
             if !session.start() {
                 continuation.resume(throwing: Failure.session("Could not open the GroupMe sign-in page."))
             }
@@ -171,7 +192,10 @@ nonisolated enum OAuth {
                 continuation.resume(returning: callback)
             }
             session.presentationContextProvider = anchor
-            session.prefersEphemeralWebBrowserSession = false
+            // Not ephemeral on purpose, unless a sign-out asked for it: if the
+            // user is already signed in to GroupMe in Safari this is a single
+            // tap rather than another password prompt.
+            session.prefersEphemeralWebBrowserSession = forgetsWebSession
             if !session.start() {
                 continuation.resume(throwing: Failure.session("Could not open the GroupMe sign-in page."))
             }
@@ -203,6 +227,9 @@ nonisolated enum OAuth {
         guard let token = token(from: callback) else {
             throw isOAuthCallback(callback) ? Failure.noToken : Failure.divertedToApp
         }
+        // Somebody has now said who they are, so the next sheet may remember
+        // them again.
+        forgetsWebSession = false
         return token
     }
 

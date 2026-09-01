@@ -1535,6 +1535,11 @@ final class AppModel {
         // photo belongs to the session that picked it.
         await MediaVault.shared.removeAll()
 
+        // The auth sheet's cookies are the system's, not ours, and nothing here
+        // can delete them. What we can do is refuse to use them next time. See
+        // `OAuth.forgetsWebSession`.
+        OAuth.forgetsWebSession = true
+
         session = .signedOut
         currentUser = nil
         conversations = []
