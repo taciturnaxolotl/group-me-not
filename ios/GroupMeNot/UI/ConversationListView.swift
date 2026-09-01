@@ -355,21 +355,17 @@ struct ConversationListView: View {
             Text("Chats")
                 .font(.largeTitle.bold())
             Spacer(minLength: 12)
-            Button {
-                isNewGroupPresented = true
-            } label: {
-                Image(systemName: "square.and.pencil")
-                    .font(.title3)
+            // One pair, one guide. Separately aligned they drifted: the avatar's
+            // guide is measured off a circle and a bare glyph has neither the
+            // same height nor the same baseline, so the two sat at different
+            // heights with an arbitrary gap between them.
+            HStack(spacing: 10) {
+                newGroupButton
+                accountButton
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.tint)
+            // Pulled back to the cap line so the row centres against the title
+            // rather than hanging off its baseline.
             .alignmentGuide(.firstTextBaseline) { $0.height * 0.78 }
-            .accessibilityLabel("New group")
-            .padding(.trailing, 14)
-            accountButton
-                // Pulled back to the cap line so the avatar centres against the
-                // title rather than hanging off its baseline.
-                .alignmentGuide(.firstTextBaseline) { $0.height * 0.78 }
         }
         .padding(.horizontal, 20)
         .padding(.top, 4)
@@ -414,6 +410,25 @@ struct ConversationListView: View {
         .listRowInsets(EdgeInsets())
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
+    }
+
+    /// The same circle as the account button beside it.
+    ///
+    /// A bare glyph next to a photograph is two different kinds of control
+    /// pretending to be a pair. Giving it the app's own glass circle makes them
+    /// one row of two buttons, which is what they are.
+    private var newGroupButton: some View {
+        Button {
+            isNewGroupPresented = true
+        } label: {
+            Image(systemName: "square.and.pencil")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.tint)
+                .frame(width: 34, height: 34)
+                .glassEffect(.regular.interactive(), in: .circle)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("New group")
     }
 
     /// Straight to Settings. A menu holding a single item is a tap that buys
