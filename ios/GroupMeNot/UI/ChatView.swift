@@ -888,7 +888,7 @@ struct ChatView: View {
         // Against the home indicator there is room to spare, so some is taken
         // back. Against the keyboard there is none, and the field wants a little
         // air between itself and the keys rather than sitting on them.
-        .padding(.bottom, composerFocused ? 6 : -14)
+        .padding(.bottom, composerFocused ? 10 : -14)
         .animation(.easeOut(duration: 0.2), value: composerFocused)
         .attachmentPicker(isPresented: $isAttachmentPickerPresented) { picked in
             // Staged rather than sent. Picking a photo and then typing a caption
