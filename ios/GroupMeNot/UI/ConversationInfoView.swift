@@ -39,7 +39,11 @@ struct ConversationInfoView: View {
                 // Above the roster, not below it. A group of forty puts forty
                 // rows between the reader and the way out, which is the same as
                 // not having one.
-                if conversation.isGroup { leaving }
+                //
+                // Not for a topic: there is nothing to leave. Membership is the
+                // parent group's, and "Delete Group" pointed at a topic id is
+                // either a 404 or, much worse, not one.
+                if conversation.isGroup, !isTopic { leaving }
                 if !people.isEmpty { roster }
             }
             .listStyle(.insetGrouped)
@@ -104,17 +108,35 @@ struct ConversationInfoView: View {
     /// description and join rule are admin and owner only. Absent rather than
     /// disabled for a member, because a greyed-out row invites a tap and then
     /// explains nothing.
+    private var settingsTitle: String {
+        guard canEditGroup else { return "Your Nickname" }
+        return isTopic ? "Topic Settings" : "Group Settings"
+    }
+
     private var settingsSection: some View {
         Section("Settings") {
             NavigationLink {
                 GroupSettingsView(conversation: conversation, myNickname: myNickname)
             } label: {
-                Label(canEditGroup ? "Group Settings" : "Your Nickname", systemImage: "slider.horizontal.3")
+                Label(
+                    settingsTitle,
+                    systemImage: "slider.horizontal.3")
+            }
+
+            // Topics are made and listed from the group, so the group is where
+            // the row for them belongs.
+            if !isTopic, canEditGroup {
+                NavigationLink {
+                    NewTopicView(conversation: conversation)
+                } label: {
+                    Label("Add Topic", systemImage: "square.stack.3d.up.badge.a")
+                }
             }
 
             // Only where it can be acted on, and only where it applies. A group
-            // that lets anyone in has no queue to show.
-            if canEditGroup, conversation.requiresApproval == true {
+            // that lets anyone in has no queue to show, and a topic never does:
+            // joining happens at the group.
+            if canEditGroup, !isTopic, conversation.requiresApproval == true {
                 NavigationLink {
                     JoinRequestsView(conversation: conversation)
                 } label: {
@@ -125,6 +147,10 @@ struct ConversationInfoView: View {
     }
 
     private var canEditGroup: Bool { model.role(in: conversation.id).canEditGroup }
+
+    /// A topic borrows almost everything from its parent, so most of what this
+    /// sheet offers has to be asked of the parent instead — or not offered.
+    private var isTopic: Bool { conversation.isTopic }
 
     private var myNickname: String {
         guard let me = model.currentUser?.id,

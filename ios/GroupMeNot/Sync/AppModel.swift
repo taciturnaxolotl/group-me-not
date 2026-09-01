@@ -919,6 +919,17 @@ final class AppModel {
     /// Read from the roster rather than assumed. The server enforces it anyway,
     /// so this is about not offering an action that is going to be refused,
     /// which is the same rule the edit window follows.
+    /// The group whose membership governs a conversation: itself, or the parent
+    /// for a topic.
+    func rosterSource(of conversation: ConversationID) -> ConversationID {
+        conversations.first { $0.id == conversation }?.rosterSource ?? conversation
+    }
+
+    /// Whether this conversation is a topic inside a group.
+    func isTopic(_ conversation: ConversationID) -> Bool {
+        conversations.first { $0.id == conversation }?.isTopic ?? false
+    }
+
     func role(in conversation: ConversationID) -> GroupRole {
         guard case .group = conversation, let me = currentUser?.id else { return .member }
         guard let mine = members.first(where: { $0.identity == me }) else { return .member }
@@ -937,9 +948,12 @@ final class AppModel {
     }
 
     /// Your nickname in one group.
+    ///
+    /// Addressed to the *parent* for a topic. A nickname is a membership, a
+    /// topic has no membership of its own, and posting to a topic's id is a 404.
     @discardableResult
     func setNickname(_ nickname: String, in conversation: ConversationID) async -> Bool {
-        guard case .group(let groupID) = conversation else { return false }
+        guard case .group(let groupID) = rosterSource(of: conversation) else { return false }
         do {
             try await api.updateMembership(in: groupID, nickname: nickname)
             // The roster is what the transcript draws names from, so it is what
@@ -962,6 +976,22 @@ final class AppModel {
     ) async -> Bool {
         guard case .group(let groupID) = conversation, role(in: conversation).canEditGroup
         else { return false }
+
+        // A topic goes to its own route, under its parent. The group route
+        // answers 404 for a topic id, and `requires_approval` is not something a
+        // topic has — joining happens at the group.
+        if let parent = conversations.first(where: { $0.id == conversation })?.parentID {
+            do {
+                try await api.updateSubgroup(
+                    groupID, in: parent, topic: name, description: description)
+                await sync.sync(reason: .manual)
+                return true
+            } catch {
+                log.notice("could not update topic: \(diagnosticText(error), privacy: .public)")
+                return false
+            }
+        }
+
         do {
             guard let updated = try await api.updateGroup(
                 groupID, name: name, description: description,
@@ -972,6 +1002,26 @@ final class AppModel {
             return true
         } catch {
             log.notice("could not update group: \(diagnosticText(error), privacy: .public)")
+            return false
+        }
+    }
+
+    /// Start a topic inside a group. Admins and the owner only.
+    @discardableResult
+    func createTopic(
+        in conversation: ConversationID, name: String, description: String?,
+        announcementOnly: Bool
+    ) async -> Bool {
+        guard case .group(let groupID) = conversation, role(in: conversation).canEditGroup
+        else { return false }
+        do {
+            try await api.createSubgroup(
+                in: groupID, topic: name, description: description,
+                announcementOnly: announcementOnly)
+            await sync.sync(reason: .manual)
+            return true
+        } catch {
+            log.notice("could not create a topic: \(diagnosticText(error), privacy: .public)")
             return false
         }
     }

@@ -24,6 +24,7 @@ struct GroupSettingsView: View {
     @State private var failure: String?
 
     private var canEditGroup: Bool { model.role(in: conversation.id).canEditGroup }
+    private var isTopic: Bool { conversation.isTopic }
 
     var body: some View {
         Form {
@@ -31,7 +32,9 @@ struct GroupSettingsView: View {
             if canEditGroup {
                 photoSection
                 detailsSection
-                joiningSection
+                // Joining is settled at the group. A topic inherits whoever is
+                // already in it and has no rule of its own to set.
+                if !isTopic { joiningSection }
             }
             if let failure {
                 Section {
@@ -41,7 +44,7 @@ struct GroupSettingsView: View {
                 }
             }
         }
-        .navigationTitle(canEditGroup ? "Group Settings" : "Your Nickname")
+        .navigationTitle(canEditGroup ? (isTopic ? "Topic Settings" : "Group Settings") : "Your Nickname")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
@@ -66,6 +69,10 @@ struct GroupSettingsView: View {
                 .textInputAutocapitalization(.words)
         } header: {
             Text("Your Nickname")
+        } footer: {
+            if isTopic {
+                Text("Shared with the whole group, not just this topic.")
+            }
         }
     }
 
@@ -99,7 +106,7 @@ struct GroupSettingsView: View {
     }
 
     private var detailsSection: some View {
-        Section("Group") {
+        Section(isTopic ? "Topic" : "Group") {
             LabeledContent("Name") {
                 TextField("Group name", text: $name)
                     .multilineTextAlignment(.trailing)
@@ -172,6 +179,65 @@ struct GroupSettingsView: View {
             let ok = await model.updateGroupPhoto(picked, in: conversation.id)
             isUploadingPhoto = false
             if !ok { failure = "Could not set that photo." }
+        }
+    }
+}
+
+/// Start a topic inside a group.
+///
+/// Only reachable from a group, never from one of its topics: GroupMe nests one
+/// level and a topic of a topic is not a thing.
+struct NewTopicView: View {
+    let conversation: ConversationRow
+
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var name = ""
+    @State private var summary = ""
+    @State private var announcementOnly = false
+    @State private var isSending = false
+    @State private var failure: String?
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("Topic name", text: $name)
+                TextField("Description", text: $summary, axis: .vertical)
+                    .lineLimit(2...4)
+            }
+            Section {
+                Toggle("Only admins can post", isOn: $announcementOnly)
+            }
+            if let failure {
+                Label(failure, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+            }
+        }
+        .navigationTitle("Add Topic")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button(action: create) {
+                    if isSending { ProgressView() } else { Text("Create") }
+                }
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
+            }
+        }
+    }
+
+    private func create() {
+        isSending = true
+        failure = nil
+        Task {
+            let ok = await model.createTopic(
+                in: conversation.id,
+                name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                description: summary.isEmpty ? nil : summary,
+                announcementOnly: announcementOnly)
+            isSending = false
+            if ok { dismiss() } else { failure = "Could not create that topic." }
         }
     }
 }

@@ -633,6 +633,51 @@ actor GroupMeAPI {
         }
     }
 
+    /// Change a topic.
+    ///
+    /// A separate route from `groups/{id}/update`, and it has to be: a topic is
+    /// not a group, and addressing the group route with a topic id is a 404.
+    /// `topic` is the name field — there is no `name` on a subgroup.
+    func updateSubgroup(
+        _ topicID: String, in parentGroupID: String,
+        topic: String? = nil, description: String? = nil,
+        type: String? = nil, avatarURL: String? = nil
+    ) async throws {
+        var body: [String: AnyEncodable] = [:]
+        if let topic { body["topic"] = AnyEncodable(topic) }
+        if let description { body["description"] = AnyEncodable(description) }
+        if let type { body["group_type"] = AnyEncodable(type) }
+        if let avatarURL { body["avatar_url"] = AnyEncodable(avatarURL) }
+        guard !body.isEmpty else { return }
+        try await client.putIgnoringResponse(
+            .v3, "/groups/\(parentGroupID)/subgroups/\(topicID)",
+            body: body, retry: .interactive)
+    }
+
+    /// Start a topic inside a group.
+    ///
+    /// `group_type` is the posting rule: `announcement` for admins only,
+    /// `private` for everybody in the parent.
+    @discardableResult
+    func createSubgroup(
+        in parentGroupID: String, topic: String, description: String?, announcementOnly: Bool
+    ) async throws -> Subgroup? {
+        let response: Subgroup? = try? await client.post(
+            .v3, "/groups/\(parentGroupID)/subgroups",
+            body: NewSubgroup(
+                topic: topic,
+                description: description,
+                groupType: announcementOnly ? "announcement" : "private"),
+            retry: .interactive)
+        return response
+    }
+
+    private nonisolated struct NewSubgroup: Encodable, Sendable {
+        var topic: String
+        var description: String?
+        var groupType: String
+    }
+
     /// The topics inside a group.
     ///
     /// The only way to see them. Subgroups never appear in `GET /v3/groups`, and
