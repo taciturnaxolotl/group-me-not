@@ -52,11 +52,13 @@ struct MessageActionsOverlay: View {
     /// Room between the bubble and each floating piece.
     private static let gap: CGFloat = 10
     private static let margin: CGFloat = 12
+    /// How far the undimmed hole runs past the bubble.
+    private static let halo: CGFloat = 8
 
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
-                backdrop
+                backdrop(in: geo)
 
                 pill
                     .onGeometryChange(for: CGSize.self, of: \.size) { pillSize = $0 }
@@ -83,13 +85,27 @@ struct MessageActionsOverlay: View {
 
     // MARK: Pieces
 
-    private var backdrop: some View {
-        Color.black.opacity(0.28)
-            .ignoresSafeArea()
-            .contentShape(.rect)
-            .onTapGesture(perform: onDismiss)
-            .accessibilityLabel("Dismiss")
-            .accessibilityAddTraits(.isButton)
+    /// One shape rather than a rectangle with a hole blended out of it: an
+    /// even-odd fill *is* a rectangle with a hole in it, and it lands in the
+    /// same coordinates the pill and card are placed in.
+    ///
+    /// Dimming the one bubble the menu is about would be dimming the answer to
+    /// "which message is this?", so the message keeps its brightness and, from
+    /// the row's own side, its swell. The hole runs past the bubble by `halo`
+    /// to leave the swell somewhere to go.
+    private func backdrop(in geo: GeometryProxy) -> some View {
+        Path { path in
+            path.addRect(CGRect(origin: .zero, size: geo.size))
+            path.addRoundedRect(
+                in: anchor.insetBy(dx: -Self.halo, dy: -Self.halo),
+                cornerSize: CGSize(width: 22, height: 22),
+                style: .continuous)
+        }
+        .fill(.black.opacity(0.28), style: FillStyle(eoFill: true))
+        .contentShape(.rect)
+        .onTapGesture(perform: onDismiss)
+        .accessibilityLabel("Dismiss")
+        .accessibilityAddTraits(.isButton)
     }
 
     /// Five glyphs and a More button, all visible at once. Nothing scrolls, so

@@ -336,6 +336,23 @@ actor GroupMeAPI {
         var share: Bool
     }
 
+    /// Join a group with a share token, which is what a `join_group` link is.
+    ///
+    /// `POST /v3/groups/{id}/join/{token}` answers with the group wrapped in one
+    /// more layer than every other route here: `{"response": {"group": {…}}}`.
+    /// Joining something already joined is not an error, it just answers with
+    /// the group again, which is what makes the button safe to press twice.
+    func joinGroup(_ groupID: String, shareToken: String) async throws -> Group? {
+        let joined: Joined = try await client.post(
+            .v3, "/groups/\(groupID)/join/\(shareToken)",
+            body: Optional<Discard>.none, retry: .interactive)
+        return joined.group
+    }
+
+    private nonisolated struct Joined: Decodable, Sendable {
+        var group: Group?
+    }
+
     /// Accept or decline a message request from somebody not in your contacts.
     func respondToChatRequest(_ accept: Bool, from otherUserID: String) async throws {
         if accept {

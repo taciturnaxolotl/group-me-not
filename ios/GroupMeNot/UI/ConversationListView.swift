@@ -21,7 +21,7 @@ struct ConversationListView: View {
     /// The tile a long press landed on, named in the sheet that follows so
     /// there is no doubt which one is about to change.
     @State private var pinTarget: ConversationRow?
-    @State private var isNewGroupPresented = false
+    @State private var isNewConversationPresented = false
     /// The width one pin gets, worked out from the grid rather than guessed.
     @State private var tileSize: CGFloat = 96
 
@@ -45,7 +45,7 @@ struct ConversationListView: View {
                 .navigationDestination(for: Route.self) { route in
                     switch route {
                     case .chat(let row):
-                        ChatView(conversation: row)
+                        ChatView(conversation: row) { path.append(.chat($0)) }
                     case .topics(let group):
                         TopicChooserView(group: group) { path.append(.chat($0)) }
                     }
@@ -60,12 +60,10 @@ struct ConversationListView: View {
                 .sheet(isPresented: $isRequestsPresented) {
                     RequestsView()
                 }
-                .sheet(isPresented: $isNewGroupPresented) {
-                    NewGroupView { created in
-                        // Straight into it. A group made and then left in a list
-                        // is a group whose first act was to hide.
-                        guard let row = model.conversations.first(where: { $0.id == created })
-                        else { return }
+                .sheet(isPresented: $isNewConversationPresented) {
+                    NewConversationView { row in
+                        // Straight into it. A conversation started and then left
+                        // in a list is one whose first act was to hide.
                         path.append(.chat(row))
                     }
                 }
@@ -464,7 +462,7 @@ struct ConversationListView: View {
         GlassEffectContainer(spacing: 0) {
             HStack(spacing: 10) {
                 Button {
-                    isNewGroupPresented = true
+                    isNewConversationPresented = true
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 17, weight: .semibold))
@@ -473,7 +471,7 @@ struct ConversationListView: View {
                         .contentShape(.circle)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("New group")
+                .accessibilityLabel("New conversation")
 
                 accountButton
             }

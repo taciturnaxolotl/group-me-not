@@ -105,6 +105,14 @@ nonisolated enum Transcript {
             members.map { ($0.identity, $0.nickname ?? $0.name ?? "Someone") },
             uniquingKeysWith: { first, _ in first })
 
+        // One count per chain root, so a message can be told how many answers
+        // it has without every bubble searching the transcript for them.
+        var answers: [String: Int] = [:]
+        for message in messages {
+            guard let root = message.replyRootID else { continue }
+            answers[root, default: 0] += 1
+        }
+
         var rows: [TranscriptRow] = []
         rows.reserveCapacity(timeline.count + 8)
 
@@ -149,12 +157,26 @@ nonisolated enum Transcript {
                 reactions: message.reactionSummaries(currentUserID: myID),
                 reply: replyPreview(
                     for: message, in: byID, unresolved: unresolved, names: names),
+                // On the root only. A reply already says it is one by carrying
+                // a quote, and stamping a count on every link of the chain
+                // would say the same thing five times.
+                replyCount: message.replyRootID == nil ? (answers[message.id] ?? 0) : 0,
                 uploadGuid: message.sourceGuid
             )))
         }
         // Last, over finished rows: the fold only has to look at neighbours
         // once every other decision has been made.
         return SystemMessageRun.collapsing(rows)
+    }
+
+    /// Every message in one reply chain, oldest first, root included.
+    ///
+    /// A chain is flat by GroupMe's design, so this is a filter and not a walk:
+    /// each reply already records the root it belongs to.
+    static func chain(rootedAt rootID: String, in messages: [Message]) -> [Message] {
+        messages
+            .filter { $0.id == rootID || $0.replyRootID == rootID }
+            .sorted { $0.date < $1.date }
     }
 
     /// System notices never join a run, and neither do messages from different
@@ -189,10 +211,13 @@ nonisolated enum Transcript {
             // saying otherwise leaves a quote spinning for as long as the
             // conversation is open.
             let detail = unresolved.contains(targetID) ? "Original unavailable" : "Loading…"
-            return ReplyPreview(messageID: nil, senderName: who ?? "Message", text: detail)
+            return ReplyPreview(
+                messageID: nil, senderID: message.replyTargetUserID,
+                senderName: who ?? "Message", text: detail)
         }
         return ReplyPreview(
             messageID: parent.id,
+            senderID: parent.senderId ?? parent.userId,
             senderName: parent.name ?? "Someone",
             text: summarise(parent))
     }
@@ -242,6 +267,10 @@ nonisolated enum Transcript {
 /// time anyone is willing to wait for it.
 struct ChatView: View {
     let conversation: ConversationRow
+    /// Pushed by the caller that owns the navigation path. Raised from a share
+    /// link in the transcript, which is the one thing in here that can lead to
+    /// a different conversation.
+    var onOpenConversation: (ConversationRow) -> Void = { _ in }
 
     @Environment(AppModel.self) private var model
 
@@ -252,7 +281,14 @@ struct ChatView: View {
     @State private var isInfoPresented = false
     @State private var isPinnedPresented = false
     /// The message whose reactions are being looked at.
-    @State private var reactionDetail: MessageDisplay?
+    ///
+    /// A box rather than a plain `@State`, and read by nobody in this body.
+    /// Setting a state this view reads re-evaluates it, transcript and all,
+    /// and that recompute runs *before* UIKit begins the presentation: it is
+    /// the gap between holding a chip and seeing the sheet move. Holding the
+    /// target off to one side means the only thing invalidated is the host
+    /// that presents it.
+    @State private var reactionDetail = RosterTarget()
     @FocusState private var composerFocused: Bool
 
     // MARK: Scroll state
@@ -351,6 +387,9 @@ struct ChatView: View {
     /// The row the transcript opens on, when that is not the newest message.
     /// Set once, consumed once, by the effect inside the `ScrollViewReader`.
     @State private var openingTarget: String?
+    /// The chain being read on its own. Nil the rest of the time, which is
+    /// most of it.
+    @State private var thread: ThreadFocus?
     /// A jump whose row has not been built yet. See `focus(on:)`.
     @State private var pendingTarget: String?
 
@@ -366,6 +405,22 @@ struct ChatView: View {
     private var chrome: some View {
         transcript
             .background(Color(.systemBackground))
+            // A share link is tappable twice over: as the card under the
+            // bubble and as the URL inside it. Both should do the same thing,
+            // or the text is a trapdoor out of the app to a web page whose one
+            // purpose is to sell the official client.
+            .environment(\.openURL, OpenURLAction { url in
+                guard let link = GroupMeLink(url: url) else { return .systemAction }
+                Task {
+                    if let row = model.conversations.first(where: { $0.id == link.conversation }) {
+                        onOpenConversation(row)
+                    } else if let joined = await model.join(link),
+                              let row = model.conversations.first(where: { $0.id == joined }) {
+                        onOpenConversation(row)
+                    }
+                }
+                return .handled
+            })
             // `safeAreaBar`, not `safeAreaInset`. It insets the transcript in
             // the same way, but it also tells the scroll view that what sits
             // there is a *bar*, which is what lets the edge effect dissolve
@@ -385,6 +440,37 @@ struct ChatView: View {
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar { toolbar }
             .overlay { actionsOverlay }
+            // A presentation rather than an overlay. Overlaid, the chain sat
+            // inside this view's navigation bar and safe-area bar while
+            // ignoring the safe area across both, and what it did to the layout
+            // outlived its own dismissal.
+            .fullScreenCover(item: $thread) { focus in
+                ThreadView(
+                    items: threadItems(rootedAt: focus.rootID),
+                    anchorY: focus.anchorY,
+                    conversation: current,
+                    catalog: model.reactionCatalog,
+                    canPost: model.canPostInOpenConversation,
+                    onReact: { item, glyph in react(glyph, on: item) },
+                    quickGlyphs: model.reactionCatalog.quick,
+                    members: model.members,
+                    meID: model.currentUser?.id,
+                    canEdit: { model.canEdit($0.message) },
+                    canDelete: { model.canDelete($0.message) },
+                    actions: { actions(for: $0) },
+                    onRetry: { retry($0) },
+                    onDiscard: { discard($0) },
+                    onOpenConversation: onOpenConversation,
+                    onSend: { text, media in reply(text, media: media, into: focus.rootID) },
+                    onDismiss: {
+                        var instant = Transaction()
+                        instant.disablesAnimations = true
+                        withTransaction(instant) { thread = nil }
+                    })
+                    // Without this the cover paints its own opaque ground and
+                    // the conversation the chain came out of is gone.
+                    .presentationBackground(.clear)
+            }
             .sheet(item: $emojiTarget) { target in
                 EmojiBrowser(selected: target.selectedGlyph) { glyph in
                     emojiTarget = nil
@@ -467,11 +553,10 @@ struct ChatView: View {
     private var lifecycle: some View {
         chrome
             .task { await model.openConversation(conversation.id) }
-            .sheet(item: $reactionDetail) { item in
-                ReactionRoster(
-                    summaries: item.reactions,
-                    members: model.members,
-                    meID: model.currentUser?.id)
+            .overlay {
+                RosterHost(target: reactionDetail,
+                           members: model.members,
+                           meID: model.currentUser?.id)
             }
             .onDisappear(perform: teardown)
             .onChange(of: model.messages, initial: true) { messagesChanged() }
@@ -621,14 +706,74 @@ struct ChatView: View {
             canEdit: model.canEdit(item.message),
             onEdit: { text in edit(item, to: text) },
             onPress: { frame in
+                // Derived off the main actor, and the first derivation is a
+                // walk of fifteen thousand scalars asking ICU for names. Doing
+                // it here means the More button opens a full grid rather than
+                // an empty one that fills in: by the time anyone reaches for
+                // it, the catalog has been sitting ready. Cached, so every
+                // press after the first costs an actor hop and nothing else.
+                Task.detached(priority: .utility) { _ = await EmojiCatalog.shared.all() }
                 pressed = MessagePress(
                     item: item, frame: frame,
                     canEdit: model.canEdit(item.message),
                     canDelete: model.canDelete(item.message))
             },
-            onOpenReply: { id in openingTarget = id },
-            onInspectReaction: { _ in reactionDetail = item }
+            isHeld: pressed?.item.id == item.id,
+            onOpenConversation: onOpenConversation,
+            onReply: {
+                replyingTo = item.message
+                composerFocused = true
+            },
+            onOpenThread: { frame in
+                let focus = ThreadFocus(
+                    rootID: item.message.replyRootID ?? item.message.id,
+                    anchorY: frame.minY)
+                // Raised without the system's slide. The chain draws the chat's
+                // own header and composer in the chat's own places, so a
+                // presentation that flies up from the bottom is half a second
+                // of those two sliding past themselves. ``ThreadView`` fades in
+                // what it actually added and leaves the rest sitting still.
+                var instant = Transaction()
+                instant.disablesAnimations = true
+                withTransaction(instant) { thread = focus }
+            },
+            onInspectReaction: { _ in reactionDetail.item = item }
         )
+    }
+
+    // MARK: Threads
+
+    /// A reply typed inside a chain. Answers the last message in it, which is
+    /// what keeps the chain's root the same one it already had.
+    private func reply(_ text: String, media: [PickedMedia], into rootID: String) {
+        let parent = Transcript.chain(rootedAt: rootID, in: model.messages).last
+        bottomRequest += 1
+        Task { await model.send(text, media: media, replyingTo: parent) }
+    }
+
+    /// The chain, drawn through the same builder as the transcript so a bubble
+    /// in a thread is the same bubble it was in the conversation.
+    ///
+    /// Quotes and counts are stripped on the way out: inside a chain, every
+    /// message answers the one above it, and saying so on each of them is
+    /// furniture that the lifting-out was meant to remove.
+    private func threadItems(rootedAt rootID: String) -> [MessageDisplay] {
+        Transcript.rows(
+            messages: Transcript.chain(rootedAt: rootID, in: model.messages),
+            // Queued replies belong in the chain they were typed into, or
+            // sending from a thread would look like it had done nothing until
+            // the server came back.
+            outbox: model.outbox.filter {
+                $0.localEcho(sender: model.currentUser).replyRootID == rootID
+            },
+            currentUser: model.currentUser,
+            quoted: model.quotedParents, members: model.members
+        ).compactMap { row in
+            guard case .message(var item) = row else { return nil }
+            item.reply = nil
+            item.replyCount = 0
+            return item
+        }
     }
 
     // MARK: Long press
@@ -676,8 +821,16 @@ struct ChatView: View {
         if !item.message.isSystem, !item.message.isDeleted, !item.isPending {
             actions.append(.init("Reply", symbol: "arrowshape.turn.up.left") {
                 pressed = nil
+                thread = nil
                 replyingTo = item.message
                 composerFocused = true
+            })
+        }
+        if !item.reactions.isEmpty {
+            actions.append(.init("View Reactions", symbol: "heart.text.square") {
+                pressed = nil
+                thread = nil
+                reactionDetail.item = item
             })
         }
         if model.canPin(item.message) {
@@ -693,6 +846,7 @@ struct ChatView: View {
         if press.canDelete {
             actions.append(.init("Delete", symbol: "trash", isDestructive: true) {
                 pressed = nil
+                thread = nil
                 deleteTarget = press
             })
         }
@@ -702,6 +856,7 @@ struct ChatView: View {
                 // from what was actually posted.
                 editDraft = item.message.text ?? ""
                 pressed = nil
+                thread = nil
                 editTarget = press
             })
         }
@@ -1265,58 +1420,13 @@ struct ChatView: View {
             }
         }
         ToolbarItem(placement: .principal) {
-            Button { isInfoPresented = true } label: { titleLabel }
+            Button { isInfoPresented = true } label: {
+                ConversationTitle(conversation: current)
+            }
                 .buttonStyle(.plain)
                 .accessibilityLabel(titleAccessibilityLabel)
                 .accessibilityHint("Shows conversation details")
         }
-    }
-
-    /// The face, then the name in a capsule of its own.
-    ///
-    /// The capsule is not decoration. Without it the name is loose text on a
-    /// transparent bar, sitting over whatever happens to be scrolling behind it,
-    /// and there is no telling where the tappable part ends. A bordered pill
-    /// says "this is a control, and it is exactly this big", which is what a
-    /// transparent bar takes away and has to give back some other way.
-    private var titleLabel: some View {
-        // Negative spacing, so the pill tucks up behind the foot of the picture
-        // and the two read as one control rather than as a photo with a caption
-        // under it. Safe in a way `.offset` would not be: spacing is layout, so
-        // the stack reports the shorter height it actually occupies, and the bar
-        // sizes itself to what is drawn.
-        VStack(spacing: -6) {
-            Avatar(
-                url: current.avatarURL,
-                name: current.name,
-                size: 62,
-                isGroup: current.isGroup
-            )
-            // A stack draws in order, so the pill would otherwise cover the
-            // photo. Lifting the photo instead puts the overlap the right way
-            // round: the face stays whole and the pill runs behind it.
-            .zIndex(1)
-            HStack(spacing: 3) {
-                Text(current.name)
-                    .font(.footnote.weight(.semibold))
-                    .lineLimit(1)
-                    .foregroundStyle(.primary)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 15)
-            .padding(.vertical, 6)
-            .glassEffect(.regular.interactive(), in: .capsule)
-        }
-        // Clear of the status bar. A picture that starts where the safe area
-        // does is a picture touching the clock, and this item is tall enough
-        // that the bar grows to fit it rather than the other way round.
-        .padding(.top, 14)
-        // On the pieces, not on the whole stack. The gap between the face and
-        // the name is not part of either, and a hit area that covers it is a hit
-        // area covering the bar itself.
-        .accessibilityElement(children: .combine)
     }
 
     private var titleAccessibilityLabel: String {
@@ -1915,7 +2025,31 @@ private struct TranscriptScrollTuning: UIViewRepresentable {
 /// Glyphs run along the top with their counts, and picking one narrows the list.
 /// "All" is the default and is what a message with a single reaction shows
 /// without any of this getting in the way.
-private struct ReactionRoster: View {
+/// Where the roster's subject lives, so that setting it touches one small view
+/// instead of the whole chat.
+@MainActor @Observable final class RosterTarget {
+    var item: MessageDisplay?
+}
+
+/// Nothing to look at. It exists to own the sheet, and it is the only view that
+/// reads ``RosterTarget``.
+private struct RosterHost: View {
+    @Bindable var target: RosterTarget
+    let members: [Member]
+    let meID: String?
+
+    var body: some View {
+        Color.clear
+            .allowsHitTesting(false)
+            .sheet(item: $target.item) { item in
+                ReactionRoster(summaries: item.reactions, members: members, meID: meID)
+            }
+    }
+}
+
+/// Who reacted, and with what. Raised from a held chip, in the transcript or
+/// in a chain, which is why it is not private to either.
+struct ReactionRoster: View {
     let summaries: [Message.ReactionSummary]
     let members: [Member]
     /// So the reader can find themselves in a long list without reading it.
@@ -1924,11 +2058,19 @@ private struct ReactionRoster: View {
     @Environment(\.dismiss) private var dismiss
     @State private var filter: String?
 
+    // No `NavigationStack`, no `List`. A sheet does not animate in until its
+    // content has been built and laid out once, and those two are the most
+    // expensive things that could be in here: a navigation container and a
+    // collection view, both stood up from nothing on every present, for a
+    // header and a column of names. A `ScrollView` over a `LazyVStack` draws
+    // the same list and starts the animation sooner, which is the whole
+    // complaint about how long a roster takes to arrive.
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                if summaries.count > 1 { glyphs }
-                List {
+        VStack(spacing: 0) {
+            header
+            if summaries.count > 1 { glyphs }
+            ScrollView {
+                LazyVStack(spacing: 0) {
                     ForEach(Array(people.enumerated()), id: \.offset) { _, person in
                         HStack(spacing: 12) {
                             Avatar(url: person.imageURL, name: person.name, size: 34)
@@ -1946,21 +2088,32 @@ private struct ReactionRoster: View {
                                 ReactionGlyph(glyph: person.glyph, size: 18)
                             }
                         }
+                        .padding(.horizontal, 16)
+                        .frame(minHeight: 44)
                         .accessibilityElement(children: .combine)
                         .accessibilityLabel("\(person.name), reacted with \(person.spokenGlyph)")
                     }
                 }
-                .listStyle(.plain)
             }
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
+            .scrollBounceBehavior(.basedOnSize)
         }
         .presentationDetents([.medium, .large])
+    }
+
+    /// The title row a navigation bar used to draw, at a fraction of what one
+    /// costs to stand up.
+    private var header: some View {
+        ZStack {
+            Text(title)
+                .font(.headline)
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 18)
+        .padding(.bottom, 10)
     }
 
     private var glyphs: some View {
@@ -2044,3 +2197,53 @@ private struct ReactionRoster: View {
     }
 }
 
+/// The face, then the name in a capsule of its own.
+///
+/// The capsule is not decoration. Without it the name is loose text on a
+/// transparent bar, sitting over whatever happens to be scrolling behind it,
+/// and there is no telling where the tappable part ends. A bordered pill says
+/// "this is a control, and it is exactly this big", which is what a transparent
+/// bar takes away and has to give back some other way.
+///
+/// Shared with ``ThreadView``, which draws its own copy in the same place: a
+/// chain is presented over the chat, so the real toolbar is behind the scrim
+/// and dimmed with everything else, and the reader should not have to close
+/// the chain to find out which conversation they are in.
+struct ConversationTitle: View {
+    let conversation: ConversationRow
+
+    var body: some View {
+        VStack(spacing: -6) {
+            Avatar(
+                url: conversation.avatarURL,
+                name: conversation.name,
+                size: 62,
+                isGroup: conversation.isGroup
+            )
+            // A stack draws in order, so the pill would otherwise cover the
+            // photo. Lifting the photo instead puts the overlap the right way
+            // round: the face stays whole and the pill runs behind it.
+            .zIndex(1)
+            HStack(spacing: 3) {
+                Text(conversation.name)
+                    .font(.footnote.weight(.semibold))
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 15)
+            .padding(.vertical, 6)
+            .glassEffect(.regular.interactive(), in: .capsule)
+        }
+        // Clear of the status bar. A picture that starts where the safe area
+        // does is a picture touching the clock, and this item is tall enough
+        // that the bar grows to fit it rather than the other way round.
+        .padding(.top, 14)
+        // On the pieces, not on the whole stack. The gap between the face and
+        // the name is not part of either, and a hit area that covers it is a hit
+        // area covering the bar itself.
+        .accessibilityElement(children: .combine)
+    }
+}

@@ -912,6 +912,31 @@ final class AppModel {
         }
     }
 
+    /// Join a group from a share link. Answers with the conversation to open,
+    /// or nil if the link has expired or the group is gone.
+    ///
+    /// Safe to press twice: the server answers a join it has already granted
+    /// with the group, so a double tap lands in the same place a single one
+    /// does.
+    func join(_ link: GroupMeLink) async -> ConversationID? {
+        switch link {
+        case .groupInvite(let groupID, let shareToken):
+            do {
+                guard let group = try await api.joinGroup(groupID, shareToken: shareToken)
+                else { return nil }
+                try? await store.conversations.upsert(groups: [group])
+                await reloadConversations()
+                // Its history is not ours yet. Fetching now means the chat this
+                // opens onto has something in it.
+                await sync.catchUp(.group(group.id))
+                return .group(group.id)
+            } catch {
+                log.notice("could not join a group: \(diagnosticText(error), privacy: .public)")
+                return nil
+            }
+        }
+    }
+
     @discardableResult
     func createGroup(name: String, description: String?) async -> ConversationID? {
         do {

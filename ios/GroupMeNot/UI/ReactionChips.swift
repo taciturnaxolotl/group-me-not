@@ -20,6 +20,13 @@ struct ReactionChips: View {
     /// hangs off, so the tail collapses into a count.
     static let visibleLimit = 4
 
+    /// Flipped on the way into an inspect, purely to fire the haptic. The
+    /// press opens a sheet, so the tap under the finger is the only thing
+    /// confirming the gesture landed before the sheet arrives.
+    @State private var wasInspected = false
+    /// The chip currently under a finger, so only that one swells.
+    @State private var pressing: Message.ReactionSummary.ID?
+
     private var shown: [Message.ReactionSummary] { Array(summaries.prefix(Self.visibleLimit)) }
     private var overflow: Int { max(0, summaries.count - Self.visibleLimit) }
 
@@ -32,7 +39,19 @@ struct ReactionChips: View {
                 // VoiceOver is unaffected by the change.
                 chip(summary)
                     .onTapGesture { onTap(summary.glyph) }
-                    .onLongPressGesture(minimumDuration: 0.32) { onInspect(summary) }
+                    .scaleEffect(pressing == summary.id ? 1.12 : 1)
+                    .animation(pressing == summary.id
+                               ? .easeOut(duration: messagePressDuration)
+                               : .snappy(duration: 0.22), value: pressing)
+                    // Same 44pt as the bubble, and for the same reason: the
+                    // transcript re-pins to its bottom as it resizes, so a
+                    // stationary finger on a chip near the newest message keeps
+                    // losing the press at the 10pt default.
+                    .onLongPressGesture(minimumDuration: messagePressDuration,
+                                        maximumDistance: 44) {
+                        wasInspected.toggle()
+                        onInspect(summary)
+                    } onPressingChanged: { pressing = $0 ? summary.id : nil }
                     .accessibilityElement(children: .combine)
                     .accessibilityAddTraits(.isButton)
                     .accessibilityLabel(Self.label(for: summary))
@@ -55,6 +74,7 @@ struct ReactionChips: View {
         // of the bubble rather than being part of it.
         .padding(2)
         .background(Capsule().fill(Color(.systemBackground)))
+        .sensoryFeedback(.impact(weight: .light), trigger: wasInspected)
     }
 
     private func chip(_ summary: Message.ReactionSummary) -> some View {

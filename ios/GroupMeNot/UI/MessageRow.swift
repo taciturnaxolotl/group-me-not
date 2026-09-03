@@ -1,5 +1,12 @@
 import SwiftUI
 
+/// How long a press has to be held before a bubble or a chip opens something.
+///
+/// Short, because the press is a shortcut and a shortcut that makes you wait
+/// stops feeling like one. The view swells over exactly this long, so the
+/// finger sees the gesture being recognised rather than guessing at it.
+let messagePressDuration = 0.14
+
 // MARK: - Display model
 
 /// One message, already resolved into everything the row needs to draw itself.
@@ -45,6 +52,11 @@ nonisolated struct MessageDisplay: Identifiable, Hashable, Sendable {
     var reactions: [Message.ReactionSummary]
     /// The message being answered, resolved once when the transcript is built.
     var reply: ReplyPreview?
+    /// How many loaded messages answer this one's chain, counted when the
+    /// transcript is built. Only the message that starts a chain carries it,
+    /// because that is the one a reader arrives at with no idea a
+    /// conversation happened underneath.
+    var replyCount: Int = 0
     /// The outbox guid, while this message is still queued.
     ///
     /// Carried rather than the upload fraction itself, and that is the whole
@@ -84,10 +96,21 @@ nonisolated struct MessageDisplay: Identifiable, Hashable, Sendable {
     /// tell a rewrite from a misremembering.
     var isEdited: Bool { message.isEdited && !message.isDeleted }
 
+    /// A share link this app can act on, if the message carries one.
+    var invite: GroupMeLink? {
+        guard !message.isDeleted else { return nil }
+        return text.links.lazy.compactMap(GroupMeLink.init(url:)).first
+    }
+
     /// The link worth a card. Only the first: past that the message is a link
     /// dump and cards stop helping.
+    ///
+    /// An invite takes the slot when there is one. Two cards under one bubble
+    /// for the same URL would be the app disagreeing with itself about what
+    /// the link is.
     var previewLink: URL? {
-        message.isDeleted ? nil : text.previewLink
+        guard !message.isDeleted, invite == nil else { return nil }
+        return text.previewLink
     }
 
     /// True for the one case that renders bigger and without a bubble tint.
@@ -130,8 +153,20 @@ struct MessageRow: View {
     /// A long press, with the bubble's frame in global space. The row does not
     /// present anything itself; see ``ChatView`` for why.
     var onPress: (CGRect) -> Void = { _ in }
-    /// Called with the id of a quoted message when the reader taps the quote.
-    var onOpenReply: (String) -> Void = { _ in }
+    /// True while this row's action menu is on screen. The row stays swollen
+    /// for as long as it is, so the thing the menu acts on is the one thing
+    /// standing up off the transcript.
+    var isHeld: Bool = false
+    /// Called with a conversation reached from inside this message, which is
+    /// a share link and nothing else so far.
+    var onOpenConversation: (ConversationRow) -> Void = { _ in }
+    /// A drag to the right, asking to answer this message.
+    var onReply: () -> Void = {}
+    /// Asks for this message's reply chain on its own, handing over where the
+    /// message is sitting so the chain can open around it rather than
+    /// somewhere else. Raised from the quote above a reply and from the count
+    /// under the message that started one.
+    var onOpenThread: (CGRect) -> Void = { _ in }
     /// Called when the reader holds a reaction chip, asking who reacted.
     var onInspectReaction: (Message.ReactionSummary) -> Void = { _ in }
 
@@ -149,7 +184,10 @@ struct MessageRow: View {
                 canEdit: canEdit,
                 onEdit: onEdit,
                 onPress: onPress,
-                onOpenReply: onOpenReply,
+                isHeld: isHeld,
+                onReply: onReply,
+                onOpenConversation: onOpenConversation,
+                onOpenThread: onOpenThread,
                 onInspectReaction: onInspectReaction)
         }
     }
@@ -183,6 +221,11 @@ nonisolated struct ReplyPreview: Hashable, Sendable {
     /// draws: a reply with no visible parent is still visibly a reply, and
     /// hiding it would silently change what the message means.
     var messageID: String?
+    /// Who wrote the quoted message, when it can be told. Names are not
+    /// identity: two people whose names have not resolved are both "Someone",
+    /// and comparing those to decide whether a quote repeats the sender below
+    /// it hid the name on exactly the messages that needed it.
+    var senderID: String?
     var senderName: String
     var text: String
 }
@@ -199,7 +242,10 @@ private struct BubbleRow: View {
     let canEdit: Bool
     let onEdit: (String) -> Void
     let onPress: (CGRect) -> Void
-    let onOpenReply: (String) -> Void
+    let isHeld: Bool
+    let onReply: () -> Void
+    let onOpenConversation: (ConversationRow) -> Void
+    let onOpenThread: (CGRect) -> Void
     let onInspectReaction: (Message.ReactionSummary) -> Void
 
     @Environment(AppSettings.self) private var settings
@@ -219,6 +265,23 @@ private struct BubbleRow: View {
     /// Purely so the haptic has something to fire on. The overlay itself is
     /// somebody else's business now.
     @State private var wasPressed = false
+    /// Held down, but not yet long enough to count. The bubble swells while
+    /// this is true so the press has somewhere to arrive: the growth reaches
+    /// its top just as the haptic fires.
+    @State private var isPressing = false
+    /// Swollen from the moment the finger lands until the menu it opened goes
+    /// away, so there is no deflate-and-reinflate between the two.
+    private var isSwollen: Bool { isPressing || isHeld }
+
+    /// How far the row has been dragged toward a reply.
+    @State private var dragX: CGFloat = 0
+    /// Past the threshold, where letting go answers the message. Kept as its
+    /// own flag so the crossing can be felt as well as seen.
+    @State private var isArmed = false
+
+    /// Far enough to mean it. Short enough that the wrist does it without
+    /// thinking, which is the whole appeal of the gesture.
+    private static let replyReach: CGFloat = 56
 
     /// Which edge this bubble hangs off.
     ///
@@ -254,17 +317,11 @@ private struct BubbleRow: View {
             }
 
             VStack(alignment: isTrailing ? .trailing : .leading, spacing: 2) {
-                if item.showsSender && !isTrailing {
-                    Text(item.senderName)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        // One line, truncated. A long nickname above a bubble
-                        // wrapping onto a second line pushes the whole run down
-                        // and reads as a message of its own.
-                        .lineLimit(1)
-                        .padding(.horizontal, 12)
-                        .padding(.top, 4)
-                }
+                // Above the quote only when there is no quote. A reply puts
+                // somebody else's words directly under this name, and a name
+                // sitting on top of a bubble is a claim about who said it; it
+                // belongs to the answer, so it goes down with the answer.
+                if showsNameHere, item.reply == nil { senderLabel }
 
                 messageBody
 
@@ -274,11 +331,82 @@ private struct BubbleRow: View {
             if !isTrailing { Spacer(minLength: gutterWidth) }
         }
         .padding(.vertical, item.isRunTail ? 3 : 1)
+        .offset(x: dragX)
+        // After the offset, so it stays put in the row's real frame while the
+        // message slides off it. A hint that travelled with the bubble would
+        // never be uncovered.
+        .background(alignment: .leading) { replyHint }
+        // Simultaneous rather than exclusive: the transcript still owns the
+        // vertical, and this only ever claims a drag that is plainly sideways.
+        .simultaneousGesture(replyDrag, isEnabled: canReply)
+        // On the way out only. Arming is the moment worth feeling; falling
+        // back under the threshold is the user already changing their mind.
+        .sensoryFeedback(trigger: isArmed) { _, armed in
+            armed ? .impact(weight: .medium) : nil
+        }
         // `.contain` rather than `.combine`: the chips, the links and the
         // preview card are all things to act on, and flattening the row would
         // read them out and then hide them.
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityContext)
+    }
+
+    /// The same messages the menu offers a Reply on. A gesture that moves the
+    /// row and then does nothing is worse than no gesture.
+    private var canReply: Bool {
+        !item.message.isDeleted && !item.message.isSystem && !item.isPending && !item.isFailed
+    }
+
+    /// Drag right to answer. The row follows the finger, resists past the
+    /// point where it has already said yes, and springs back on release
+    /// whether or not it fired: the composer's banner is the receipt, so the
+    /// row has no reason to stay out of place.
+    private var replyDrag: some Gesture {
+        DragGesture(minimumDistance: 14)
+            .onChanged { value in
+                // A drag that is mostly vertical is the transcript being
+                // scrolled, and taking it would make the list feel sticky.
+                guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                let pulled = max(0, value.translation.width)
+                dragX = pulled <= Self.replyReach
+                    ? pulled
+                    : Self.replyReach + (pulled - Self.replyReach) * 0.28
+                isArmed = pulled >= Self.replyReach
+            }
+            .onEnded { _ in
+                let fired = isArmed
+                isArmed = false
+                withAnimation(.snappy(duration: 0.28)) { dragX = 0 }
+                if fired { onReply() }
+            }
+    }
+
+    /// The arrow the drag uncovers, fading in with the pull so the gesture
+    /// explains itself the first time somebody does it by accident.
+    private var replyHint: some View {
+        Image(systemName: "arrowshape.turn.up.left.fill")
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(isArmed ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+            .padding(.leading, 10)
+            .scaleEffect(isArmed ? 1 : 0.75)
+            .opacity(min(1, dragX / Self.replyReach))
+            .animation(.snappy(duration: 0.2), value: isArmed)
+            .accessibilityHidden(true)
+    }
+
+    /// Everyone but me, and only on the message that opens a run.
+    private var showsNameHere: Bool { item.showsSender && !isTrailing }
+
+    private var senderLabel: some View {
+        Text(item.senderName)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            // One line, truncated. A long nickname above a bubble wrapping
+            // onto a second line pushes the whole run down and reads as a
+            // message of its own.
+            .lineLimit(1)
+            .padding(.horizontal, 12)
+            .padding(.top, 4)
     }
 
     /// Reserved even when empty, so a run of messages stays in one column.
@@ -295,6 +423,19 @@ private struct BubbleRow: View {
     /// Bubble, preview card, and the reaction chips that straddle the bottom of
     /// whichever of those two ends up last.
     private var messageBody: some View {
+        VStack(alignment: isTrailing ? .trailing : .leading, spacing: 1) {
+            pressableBody
+            // Outside the stack the chips are an overlay on. Inside it, the
+            // reaction row measured itself against the bottom of the reply
+            // count rather than the bottom of the bubble, and the chips slid
+            // down to straddle a line of grey text.
+            if item.replyCount > 0 { threadLink }
+        }
+    }
+
+    /// Everything a press acts on: the bubble, what hangs off it, and the
+    /// chips that straddle its edge.
+    private var pressableBody: some View {
         VStack(alignment: isTrailing ? .trailing : .leading, spacing: 4) {
             // Outside the bubble, deliberately. A photo is not text with a
             // picture in it; it is the message. Wrapping it in tinted padding
@@ -311,21 +452,42 @@ private struct BubbleRow: View {
                     // ways to be confused.
                     .overlay { uploadRing }
             }
+            if let reply = item.reply { quoteBubble(reply) }
+            // Every reply says who is speaking, run or no run. A quote puts
+            // somebody else's name directly above this bubble, and a reply in
+            // the middle of a run carries no name of its own, so the only name
+            // in sight was the one belonging to the person being answered —
+            // which reads as them having said this too.
+            if item.reply != nil, !isTrailing { senderLabel }
             bubble
-            if let link = item.previewLink {
+            if let invite = item.invite {
+                InviteCard(link: invite, isOwn: item.isOwn, onOpen: onOpenConversation)
+            } else if let link = item.previewLink {
                 LinkPreviewCard(url: link, isOwn: item.isOwn, service: previews)
             }
         }
+        .contentShape(.rect)
+        .onLongPressGesture(minimumDuration: messagePressDuration, maximumDistance: 44) {
+            wasPressed.toggle()
+            onPress(bubbleFrame)
+        } onPressingChanged: { isPressing = $0 }
+        // Attached under the chips rather than over them. The chips sit on top
+        // and carry a press of their own, and with both gestures live on the
+        // same touch the bubble's menu opened first and the chip's sheet
+        // arrived behind it.
         .overlay(alignment: isTrailing ? .bottomTrailing : .bottomLeading) { chips }
         // The overlay draws outside the layout, so the overhang is paid for
         // here. Without this the row below would be sat on.
         .padding(.bottom, item.reactions.isEmpty ? 0 : chipHeight - chipOverlap)
+        // Below everything the chips hang off, and outside the stack they are
+        // an overlay on. Inside it, the reaction row measured itself against
+        // the bottom of the reply count rather than the bottom of the bubble,
+        // and the chips slid down to straddle a line of grey text.
         // A chip appearing is the entire feedback for a tap, so it is the one
         // thing in this row worth animating. Driven from out here rather than
         // from the chips themselves, because a transition only animates when
         // the animation is attached above the view being inserted.
         .animation(.snappy(duration: 0.2), value: item.reactions)
-        .contentShape(.rect)
         // `maximumDistance` is not about the finger. It measures movement
         // relative to *this view*, and the view moves on its own:
         // `.defaultScrollAnchor(.bottom, for: .sizeChanges)` re-pins the
@@ -339,10 +501,9 @@ private struct BubbleRow: View {
         // real drag covers before the pan recogniser claims the touch, so
         // scrolling does not start opening pickers.
         .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { bubbleFrame = $0 }
-        .onLongPressGesture(minimumDuration: 0.32, maximumDistance: 44) {
-            wasPressed.toggle()
-            onPress(bubbleFrame)
-        }
+        .scaleEffect(isSwollen ? 1.04 : 1, anchor: isTrailing ? .trailing : .leading)
+        .animation(isSwollen ? .easeOut(duration: messagePressDuration) : .snappy(duration: 0.22),
+                   value: isSwollen)
         // On the way up only. A haptic for the dismissal would be a second
         // tap the user did not make.
         .sensoryFeedback(.impact(weight: .light), trigger: wasPressed)
@@ -381,7 +542,6 @@ private struct BubbleRow: View {
         item.message.isDeleted
             || !item.text.isEmpty
             || item.isEdited
-            || item.reply != nil
             || !otherAttachments.isEmpty
     }
 
@@ -408,7 +568,6 @@ private struct BubbleRow: View {
                     .padding(.vertical, 8)
             } else {
                 VStack(alignment: isTrailing ? .trailing : .leading, spacing: 6) {
-                    if let reply = item.reply { quote(reply) }
                     ForEach(Array(otherAttachments.enumerated()), id: \.offset) { _, attachment in
                         AttachmentChipFor(attachment: attachment, isOwn: item.isOwn)
                     }
@@ -436,41 +595,76 @@ private struct BubbleRow: View {
         .animation(.easeOut(duration: 0.2), value: item.isPending)
     }
 
-    /// The message being answered, above the answer.
+    /// The way into a chain from the message that started it.
     ///
-    /// A rule and two lines, dimmed against whatever the bubble is tinted with.
-    /// Tapping it goes to the original, which is the only reason a reader looks
-    /// at a quote they can already read.
-    private func quote(_ reply: ReplyPreview) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Capsule()
-                .fill(quoteInk.opacity(0.5))
-                .frame(width: 2.5)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(reply.senderName)
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1)
-                Text(reply.text)
-                    .font(.caption)
-                    .lineLimit(2)
+    /// Without it a conversation can happen underneath a message and leave no
+    /// mark on it: the replies quote it, but it does not know about them. A
+    /// count is the smallest thing that fixes that, and it is the same handle
+    /// Messages gives you.
+    private var threadLink: some View {
+        Button { onOpenThread(bubbleFrame) } label: {
+            HStack(spacing: 3) {
+                Text(item.replyCount == 1 ? "1 reply" : "\(item.replyCount) replies")
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
             }
-            .foregroundStyle(quoteInk)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.top, 1)
+            .contentShape(.rect)
         }
-        .fixedSize(horizontal: false, vertical: true)
-        .contentShape(.rect)
-        .onTapGesture {
-            guard let id = reply.messageID else { return }
-            onOpenReply(id)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Replying to \(reply.senderName): \(reply.text)")
+        .buttonStyle(.plain)
     }
 
-    /// Dimmed rather than a second colour. The quote sits inside a bubble whose
-    /// tint is already decided, and introducing a third colour here would make
-    /// the reply louder than the message.
-    private var quoteInk: Color {
-        item.isOwn ? .white.opacity(0.72) : .secondary
+    /// The message being answered, drawn as a small bubble above the answer.
+    ///
+    /// Messages stacks the two, a faded copy of the original with the reply
+    /// tucked under it, and that is what makes a reply read as a reply from
+    /// across the room. A rule and two lines of caption *inside* the bubble is
+    /// the shape Slack uses; in a transcript of bubbles it looked like a quote
+    /// block someone had pasted in. Same information, less furniture, and the
+    /// original keeps its own outline.
+    ///
+    /// Tapping it goes to the original, which is the only reason a reader
+    /// looks at a quote they can already read.
+    private func quoteBubble(_ reply: ReplyPreview) -> some View {
+        VStack(alignment: isTrailing ? .trailing : .leading, spacing: 2) {
+            // Answering yourself would otherwise stack the same name twice
+            // with two lines of grey between them, which reads as a stutter
+            // rather than as a quote. Decided on ids: a name is a display
+            // string, and two of them being equal is not two people being the
+            // same person.
+            if !answersSelf(reply) {
+                Text(reply.senderName)
+                    .font(.caption2.weight(.medium))
+                    .padding(.horizontal, 10)
+            }
+            Text(reply.text)
+                .font(.caption)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 11)
+                .padding(.vertical, 7)
+                .background(.quaternary, in: .rect(cornerRadius: 15, style: .continuous))
+        }
+        .foregroundStyle(.secondary)
+        .contentShape(.rect)
+        .onTapGesture { onOpenThread(bubbleFrame) }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Replying to \(reply.senderName): \(reply.text)")
+        .accessibilityHint("Opens this reply chain")
+    }
+
+    /// Whether the quoted message was written by whoever wrote this one. False
+    /// whenever either end is unknown, because a quote with an unnamed author
+    /// is the case where the name matters most.
+    private func answersSelf(_ reply: ReplyPreview) -> Bool {
+        guard let quoted = reply.senderID,
+              let sender = item.message.senderId ?? item.message.userId
+        else { return false }
+        return quoted == sender
     }
 
     /// "Edited", under the text and out of the way.

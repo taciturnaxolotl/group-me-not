@@ -125,6 +125,16 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
             userId: message.senderId ?? message.userId)
     }
 
+    /// The root of the chain this message belongs to, or nil if it starts one.
+    ///
+    /// GroupMe keeps both ends of a reply: `reply_id` is the message being
+    /// answered and `base_reply_id` is the first message of the chain. The
+    /// second is what makes a thread findable, because every reply in a chain
+    /// carries the same one no matter how deep it sits.
+    var replyRootID: String? {
+        attachments?.first { $0.type == "reply" }?.baseReplyId ?? replyTargetID
+    }
+
     /// Who wrote the message this one answers, as the sender recorded it.
     var replyTargetUserID: String? {
         attachments?.first { $0.type == "reply" }?.userId
