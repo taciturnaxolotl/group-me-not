@@ -520,9 +520,19 @@ actor ConversationStore {
     /// it correctly resolves to zero rather than relighting the badge.
     /// Whichever device has read furthest, because "has this been read" is a
     /// question about the account and not about this phone.
+    ///
+    /// The guard on the head is not a formality. An incoming row with no last
+    /// message carries a sort of zero, and every cursor is `>= 0`, so without
+    /// it any update that does not mention a newest message declares the
+    /// conversation read and wipes the badge. Topics are where that bites:
+    /// `GET /v3/groups/{id}/subgroups` carries `unread_count` per topic but its
+    /// `messages` preview is not always there, and a payload arriving without
+    /// one cleared every topic in the group — in the same statement that was
+    /// being handed the counts it then discarded.
     nonisolated private static let readEverythingReported = """
-    MAX(CAST(COALESCE(conversations.last_read_message_id, '0') AS INTEGER),
-        CAST(COALESCE(excluded.last_read_message_id, '0') AS INTEGER))
+    excluded.last_message_sort > 0
+    AND MAX(CAST(COALESCE(conversations.last_read_message_id, '0') AS INTEGER),
+            CAST(COALESCE(excluded.last_read_message_id, '0') AS INTEGER))
         >= excluded.last_message_sort
     """
 
