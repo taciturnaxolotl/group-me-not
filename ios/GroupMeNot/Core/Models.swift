@@ -140,6 +140,19 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
         attachments?.first { $0.type == "reply" }?.userId
     }
     var isSystem: Bool { system == true }
+
+    /// A system notice *about a message*, which the transcript already shows in
+    /// the message itself.
+    ///
+    /// `message.update` and `message.deleted` ride in as notices alongside the
+    /// thing they describe, and drawing them means saying twice what the reader
+    /// can see once: an edit rewrites its own bubble and carries an "Edited"
+    /// mark, and a deletion becomes a tombstone. A grey line reading "1 update"
+    /// under either is furniture.
+    var isMessageNotice: Bool {
+        guard isSystem, let type = event?.type else { return false }
+        return type.hasPrefix("message.")
+    }
     var isDeleted: Bool { (deletedAt ?? 0) > 0 }
     var likeCount: Int { favoritedBy?.count ?? 0 }
 

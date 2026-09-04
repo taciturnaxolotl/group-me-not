@@ -93,7 +93,7 @@ nonisolated enum Transcript {
             }
 
         let timeline: [(Message, MessageDisplay.Delivery)] =
-            messages.map { ($0, .sent) } + echoes
+            messages.filter { !$0.isMessageNotice }.map { ($0, .sent) } + echoes
 
         // One pass, so resolving a quote is a dictionary lookup rather than a
         // search of the whole transcript per bubble.
@@ -310,6 +310,10 @@ struct ChatView: View {
     /// Starts true because the transcript opens at the newest message.
     @State private var isAtFoot = true
 
+    /// False until the navigation transition has had the screen to itself.
+    /// See ``deferredTranscript``.
+    @State private var isSettled = false
+
     private var isNearBottom: Bool { isAtFoot }
 
     /// True while the reader's finger, or its momentum, owns the scroll view.
@@ -425,7 +429,7 @@ struct ChatView: View {
     }
 
     private var chrome: some View {
-        transcript
+        deferredTranscript
             .background(Color(.systemBackground))
             // A share link is tappable twice over: as the card under the
             // bubble and as the URL inside it. Both should do the same thing,
@@ -575,6 +579,14 @@ struct ChatView: View {
     private var lifecycle: some View {
         chrome
             .task { await model.openConversation(conversation.id) }
+            // Long enough for a push to finish, short enough that a
+            // conversation whose history is already on disk still feels
+            // immediate. The wait runs alongside the load above rather than
+            // after it, so a slow read is not paid for twice.
+            .task {
+                try? await Task.sleep(for: .milliseconds(280))
+                withAnimation(.easeOut(duration: 0.14)) { isSettled = true }
+            }
             .overlay {
                 RosterHost(target: reactionDetail,
                            members: model.members,
@@ -630,6 +642,29 @@ struct ChatView: View {
     }
 
     // MARK: Transcript
+
+    /// The transcript, once the push that brought us here has finished.
+    ///
+    /// Not an optimisation, a correctness problem about frames. Opening a
+    /// conversation anchors the scroll view at the *bottom*, and a `LazyVStack`
+    /// cannot place a bottom anchor without sizing every row above it, so the
+    /// whole loaded window — fifty bubbles, each with styled text, glass and a
+    /// geometry reader — is built in one main-thread pass. That pass lands in
+    /// the middle of the navigation transition, and the animation stops dead
+    /// with the header halfway across the screen.
+    ///
+    /// Nothing here can make that pass cheap enough to hide. What it can do is
+    /// move it: the transition plays over an empty page, and the transcript is
+    /// built in one go afterwards and faded in. The toolbar and composer are
+    /// already drawn by then, so the pause reads as a page loading rather than
+    /// as the app having stopped.
+    @ViewBuilder private var deferredTranscript: some View {
+        if isSettled {
+            transcript.transition(.opacity)
+        } else {
+            Color.clear
+        }
+    }
 
     private var transcript: some View {
         ScrollViewReader { proxy in
