@@ -6,6 +6,11 @@
 	     callback scheme. Keep it in sync with OAuth.callbackScheme. -->
 	<!-- Add-only, for the Save to Photos action in the media viewer. The
 	     narrowest permission that can write a picture: it never reads back. -->
+	<!-- Answers the export compliance question at upload instead of in App
+	     Store Connect. False is the true answer: the only cryptography here is
+	     HTTPS to GroupMe's own servers, which is exempt. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Save photos from your conversations to your library.</string>
 	<key>CFBundleURLTypes</key>
