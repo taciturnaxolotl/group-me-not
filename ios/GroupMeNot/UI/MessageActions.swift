@@ -187,12 +187,27 @@ struct MessageActionsOverlay: View {
         return min(max(anchor.midX, half + Self.margin), geo.size.width - half - Self.margin)
     }
 
-    /// Above the message, unless there is no room up there.
+    /// Above the message, unless there is no room up there — and above the
+    /// card as well when the card has had to come up here too.
     private func pillY(in geo: GeometryProxy) -> CGFloat {
         let half = pillSize.height / 2
-        let wanted = anchor.minY - Self.gap - half
+        let stacked = fitsBelow(in: geo) ? 0 : cardSize.height + Self.gap
+        let wanted = anchor.minY - Self.gap - stacked - half
         let ceiling = geo.safeAreaInsets.top + Self.margin + half
         return max(wanted, ceiling)
+    }
+
+    /// Whether the menu can stand under the message without running off the
+    /// bottom of the screen.
+    ///
+    /// The last message in a conversation is the one people press most, and it
+    /// is the one with nothing underneath it: the card was clamped up against
+    /// the floor and drawn straight over the pill and the bubble both, which is
+    /// a menu covering the thing it is a menu for.
+    private func fitsBelow(in geo: GeometryProxy) -> Bool {
+        guard cardSize.height > 0 else { return true }
+        let floor = geo.size.height - geo.safeAreaInsets.bottom - Self.margin
+        return anchor.maxY + Self.gap + cardSize.height <= floor
     }
 
     /// Below the message, unless there is no room down there. Clamped last so a
@@ -200,9 +215,15 @@ struct MessageActionsOverlay: View {
     /// than half of it under the composer.
     private func cardY(in geo: GeometryProxy) -> CGFloat {
         let half = cardSize.height / 2
-        let wanted = anchor.maxY + Self.gap + half
-        let floor = geo.size.height - geo.safeAreaInsets.bottom - Self.margin - half
-        return min(wanted, floor)
+        guard fitsBelow(in: geo) else {
+            // Above the message instead, with the pill above it. Everything
+            // stays in the same order it would have been read in — reactions,
+            // then actions — and the bubble keeps its own space.
+            let above = anchor.minY - Self.gap - half
+            let ceiling = geo.safeAreaInsets.top + Self.margin + pillSize.height + Self.gap + half
+            return max(above, ceiling)
+        }
+        return anchor.maxY + Self.gap + half
     }
 
     /// Grow out of the message rather than out of the middle of the screen.

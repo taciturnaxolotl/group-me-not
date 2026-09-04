@@ -9,8 +9,9 @@ import SwiftUI
 /// Not *too* short, though. Under about a fifth of a second the press fires
 /// before a finger that meant to scroll has moved far enough to say so, and a
 /// transcript that opens a menu when you try to read it is worse than one that
-/// makes you hold a moment longer.
-let messagePressDuration = 0.24
+/// makes you hold a moment longer. Half a second is what the system's own long
+/// press waits, so it is also what a hand already expects.
+let messagePressDuration = 0.5
 
 /// How far the finger may travel and still be pressing rather than scrolling.
 ///
