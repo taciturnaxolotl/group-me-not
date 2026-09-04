@@ -5,7 +5,28 @@ import SwiftUI
 /// Short, because the press is a shortcut and a shortcut that makes you wait
 /// stops feeling like one. The view swells over exactly this long, so the
 /// finger sees the gesture being recognised rather than guessing at it.
-let messagePressDuration = 0.14
+///
+/// Not *too* short, though. Under about a fifth of a second the press fires
+/// before a finger that meant to scroll has moved far enough to say so, and a
+/// transcript that opens a menu when you try to read it is worse than one that
+/// makes you hold a moment longer.
+let messagePressDuration = 0.24
+
+/// How far the finger may travel and still be pressing rather than scrolling.
+///
+/// This is not about the finger. It measures movement relative to the *view*,
+/// and the view moves on its own: the transcript re-pins to its content bottom
+/// whenever it resizes, so a typing bubble appearing (~45pt) or a catch-up
+/// rewriting history yanks a row out from under a stationary touch. At the 10pt
+/// default that made the newest few messages unpressable while the ones above
+/// them worked perfectly.
+///
+/// It was 44 for that reason and 44 was too much the other way: a scroll begins
+/// well inside it, so the press won every slow drag and the transcript could
+/// not be read without opening menus. 18 clears the shifts that actually happen
+/// while leaving a scroll free to be a scroll — and the longer duration above
+/// now covers most of what the distance used to.
+let messagePressSlack: CGFloat = 18
 
 // MARK: - Display model
 
@@ -461,7 +482,8 @@ private struct BubbleRow: View {
             }
         }
         .contentShape(.rect)
-        .onLongPressGesture(minimumDuration: messagePressDuration, maximumDistance: 44) {
+        .onLongPressGesture(minimumDuration: messagePressDuration,
+                            maximumDistance: messagePressSlack) {
             wasPressed.toggle()
             onPress(bubbleFrame)
         } onPressingChanged: { isPressing = $0 }
@@ -482,18 +504,6 @@ private struct BubbleRow: View {
         // from the chips themselves, because a transition only animates when
         // the animation is attached above the view being inserted.
         .animation(.snappy(duration: 0.2), value: item.reactions)
-        // `maximumDistance` is not about the finger. It measures movement
-        // relative to *this view*, and the view moves on its own:
-        // `.defaultScrollAnchor(.bottom, for: .sizeChanges)` re-pins the
-        // transcript to the content bottom whenever it resizes, so a typing
-        // bubble appearing (~45pt) or a catch-up rewriting history yanks the row
-        // out from under a stationary touch and cancels the press. At the 10pt
-        // default that makes the newest few messages unpressable while the ones
-        // above them work perfectly, which is a maddening thing to debug.
-        //
-        // 44pt absorbs those shifts and still sits well inside the distance a
-        // real drag covers before the pan recogniser claims the touch, so
-        // scrolling does not start opening pickers.
         .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { bubbleFrame = $0 }
         .scaleEffect(isSwollen ? 1.04 : 1, anchor: isTrailing ? .trailing : .leading)
         .animation(isSwollen ? .easeOut(duration: messagePressDuration) : .snappy(duration: 0.22),

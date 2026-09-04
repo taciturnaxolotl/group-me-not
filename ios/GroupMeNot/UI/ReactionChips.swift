@@ -43,12 +43,9 @@ struct ReactionChips: View {
                     .animation(pressing == summary.id
                                ? .easeOut(duration: messagePressDuration)
                                : .snappy(duration: 0.22), value: pressing)
-                    // Same 44pt as the bubble, and for the same reason: the
-                    // transcript re-pins to its bottom as it resizes, so a
-                    // stationary finger on a chip near the newest message keeps
-                    // losing the press at the 10pt default.
+                    // The same slack as the bubble, and for the same reasons.
                     .onLongPressGesture(minimumDuration: messagePressDuration,
-                                        maximumDistance: 44) {
+                                        maximumDistance: messagePressSlack) {
                         wasInspected.toggle()
                         onInspect(summary)
                     } onPressingChanged: { pressing = $0 ? summary.id : nil }

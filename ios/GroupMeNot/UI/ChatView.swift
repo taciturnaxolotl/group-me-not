@@ -1104,10 +1104,20 @@ struct ChatView: View {
     /// ending at an opaque edge. The container is what makes the pair read as
     /// one piece of glass with a gap in it instead of two unrelated lozenges.
     private var composer: some View {
-        GlassEffectContainer(spacing: 8) {
-            HStack(alignment: .bottom, spacing: 8) {
-                attachButton
-                field
+        VStack(alignment: .leading, spacing: 6) {
+            SwiftUI.Group {
+                if let replyingTo { replyHover(replyingTo) }
+            }
+            // Scoped to the hover. An implicit animation here would reach the
+            // `TextField` below and animate the words away after a send; see
+            // `sendButton`.
+            .animation(.snappy(duration: 0.24), value: replyingTo?.id)
+
+            GlassEffectContainer(spacing: 8) {
+                HStack(alignment: .bottom, spacing: 8) {
+                    attachButton
+                    field
+                }
             }
         }
         .padding(.horizontal, 12)
@@ -1188,13 +1198,6 @@ struct ChatView: View {
 
     private var field: some View {
         VStack(alignment: .leading, spacing: 0) {
-            SwiftUI.Group {
-                if let replyingTo { replyBanner(replyingTo) }
-            }
-            // Scoped to the banner, like the tray's. An implicit animation here
-            // would reach the `TextField` below and animate the words away
-            // after a send; see `sendButton`.
-            .animation(.snappy(duration: 0.24), value: replyingTo?.id)
             if !staged.isEmpty {
                 SwiftUI.Group {
                     stagedStrip
@@ -1304,70 +1307,71 @@ struct ChatView: View {
         named.append(MentionDraft.Named(userID: member.identity, name: display))
     }
 
-    /// What this message will be answering, with a way out.
+    /// The message being answered, hovering over the transcript just above the
+    /// bar, drawn as the message it is.
     ///
-    /// In the field rather than above it, for the same reason the attachments
-    /// are: the thing being replied to is part of the message being written.
+    /// Messages does this and it is plainly right: a reply is aimed at
+    /// something the reader can already see, so showing them a *smaller,
+    /// greyer, differently-shaped* copy of it is asking them to match two
+    /// pictures of the same thing. The bubble they tapped comes down to the
+    /// composer unchanged instead.
     ///
-    /// Drawn as the same small grey pill the transcript quotes things in, under
-    /// a line of plain words saying what is about to happen. That pairing is
-    /// the whole of it: the reader is looking at the shape their message is
-    /// about to take, in the place it will take it.
-    ///
-    /// It replaced a tinted reply arrow, a bold name, and a hand-drawn grey
-    /// circle with an `xmark` in it, sitting over a full-width rule. Every one
-    /// of those is a decoration standing in for a sentence, and together they
-    /// were four pieces of furniture around one line of quoted text. The rule
-    /// went with them: a pill carries its own edge, so the line under it was
-    /// drawing a boundary that was already there.
-    private func replyBanner(_ message: Message) -> some View {
-        HStack(spacing: 6) {
-            VStack(alignment: .leading, spacing: 3) {
-                // The name alone. "Replying to" was a caption on a banner
-                // that only ever appears because somebody chose to reply, and
-                // it took the room the name needed.
-                Text(message.name ?? "Someone")
-                    .font(.caption2.weight(.medium))
-                    .lineLimit(1)
-                Text(Transcript.summarise(message))
-                    .font(.caption)
-                    // Enough to recognise a paragraph by. One line was a rule
-                    // borrowed from the transcript's quotes, where the message
-                    // answering it is right underneath; here there is nothing
-                    // to answer yet, and the reader is checking they picked the
-                    // right thing.
-                    .lineLimit(4)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 6)
-                    .background(.quaternary, in: .rect(cornerRadius: 14, style: .continuous))
-            }
-            .foregroundStyle(.secondary)
+    /// Outside the field rather than inside it. In the field it was another row
+    /// of the same control, which is what made a quote need furniture to be
+    /// told apart from the words answering it; up here it is a message sitting
+    /// over the transcript, and nothing has to say so.
+    @ViewBuilder private func replyHover(_ message: Message) -> some View {
+        if let item = replyHoverItem(message) {
+            HStack(alignment: .top, spacing: 0) {
+                // Tall messages scroll rather than climbing the screen. The
+                // point is recognising what was tapped, and a paragraph and a
+                // half is plenty for that.
+                ScrollView {
+                    MessageRow(item: item, catalog: model.reactionCatalog, previews: model.previews)
+                        // A picture of the message, not the message. Every
+                        // gesture it carries belongs to the transcript.
+                        .allowsHitTesting(false)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(maxHeight: 190)
 
-            Spacer(minLength: 0)
-
-            Button {
-                replyingTo = nil
-            } label: {
-                // The system's own "clear this" glyph, which is what a search
-                // field and a mail token both use. Worth more than a bespoke
-                // circle: people already know what it does.
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 17))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 32, height: 32)
-                    .contentShape(.rect)
+                Button {
+                    replyingTo = nil
+                } label: {
+                    // The system's own "clear this" glyph, which is what a
+                    // search field and a mail token both use. Worth more than a
+                    // bespoke circle: people already know what it does.
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 19))
+                        .foregroundStyle(.secondary, .quaternary)
+                        .frame(width: 34, height: 34)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Cancel reply")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Cancel reply")
+            .padding(.leading, 2)
+            .padding(.trailing, 6)
+            .transition(.opacity.combined(with: .move(edge: .bottom)))
+            .accessibilityElement(children: .contain)
         }
-        .padding(.leading, 14)
-        .padding(.trailing, 6)
-        .padding(.top, 9)
-        // Slight, so the quote sits against the words answering it rather than
-        // a row above them. The same tuck the transcript gives a reply.
-        .padding(.bottom, 2)
-        .transition(.opacity.combined(with: .move(edge: .bottom)))
-        .accessibilityElement(children: .contain)
+    }
+
+    /// The message run through the same builder the transcript uses, so the
+    /// bubble above the composer is the bubble from the conversation rather
+    /// than a second drawing of one.
+    private func replyHoverItem(_ message: Message) -> MessageDisplay? {
+        Transcript.rows(
+            messages: [message], outbox: [], currentUser: model.currentUser,
+            quoted: model.quotedParents, members: model.members
+        ).compactMap { row -> MessageDisplay? in
+            guard case .message(var item) = row else { return nil }
+            // Its own quote and its own reply count belong to the transcript;
+            // here they are a message inside a message.
+            item.reply = nil
+            item.replyCount = 0
+            return item
+        }.first
     }
 
     /// The photos and videos waiting to go with this message.
