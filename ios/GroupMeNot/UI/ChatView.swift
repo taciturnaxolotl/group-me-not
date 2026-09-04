@@ -1377,10 +1377,10 @@ struct ChatView: View {
                 .frame(height: min(max(replyHoverHeight, 1), Self.replyHoverLimit))
             }
             .padding(.horizontal, 2)
-            // Close enough to touch. The bubble and the field it is about to
-            // be answered in are one arrangement, and a gap between them makes
-            // two.
-            .padding(.bottom, 1)
+            // Close, but not touching. The bubble and the field it is about to
+            // be answered in are one arrangement; a hair of air keeps them from
+            // reading as one object.
+            .padding(.bottom, 6)
             .transition(.opacity.combined(with: .move(edge: .bottom)))
             .accessibilityElement(children: .contain)
         }
