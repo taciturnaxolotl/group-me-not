@@ -311,8 +311,23 @@ struct ChatView: View {
     @State private var isAtFoot = true
 
     /// False until the navigation transition has had the screen to itself.
-    /// See ``deferredTranscript``.
+    /// See ``shownRows``.
     @State private var isSettled = false
+
+    /// How much of the window the first frames draw.
+    ///
+    /// Opening anchors the scroll view at the bottom, and a `LazyVStack` cannot
+    /// place a bottom anchor without sizing every row above it, so the whole
+    /// loaded window — fifty bubbles, each with styled text, glass and a
+    /// geometry reader — is built in one main-thread pass. That pass lands in
+    /// the middle of the navigation transition and stops it dead, with the
+    /// header halfway across the screen.
+    ///
+    /// A screenful is what the reader can see, and it is what the push carries.
+    /// The rest is spliced in behind them a moment later, above the viewport,
+    /// held in place by the same anchor a page of older history uses — so the
+    /// transcript arrives complete without anything having moved.
+    private static let firstPaintRows = 14
 
     private var isNearBottom: Bool { isAtFoot }
 
@@ -429,7 +444,7 @@ struct ChatView: View {
     }
 
     private var chrome: some View {
-        deferredTranscript
+        transcript
             .background(Color(.systemBackground))
             // A share link is tappable twice over: as the card under the
             // bubble and as the URL inside it. Both should do the same thing,
@@ -583,9 +598,18 @@ struct ChatView: View {
             // conversation whose history is already on disk still feels
             // immediate. The wait runs alongside the load above rather than
             // after it, so a slow read is not paid for twice.
+            // The rest of the window arrives the moment the push is over,
+            // above the viewport, held by the anchor that keeps a splice from
+            // moving anything.
+            .background(PushCompletion { settle() }.allowsHitTesting(false))
+            // A backstop, and nothing more. The probe answers on the frame the
+            // transition ends, or immediately when there was no transition to
+            // wait for; this only covers the case where it never gets to run at
+            // all, and a transcript stuck at fourteen rows is worse than one
+            // that expands a moment late.
             .task {
-                try? await Task.sleep(for: .milliseconds(280))
-                withAnimation(.easeOut(duration: 0.14)) { isSettled = true }
+                try? await Task.sleep(for: .milliseconds(700))
+                settle()
             }
             .overlay {
                 RosterHost(target: reactionDetail,
@@ -643,29 +667,6 @@ struct ChatView: View {
 
     // MARK: Transcript
 
-    /// The transcript, once the push that brought us here has finished.
-    ///
-    /// Not an optimisation, a correctness problem about frames. Opening a
-    /// conversation anchors the scroll view at the *bottom*, and a `LazyVStack`
-    /// cannot place a bottom anchor without sizing every row above it, so the
-    /// whole loaded window — fifty bubbles, each with styled text, glass and a
-    /// geometry reader — is built in one main-thread pass. That pass lands in
-    /// the middle of the navigation transition, and the animation stops dead
-    /// with the header halfway across the screen.
-    ///
-    /// Nothing here can make that pass cheap enough to hide. What it can do is
-    /// move it: the transition plays over an empty page, and the transcript is
-    /// built in one go afterwards and faded in. The toolbar and composer are
-    /// already drawn by then, so the pause reads as a page loading rather than
-    /// as the app having stopped.
-    @ViewBuilder private var deferredTranscript: some View {
-        if isSettled {
-            transcript.transition(.opacity)
-        } else {
-            Color.clear
-        }
-    }
-
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -680,8 +681,13 @@ struct ChatView: View {
                 // above it stay as lazy as they ever were.
                 VStack(spacing: 0) {
                     LazyVStack(spacing: 0) {
-                        olderHeader
-                            .padding(.top, Self.headroom)
+                        // Same reason: while the stack holds a slice, the
+                        // header would be announcing the top of something that
+                        // is not the top.
+                        if isSettled {
+                            olderHeader
+                                .padding(.top, Self.headroom)
+                        }
                         messageRows
                         typingRow
                     }
@@ -732,8 +738,22 @@ struct ChatView: View {
         }
     }
 
+    /// The foot of the window until the push is over, then all of it. Sliced
+    /// rather than re-indexed: an `ArraySlice` keeps the indices of the array it
+    /// came from, which is what the paging trigger below counts in.
+    private var shownRows: ArraySlice<TranscriptRow> {
+        // A conversation that opens on the unread divider, or on a message
+        // somebody jumped to, lands somewhere that is not the foot: the row it
+        // scrolls to has to be in the tree, and `scrollTo` on a row that is not
+        // there is silently nothing. Those opens draw the window whole and pay
+        // for it.
+        guard !isSettled, unread == nil, openingTarget == nil, pendingTarget == nil
+        else { return rows[...] }
+        return rows.suffix(Self.firstPaintRows)
+    }
+
     @ViewBuilder private var messageRows: some View {
-        ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+        ForEach(Array(zip(shownRows.indices, shownRows)), id: \.1.id) { index, row in
             switch row {
             case .day(let date):
                 DaySeparator(date: date)
@@ -1045,7 +1065,10 @@ struct ChatView: View {
     }
 
     private func prefetchOlderIfNeeded(atRow index: Int) {
-        guard index < Self.prefetchDistance else { return }
+        // The first frames draw a slice, so its first row is not the top of
+        // anything and asking for older history off the back of it would page
+        // the conversation on every open.
+        guard isSettled, index < Self.prefetchDistance else { return }
         requestOlder()
     }
 
@@ -1725,6 +1748,14 @@ struct ChatView: View {
     /// already arrived by the time this runs, and it is the resulting size
     /// change that needs the anchor. Leaving the anchor on any longer would
     /// bring back the every-size-change re-pin this replaced.
+    /// Draw the rest of the window, holding the content's end so the splice
+    /// above the viewport moves nothing.
+    private func settle() {
+        guard !isSettled else { return }
+        holdContentEnd()
+        isSettled = true
+    }
+
     private func holdContentEnd() {
         anchorResetTask?.cancel()
         sizeChangeAnchor = .bottom
@@ -1980,6 +2011,69 @@ private struct TypingDots: View {
 /// A probe rather than a modifier because there is no other handle on that
 /// scroll view. It walks up from its own place in the view tree to the enclosing
 /// one, which is a hop or two, and is otherwise inert.
+/// Calls back when the navigation transition that brought this view on screen
+/// has finished, or at once when it arrived without one.
+///
+/// A timer was the alternative and it is a guess in both directions: too short
+/// and the work it is deferring lands in the middle of the animation anyway,
+/// too long and the screen sits half-drawn after everything has stopped moving.
+/// UIKit knows exactly when a push ends and will say so; SwiftUI simply has no
+/// modifier that asks, so this asks on its behalf.
+private struct PushCompletion: UIViewRepresentable {
+    let action: () -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let probe = Probe()
+        probe.isUserInteractionEnabled = false
+        probe.onCompletion = action
+        return probe
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        (uiView as? Probe)?.onCompletion = action
+    }
+
+    final class Probe: UIView {
+        var onCompletion: (() -> Void)?
+        private var hasReported = false
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil, !hasReported else { return }
+            // Next turn of the run loop: the transition coordinator is put in
+            // place as the push begins, and on the frame a view joins the
+            // window it is not necessarily there yet.
+            DispatchQueue.main.async { [weak self] in self?.report() }
+        }
+
+        private func report() {
+            guard !hasReported else { return }
+            guard let coordinator = owningController?.transitionCoordinator else {
+                finish()
+                return
+            }
+            coordinator.animate(alongsideTransition: nil) { [weak self] _ in self?.finish() }
+        }
+
+        private func finish() {
+            hasReported = true
+            onCompletion?()
+        }
+
+        /// The view controller this view is drawn by, which for a SwiftUI view
+        /// is whichever hosting controller sits above it in the responder
+        /// chain.
+        private var owningController: UIViewController? {
+            var responder: UIResponder? = self
+            while let current = responder {
+                if let controller = current as? UIViewController { return controller }
+                responder = current.next
+            }
+            return nil
+        }
+    }
+}
+
 private struct TranscriptScrollTuning: UIViewRepresentable {
     func makeUIView(context: Context) -> UIView {
         let probe = Probe()
