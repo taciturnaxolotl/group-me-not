@@ -1359,9 +1359,10 @@ struct ChatView: View {
     /// over the transcript, and nothing has to say so.
     @ViewBuilder private func replyHover(_ message: Message) -> some View {
         if let item = replyHoverItem(message) {
-            HStack(alignment: .top, spacing: 0) {
+            SwiftUI.Group {
                 ScrollView {
-                    MessageRow(item: item, catalog: model.reactionCatalog, previews: model.previews)
+                    MessageRow(item: item, catalog: model.reactionCatalog,
+                               previews: model.previews, showsFace: false)
                         // A picture of the message, not the message. Every
                         // gesture it carries belongs to the transcript.
                         .allowsHitTesting(false)
@@ -1374,24 +1375,8 @@ struct ChatView: View {
                 // takes every point it is offered, so left to itself it stood
                 // the message a screenful above the field it belongs to.
                 .frame(height: min(max(replyHoverHeight, 1), Self.replyHoverLimit))
-
-                Button {
-                    replyingTo = nil
-                } label: {
-                    // The system's own "clear this" glyph, which is what a
-                    // search field and a mail token both use. Worth more than a
-                    // bespoke circle: people already know what it does.
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 19))
-                        .foregroundStyle(.secondary, .quaternary)
-                        .frame(width: 34, height: 34)
-                        .contentShape(.rect)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Cancel reply")
             }
-            .padding(.leading, 2)
-            .padding(.trailing, 6)
+            .padding(.horizontal, 2)
             // Close enough to touch. The bubble and the field it is about to
             // be answered in are one arrangement, and a gap between them makes
             // two.
@@ -1414,6 +1399,10 @@ struct ChatView: View {
             // here they are a message inside a message.
             item.reply = nil
             item.replyCount = 0
+            // No timestamp either: the footer only draws on the tail of a run,
+            // and a clock under a message being answered is answering a
+            // question nobody asked while standing on the composer.
+            item.isRunTail = false
             return item
         }.first
     }
@@ -1588,7 +1577,18 @@ struct ChatView: View {
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        if !model.pinned.isEmpty {
+        // The way out of a reply, in the one place a screen's way out belongs.
+        // It stands where the pin does and takes its turn: while a reply is
+        // being written that is what the button is for, and the pinned
+        // messages are still there afterwards.
+        if replyingTo != nil {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { replyingTo = nil } label: {
+                    Image(systemName: "xmark")
+                }
+                .accessibilityLabel("Cancel reply")
+            }
+        } else if !model.pinned.isEmpty {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { isPinnedPresented = true } label: {
                     Image(systemName: "pin.fill")

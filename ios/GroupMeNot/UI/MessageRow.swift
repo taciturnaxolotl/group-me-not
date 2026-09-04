@@ -182,6 +182,10 @@ struct MessageRow: View {
     /// Called with a conversation reached from inside this message, which is
     /// a share link and nothing else so far.
     var onOpenConversation: (ConversationRow) -> Void = { _ in }
+    /// Whether the sender's face is drawn beside the bubble. False where the
+    /// row is being shown out of the transcript and the gutter is only in the
+    /// way; see the reply hover in ``ChatView``.
+    var showsFace: Bool = true
     /// A drag to the right, asking to answer this message.
     var onReply: () -> Void = {}
     /// Asks for this message's reply chain on its own, handing over where the
@@ -207,6 +211,7 @@ struct MessageRow: View {
                 onEdit: onEdit,
                 onPress: onPress,
                 isHeld: isHeld,
+                showsFace: showsFace,
                 onReply: onReply,
                 onOpenConversation: onOpenConversation,
                 onOpenThread: onOpenThread,
@@ -265,6 +270,7 @@ private struct BubbleRow: View {
     let onEdit: (String) -> Void
     let onPress: (CGRect) -> Void
     let isHeld: Bool
+    let showsFace: Bool
     let onReply: () -> Void
     let onOpenConversation: (ConversationRow) -> Void
     let onOpenThread: (CGRect) -> Void
@@ -331,7 +337,7 @@ private struct BubbleRow: View {
                 // Keeps my bubbles from running the full width, which is what
                 // makes the two sides readable at a glance.
                 Spacer(minLength: gutterWidth)
-            } else {
+            } else if showsFace {
                 // In one-column mode my own messages get a face and a name too.
                 // Without them the column would start at a different x for me
                 // than for everyone else, which reads as a mistake.
