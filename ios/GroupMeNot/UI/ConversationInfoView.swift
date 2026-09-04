@@ -9,6 +9,10 @@ import SwiftUI
 struct ConversationInfoView: View {
     let conversation: ConversationRow
     let members: [Member]
+    /// Open a direct message with somebody in the roster. Nil where there is
+    /// nowhere to open it — a chain, say, which is already presented over the
+    /// conversation this would leave.
+    var onOpenDirect: ((ConversationRow) -> Void)?
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -331,6 +335,20 @@ struct ConversationInfoView: View {
     /// mostly read rather than administered.
     @ViewBuilder private func memberActions(_ member: Member) -> some View {
         let isMe = member.identity == model.currentUser?.id
+        // First, and for everybody. Deciding to message one person is usually
+        // decided while looking at them in a group, and until this existed the
+        // only way there was through a contact list that may not have them.
+        if let onOpenDirect, !isMe, let userID = member.userId {
+            Button {
+                let id = ConversationID.direct(otherUserID: userID)
+                let row = model.conversations.first { $0.id == id }
+                    ?? .direct(with: userID, name: displayName(member), avatarURL: member.imageUrl)
+                dismiss()
+                onOpenDirect(row)
+            } label: {
+                Label("Message", systemImage: "bubble.left")
+            }
+        }
         if canEditGroup, !isMe {
             if model.role(in: conversation.id) == .owner {
                 let isAdmin = member.canPostInAnnouncements

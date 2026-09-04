@@ -777,3 +777,20 @@ nonisolated enum ConversationWrites {
         }
     }
 }
+
+nonisolated extension ConversationRow {
+    /// A direct message that has not happened yet.
+    ///
+    /// Nothing has to be created for one: GroupMe addresses a DM by the other
+    /// person's id, so the conversation exists the moment somebody decides to
+    /// have it. This is that decision, in the shape the rest of the app reads.
+    static func direct(with userID: String, name: String, avatarURL: String?) -> ConversationRow {
+        ConversationRow(
+            id: .direct(otherUserID: userID),
+            name: name,
+            avatarURL: avatarURL,
+            unreadCount: 0,
+            memberCount: 2,
+            isPlaceholder: false)
+    }
+}

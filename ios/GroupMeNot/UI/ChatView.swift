@@ -585,7 +585,9 @@ struct ChatView: View {
                     })
             }
             .sheet(isPresented: $isInfoPresented) {
-                ConversationInfoView(conversation: current, members: model.members)
+                ConversationInfoView(
+                    conversation: current, members: model.members,
+                    onOpenDirect: onOpenConversation)
             }
     }
 
@@ -1380,7 +1382,7 @@ struct ChatView: View {
             // Close, but not touching. The bubble and the field it is about to
             // be answered in are one arrangement; a hair of air keeps them from
             // reading as one object.
-            .padding(.bottom, 6)
+            .padding(.bottom, 12)
             .transition(.opacity.combined(with: .move(edge: .bottom)))
             .accessibilityElement(children: .contain)
         }

@@ -63,7 +63,8 @@ struct TopicChooserView: View {
             }
         }
         .sheet(isPresented: $isInfoPresented) {
-            ConversationInfoView(conversation: main, members: roster)
+            ConversationInfoView(
+                conversation: main, members: roster, onOpenDirect: open)
         }
         // The roster is read here because nothing is open: `model.members`
         // belongs to whatever transcript is on screen, and on this page there

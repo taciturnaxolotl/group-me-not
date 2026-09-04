@@ -2,11 +2,13 @@ import SwiftUI
 
 /// Starting something, whether it turns out to be a DM or a group.
 ///
-/// One screen for both, because at the moment of starting a conversation
-/// nobody has decided which it is yet: you have decided *who*. Pick one person
-/// and it is a chat; pick three and it wants a name. Asking "group or direct?"
-/// first, as the old sheet did, made you answer a question about database
-/// shapes before you were allowed to think about people.
+/// One screen for both, and the common one costs a single tap: touch a name
+/// and their chat opens. Making a group is the deliberate act, so it says so
+/// first — a row at the top turns the same list into a selection.
+///
+/// The other way round, which this was, made a DM the awkward case: you tapped
+/// a person, got a checkmark, and then had to find a word in the corner of the
+/// bar to say what the tap had already meant.
 struct NewConversationView: View {
     /// Called with the conversation to open, already dismissed.
     let onOpen: (ConversationRow) -> Void
@@ -20,6 +22,8 @@ struct NewConversationView: View {
     @State private var query = ""
     @State private var isLoading = true
     @State private var failure: String?
+    /// Whether taps are gathering people rather than opening a chat.
+    @State private var isGathering = false
 
     /// The only place this can go, and only in one direction.
     private enum Step: Hashable { case name }
@@ -27,7 +31,7 @@ struct NewConversationView: View {
     var body: some View {
         NavigationStack(path: $path) {
             content
-                .navigationTitle("New Conversation")
+                .navigationTitle(isGathering ? "New Group" : "New Conversation")
                 .navigationBarTitleDisplayMode(.inline)
                 .searchable(text: $query, prompt: "Search contacts")
                 .toolbar {
@@ -46,17 +50,10 @@ struct NewConversationView: View {
         }
     }
 
-    /// One button whose meaning follows the selection, rather than two that
-    /// take turns being disabled. With one person picked there is nothing left
-    /// to ask, so it opens the chat; with several, the group still needs a
-    /// name.
+    /// Only while a group is being gathered. Browsing needs no confirmation:
+    /// the tap is the whole gesture.
     @ViewBuilder private var forwardButton: some View {
-        switch chosen.count {
-        case 0:
-            Button("Chat") {}.disabled(true)
-        case 1:
-            Button("Chat") { openDirect() }
-        default:
+        if isGathering {
             Button("Next") { path.append(.name) }
         }
     }
@@ -74,8 +71,9 @@ struct NewConversationView: View {
             }
         } else {
             List {
-                if !chosen.isEmpty { chosenSection }
+                if isGathering, !chosen.isEmpty { chosenSection }
                 Section {
+                    if !isGathering { newGroupRow }
                     if visible.isEmpty {
                         Text("Nobody by that name.")
                             .foregroundStyle(.secondary)
@@ -83,18 +81,34 @@ struct NewConversationView: View {
                         ForEach(visible) { person in row(person) }
                     }
                 } header: {
-                    Text(chosen.isEmpty ? "Contacts" : "All Contacts")
-                }
-                // Last, and quiet. A group with nobody in it is a real thing to
-                // want and a rare thing to want, so it waits at the bottom
-                // rather than sitting on top of the people.
-                Section {
-                    Button("New Group With No One Yet") { path.append(.name) }
-                        .font(.subheadline)
+                    Text(isGathering ? "Add People" : "Contacts")
                 }
             }
             .listStyle(.insetGrouped)
         }
+    }
+
+    /// The one row that is not a person. Above them, because it changes what
+    /// touching them does.
+    private var newGroupRow: some View {
+        Button {
+            withAnimation(.snappy(duration: 0.2)) { isGathering = true }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "person.2.fill")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Color.accentColor, in: .circle)
+                Text("New Group")
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
     }
 
     /// Who is coming, in the order they were picked, and removable from here.
@@ -124,6 +138,10 @@ struct NewConversationView: View {
     private func row(_ person: Relationship) -> some View {
         let isChosen = chosen.contains(person.id)
         return Button {
+            guard isGathering else {
+                openDirect(person)
+                return
+            }
             if isChosen {
                 chosen.removeAll { $0 == person.id }
             } else {
@@ -134,9 +152,9 @@ struct NewConversationView: View {
                 Avatar(url: person.avatarUrl, name: person.name ?? "?", size: 36)
                 Text(person.name ?? "Someone").lineLimit(1)
                 Spacer(minLength: 8)
-                if isChosen {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.tint)
+                if isGathering {
+                    Image(systemName: isChosen ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(isChosen ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
                 }
             }
             .contentShape(.rect)
@@ -176,17 +194,11 @@ struct NewConversationView: View {
     /// A DM needs nothing created. GroupMe addresses one by the other person's
     /// id, so the conversation exists the moment you decide to have it, and the
     /// row is built here rather than waited for.
-    private func openDirect() {
-        guard let person = picked.first, let userID = person.userId else { return }
+    private func openDirect(_ person: Relationship) {
+        guard let userID = person.userId else { return }
         let id = ConversationID.direct(otherUserID: userID)
         let row = model.conversations.first { $0.id == id }
-            ?? ConversationRow(
-                id: id,
-                name: person.name ?? "Someone",
-                avatarURL: person.avatarUrl,
-                unreadCount: 0,
-                memberCount: 2,
-                isPlaceholder: false)
+            ?? .direct(with: userID, name: person.name ?? "Someone", avatarURL: person.avatarUrl)
         dismiss()
         onOpen(row)
     }
