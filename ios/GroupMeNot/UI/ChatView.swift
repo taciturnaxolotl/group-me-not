@@ -608,7 +608,13 @@ struct ChatView: View {
     /// dishonest to pretend otherwise.
     private var lifecycle: some View {
         chrome
-            .task { await model.openConversation(conversation.id) }
+            .task {
+                // Before the open, so the first thing written for a brand new
+                // DM is the row we know rather than the blank one a message
+                // creates on its way past.
+                await model.remember(conversation)
+                await model.openConversation(conversation.id)
+            }
             // Long enough for a push to finish, short enough that a
             // conversation whose history is already on disk still feels
             // immediate. The wait runs alongside the load above rather than

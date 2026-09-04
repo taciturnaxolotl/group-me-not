@@ -4,7 +4,7 @@ import SwiftUI
 ///
 /// One screen for both, and the common one costs a single tap: touch a name
 /// and their chat opens. Making a group is the deliberate act, so it says so
-/// first — a row at the top turns the same list into a selection.
+/// first — a row above the list leads to the group itself.
 ///
 /// The other way round, which this was, made a DM the awkward case: you tapped
 /// a person, got a checkmark, and then had to find a word in the corner of the
@@ -22,43 +22,49 @@ struct NewConversationView: View {
     @State private var query = ""
     @State private var isLoading = true
     @State private var failure: String?
-    /// Whether taps are gathering people rather than opening a chat.
-    @State private var isGathering = false
 
-    /// The only place this can go, and only in one direction.
-    private enum Step: Hashable { case name }
+    /// A group is made in two steps, and only ever in this order: what it is,
+    /// then who is in it.
+    private enum Step: Hashable { case group, people }
 
     var body: some View {
         NavigationStack(path: $path) {
-            content
-                .navigationTitle(isGathering ? "New Group" : "New Conversation")
+            contactList(gathering: false)
+                .navigationTitle("New Conversation")
                 .navigationBarTitleDisplayMode(.inline)
                 .searchable(text: $query, prompt: "Search contacts")
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Cancel") { dismiss() }
                     }
-                    ToolbarItem(placement: .confirmationAction) { forwardButton }
                 }
-                .navigationDestination(for: Step.self) { _ in
-                    NewGroupDetails(people: picked) { row in
-                        dismiss()
-                        onOpen(row)
+                .navigationDestination(for: Step.self) { step in
+                    switch step {
+                    case .group:
+                        NewGroupDetails(
+                            people: picked,
+                            onAddPeople: { path.append(.people) },
+                            onCreated: { row in
+                                dismiss()
+                                onOpen(row)
+                            })
+                    case .people:
+                        contactList(gathering: true)
+                            .navigationTitle("Add People")
+                            .navigationBarTitleDisplayMode(.inline)
+                            .searchable(text: $query, prompt: "Search contacts")
                     }
                 }
                 .task { await load() }
         }
     }
 
-    /// Only while a group is being gathered. Browsing needs no confirmation:
-    /// the tap is the whole gesture.
-    @ViewBuilder private var forwardButton: some View {
-        if isGathering {
-            Button("Next") { path.append(.name) }
-        }
-    }
+    // MARK: The list
 
-    @ViewBuilder private var content: some View {
+    /// The same list twice: a tap opens somebody's chat, or adds them to the
+    /// group being made. Which of the two it is, is the whole difference
+    /// between the screens, so it is the only thing passed in.
+    @ViewBuilder private func contactList(gathering: Bool) -> some View {
         if isLoading {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if contacts.isEmpty {
@@ -67,33 +73,37 @@ struct NewConversationView: View {
             } description: {
                 Text(failure ?? "GroupMe has nobody listed for this account.")
             } actions: {
-                Button("New Group") { path.append(.name) }
+                if !gathering {
+                    Button("New Group") { path.append(.group) }
+                }
             }
         } else {
             List {
-                if isGathering, !chosen.isEmpty { chosenSection }
+                // Its own section. A group is not one of the people underneath
+                // it, and a hairline between two rows says they are the same
+                // kind of thing.
+                if !gathering {
+                    Section { newGroupRow }
+                }
                 Section {
-                    if !isGathering { newGroupRow }
                     if visible.isEmpty {
                         Text("Nobody by that name.")
                             .foregroundStyle(.secondary)
                     } else {
-                        ForEach(visible) { person in row(person) }
+                        ForEach(visible) { person in row(person, gathering: gathering) }
                     }
                 } header: {
-                    Text(isGathering ? "Add People" : "Contacts")
+                    Text("Contacts")
                 }
             }
             .listStyle(.insetGrouped)
         }
     }
 
-    /// The one row that is not a person. Above them, because it changes what
-    /// touching them does.
+    /// The one row that is not a person, above the people because it leads
+    /// somewhere else entirely.
     private var newGroupRow: some View {
-        Button {
-            withAnimation(.snappy(duration: 0.2)) { isGathering = true }
-        } label: {
+        Button { path.append(.group) } label: {
             HStack(spacing: 12) {
                 Image(systemName: "person.2.fill")
                     .font(.system(size: 15))
@@ -111,34 +121,10 @@ struct NewConversationView: View {
         .buttonStyle(.plain)
     }
 
-    /// Who is coming, in the order they were picked, and removable from here.
-    /// A selection you can only undo by finding the person again in a list of
-    /// four hundred is not really a selection.
-    private var chosenSection: some View {
-        Section("Chatting With") {
-            ForEach(picked) { person in
-                Button {
-                    chosen.removeAll { $0 == person.id }
-                } label: {
-                    HStack(spacing: 12) {
-                        Avatar(url: person.avatarUrl, name: person.name ?? "?", size: 32)
-                        Text(person.name ?? "Someone").lineLimit(1)
-                        Spacer(minLength: 8)
-                        Image(systemName: "minus.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .contentShape(.rect)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Remove \(person.name ?? "Someone")")
-            }
-        }
-    }
-
-    private func row(_ person: Relationship) -> some View {
+    private func row(_ person: Relationship, gathering: Bool) -> some View {
         let isChosen = chosen.contains(person.id)
         return Button {
-            guard isGathering else {
+            guard gathering else {
                 openDirect(person)
                 return
             }
@@ -152,7 +138,7 @@ struct NewConversationView: View {
                 Avatar(url: person.avatarUrl, name: person.name ?? "?", size: 36)
                 Text(person.name ?? "Someone").lineLimit(1)
                 Spacer(minLength: 8)
-                if isGathering {
+                if gathering {
                     Image(systemName: isChosen ? "checkmark.circle.fill" : "circle")
                         .foregroundStyle(isChosen ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
                 }
@@ -204,48 +190,52 @@ struct NewConversationView: View {
     }
 }
 
-// MARK: - Naming a group
+// MARK: - The group itself
 
-/// The second half of making a group: what to call it, given who is in it.
+/// What the group is, before who is in it.
 ///
-/// Separate from the picking because it only applies to one of the two
-/// outcomes, and putting a name field in front of somebody who wants to send
-/// one person a message is how the old sheet went wrong.
+/// That order is deliberate. A group is a thing with a name and a face, and
+/// people are added to it; asking for the members first makes the name read as
+/// paperwork standing between you and the group you have already assembled.
+/// Adding people is then a step you can simply not take, which is honest: an
+/// empty group is a real thing to want, and it is one invitation from being
+/// full.
 private struct NewGroupDetails: View {
     let people: [Relationship]
+    var onAddPeople: () -> Void
     let onCreated: (ConversationRow) -> Void
 
     @Environment(AppModel.self) private var model
 
     @State private var name = ""
     @State private var summary = ""
+    @State private var photo: PickedMedia?
+    @State private var isPickingPhoto = false
     @State private var isSending = false
     @State private var failure: String?
 
     var body: some View {
         Form {
             Section {
+                photoRow.listRowBackground(Color.clear)
+            }
+            Section {
                 TextField("Group name", text: $name)
                     .textInputAutocapitalization(.words)
                 TextField("Description", text: $summary, axis: .vertical)
                     .lineLimit(2...4)
-            } footer: {
-                Text(people.isEmpty
-                     ? "You can add people once it exists."
-                     : "\(people.count) \(people.count == 1 ? "person" : "people") will be added.")
             }
-
-            if !people.isEmpty {
-                Section("Members") {
-                    ForEach(people) { person in
-                        HStack(spacing: 12) {
-                            Avatar(url: person.avatarUrl, name: person.name ?? "?", size: 30)
-                            Text(person.name ?? "Someone").lineLimit(1)
-                        }
+            Section {
+                addPeopleRow
+                ForEach(people) { person in
+                    HStack(spacing: 12) {
+                        Avatar(url: person.avatarUrl, name: person.name ?? "?", size: 30)
+                        Text(person.name ?? "Someone").lineLimit(1)
                     }
                 }
+            } footer: {
+                Text("You can add people later too.")
             }
-
             if let failure {
                 Label(failure, systemImage: "exclamationmark.triangle.fill")
                     .font(.footnote)
@@ -262,16 +252,70 @@ private struct NewGroupDetails: View {
                 .disabled(trimmedName.isEmpty || isSending)
             }
         }
+        .attachmentPicker(isPresented: $isPickingPhoto) { picked in
+            photo = picked.first
+        }
+    }
+
+    /// The face, centred and on its own, the way a group's photo is shown
+    /// everywhere else it appears.
+    private var photoRow: some View {
+        Button { isPickingPhoto = true } label: {
+            VStack(spacing: 8) {
+                if let photo {
+                    RemoteImage(url: photo.previewURL ?? photo.fileURL, maxPixelSize: 252) {
+                        Circle().fill(.quaternary)
+                    }
+                    .frame(width: 84, height: 84)
+                    .clipShape(.circle)
+                } else {
+                    Circle()
+                        .fill(.quaternary)
+                        .frame(width: 84, height: 84)
+                        .overlay {
+                            Image(systemName: "camera.fill")
+                                .font(.system(size: 23))
+                                .foregroundStyle(.secondary)
+                        }
+                }
+                Text(photo == nil ? "Add Photo" : "Change Photo")
+                    .font(.footnote)
+                    .foregroundStyle(.tint)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Group photo")
+    }
+
+    private var addPeopleRow: some View {
+        Button(action: onAddPeople) {
+            HStack {
+                Label("Add People", systemImage: "person.badge.plus")
+                Spacer(minLength: 8)
+                if !people.isEmpty {
+                    Text("\(people.count)").foregroundStyle(.secondary)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
     }
 
     private var trimmedName: String {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Create, then invite, then open. The invite is allowed to fail on its
-    /// own: the group exists either way, and dropping the reader back into an
-    /// empty screen because an add did not take would lose them the group they
-    /// just made.
+    /// Create, then dress it, then fill it, then open.
+    ///
+    /// The photo and the invitations are each allowed to fail on their own. The
+    /// group exists either way, and dropping somebody back onto a form because
+    /// an upload failed would lose them the group they just made; a face and a
+    /// member list are both one tap away from inside it.
     private func create() {
         isSending = true
         failure = nil
@@ -283,6 +327,10 @@ private struct NewGroupDetails: View {
                 isSending = false
                 failure = "Could not create that group."
                 return
+            }
+
+            if let photo {
+                await model.updateGroupPhoto(photo, in: created)
             }
 
             if case .group(let groupID) = created, !people.isEmpty {

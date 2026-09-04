@@ -309,6 +309,24 @@ final class AppModel {
 
     /// Open a conversation. The transcript is on screen before this returns; the
     /// catch-up that follows is decoration.
+    /// Write down a conversation we know about but the server has not listed
+    /// yet, so that opening it does not invent one.
+    ///
+    /// A DM started from a contact or a roster exists only as a row this app
+    /// built: nothing has been sent, so `/v3/chats` has never mentioned it.
+    /// Sending the first message writes the message, which creates the
+    /// conversation row it belongs to — with no name and no face, because the
+    /// message never carried either. That is the blank avatar and the wrong
+    /// title that lasted until the next list fetch.
+    ///
+    /// Everything here is `COALESCE`d into the row, so this only ever adds what
+    /// the server has not said yet.
+    func remember(_ row: ConversationRow) async {
+        guard conversations.first(where: { $0.id == row.id }) == nil else { return }
+        try? await store.conversations.upsert(row: row)
+        await reloadConversations()
+    }
+
     func openConversation(_ conversation: ConversationID) async {
         openConversationID = conversation
         window = Self.transcriptPage
