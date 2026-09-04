@@ -314,6 +314,14 @@ struct ChatView: View {
     /// See ``shownRows``.
     @State private var isSettled = false
 
+    /// How tall the hovering reply bubble is; see ``replyHover(_:)``.
+    @State private var replyHoverHeight: CGFloat = 0
+
+    /// Past this a hovering reply scrolls instead of climbing the screen. The
+    /// point is recognising what was tapped, and a paragraph and a half does
+    /// that.
+    private static let replyHoverLimit: CGFloat = 190
+
     /// How much of the window the first frames draw.
     ///
     /// Opening anchors the scroll view at the bottom, and a `LazyVStack` cannot
@@ -462,6 +470,11 @@ struct ChatView: View {
                 }
                 return .handled
             })
+            // Under the bar, and under the toolbar, which are both drawn
+            // above the content and so stay crisp. Only the conversation
+            // recedes, which is the whole idea: the message being answered is
+            // lifted out of it and everything else steps back.
+            .overlay { replyScrim }
             // `safeAreaBar`, not `safeAreaInset`. It insets the transcript in
             // the same way, but it also tells the scroll view that what sits
             // there is a *bar*, which is what lets the edge effect dissolve
@@ -1104,7 +1117,7 @@ struct ChatView: View {
     /// ending at an opaque edge. The container is what makes the pair read as
     /// one piece of glass with a gap in it instead of two unrelated lozenges.
     private var composer: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 0) {
             SwiftUI.Group {
                 if let replyingTo { replyHover(replyingTo) }
             }
@@ -1307,6 +1320,30 @@ struct ChatView: View {
         named.append(MentionDraft.Named(userID: member.identity, name: display))
     }
 
+    /// What the transcript does while a reply is being written.
+    ///
+    /// Messages blurs the conversation and leaves the message being answered
+    /// standing over it, and the reason is that the reply has a subject: with
+    /// the rest of the transcript at full strength, the bubble above the
+    /// composer is just one more bubble among forty. Tapping it puts the
+    /// conversation back, which is the same way out the reply arrow offers.
+    @ViewBuilder private var replyScrim: some View {
+        ZStack {
+            if replyingTo != nil {
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .overlay(Color.black.opacity(0.12))
+                    .ignoresSafeArea()
+                    .contentShape(.rect)
+                    .onTapGesture { replyingTo = nil }
+                    .accessibilityLabel("Cancel reply")
+                    .accessibilityAddTraits(.isButton)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.18), value: replyingTo == nil)
+    }
+
     /// The message being answered, hovering over the transcript just above the
     /// bar, drawn as the message it is.
     ///
@@ -1323,17 +1360,20 @@ struct ChatView: View {
     @ViewBuilder private func replyHover(_ message: Message) -> some View {
         if let item = replyHoverItem(message) {
             HStack(alignment: .top, spacing: 0) {
-                // Tall messages scroll rather than climbing the screen. The
-                // point is recognising what was tapped, and a paragraph and a
-                // half is plenty for that.
                 ScrollView {
                     MessageRow(item: item, catalog: model.reactionCatalog, previews: model.previews)
                         // A picture of the message, not the message. Every
                         // gesture it carries belongs to the transcript.
                         .allowsHitTesting(false)
+                        .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) {
+                            replyHoverHeight = $0
+                        }
                 }
                 .scrollBounceBehavior(.basedOnSize)
-                .frame(maxHeight: 190)
+                // Exactly as tall as the bubble, up to the cap. A scroll view
+                // takes every point it is offered, so left to itself it stood
+                // the message a screenful above the field it belongs to.
+                .frame(height: min(max(replyHoverHeight, 1), Self.replyHoverLimit))
 
                 Button {
                     replyingTo = nil
@@ -1352,6 +1392,10 @@ struct ChatView: View {
             }
             .padding(.leading, 2)
             .padding(.trailing, 6)
+            // Close enough to touch. The bubble and the field it is about to
+            // be answered in are one arrangement, and a gap between them makes
+            // two.
+            .padding(.bottom, 1)
             .transition(.opacity.combined(with: .move(edge: .bottom)))
             .accessibilityElement(children: .contain)
         }
