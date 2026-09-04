@@ -331,6 +331,28 @@ struct ChatView: View {
     @State private var sizeChangeAnchor: UnitPoint?
     @State private var anchorResetTask: Task<Void, Never>?
 
+    /// Whether growth in the content should keep the newest message on screen.
+    ///
+    /// The reader standing at the foot is the ordinary case, and it is the one
+    /// the timed hold above could not cover. A transcript that opens cold keeps
+    /// growing for seconds after its rows arrive: images decode, quoted
+    /// originals come back from the network, link cards resolve. Every point of
+    /// that growth used to push the newest message further under the composer,
+    /// which is what "it did not scroll the whole way down" is. Following the
+    /// foot for as long as the reader is standing at it needs no timer and no
+    /// guess about how long settling takes.
+    ///
+    /// Cleared when the transcript is deliberately parked somewhere else — an
+    /// unread divider, or a jump to a pinned message — and restored the moment
+    /// the foot comes back into view.
+    @State private var pinsFoot = true
+
+    /// Which end of the content holds still, given both reasons to hold the
+    /// end: a page spliced in above, and a reader standing at the foot.
+    private var contentAnchor: UnitPoint? {
+        sizeChangeAnchor ?? (pinsFoot ? .bottom : nil)
+    }
+
     /// Bumped whenever something has happened that should put the newest
     /// message on screen. Cheaper and more reliable than watching row counts,
     /// and it gives the several callers one place to land.
@@ -636,7 +658,7 @@ struct ChatView: View {
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             // Deliberately optional, and `nil` nearly all the time. See
             // `sizeChangeAnchor`.
-            .defaultScrollAnchor(sizeChangeAnchor, for: .sizeChanges)
+            .defaultScrollAnchor(contentAnchor, for: .sizeChanges)
             .scrollDismissesKeyboard(.interactively)
             // Content fades out under the composer rather than sliding beneath
             // a hard edge. This is the other half of `safeAreaBar`; without it
@@ -925,6 +947,8 @@ struct ChatView: View {
     /// settle or delay.
     private func footVisibilityChanged(_ visible: Bool) {
         isAtFoot = visible
+        // Standing at the foot is the whole condition for following it.
+        pinsFoot = visible
         // Reaching the foot is what reading a conversation means. Opening one
         // is not: a conversation with unread opens on the divider, well above
         // this, and stays unread until the reader comes down to it.
@@ -1533,6 +1557,10 @@ struct ChatView: View {
         let arriving = pendingTarget.map { target in built.contains { $0.id == target } } ?? false
 
         if grewAbove, !opensOnDivider, !arriving { holdContentEnd() }
+        // Both of these send the transcript somewhere that is not the foot, so
+        // the foot must stop pulling. Before the assignment, because the fill
+        // itself is a size change and the anchor is read as it happens.
+        if opensOnDivider || arriving { pinsFoot = false }
         rows = built
 
         if arriving {
