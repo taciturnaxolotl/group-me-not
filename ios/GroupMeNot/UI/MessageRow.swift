@@ -452,13 +452,7 @@ private struct BubbleRow: View {
                     // ways to be confused.
                     .overlay { uploadRing }
             }
-            if let reply = item.reply { quoteBubble(reply) }
-            // Every reply says who is speaking, run or no run. A quote puts
-            // somebody else's name directly above this bubble, and a reply in
-            // the middle of a run carries no name of its own, so the only name
-            // in sight was the one belonging to the person being answered —
-            // which reads as them having said this too.
-            if item.reply != nil, !isTrailing { senderLabel }
+            if let reply = item.reply { replyHeader(reply) }
             bubble
             if let invite = item.invite {
                 InviteCard(link: invite, isOwn: item.isOwn, onOpen: onOpenConversation)
@@ -617,6 +611,30 @@ private struct BubbleRow: View {
         .buttonStyle(.plain)
     }
 
+    /// The quote and the name of whoever is answering it, tucked against the
+    /// bubble below.
+    ///
+    /// Grouped rather than left as two more children of the stack above,
+    /// because the four things a reply from somebody else stacks up — quoted
+    /// name, quote, sender name, bubble — read as four separate messages when
+    /// they are evenly spaced. Messages sets a reply almost touching the thing
+    /// it answers, and the near-touch is what turns the pile into one unit.
+    ///
+    /// Every reply says who is speaking, run or no run. A quote puts somebody
+    /// else's name directly above this bubble, and a reply in the middle of a
+    /// run carries no name of its own, so the only name in sight was the one
+    /// belonging to the person being answered — which reads as them having
+    /// said this too.
+    private func replyHeader(_ reply: ReplyPreview) -> some View {
+        VStack(alignment: isTrailing ? .trailing : .leading, spacing: 2) {
+            quoteBubble(reply)
+            if !isTrailing { senderLabel }
+        }
+        // Against the stack's own spacing, so the answer sits a hair under its
+        // quote rather than a full row below it.
+        .padding(.bottom, -2)
+    }
+
     /// The message being answered, drawn as a small bubble above the answer.
     ///
     /// Messages stacks the two, a faded copy of the original with the reply
@@ -638,7 +656,9 @@ private struct BubbleRow: View {
             if !answersSelf(reply) {
                 Text(reply.senderName)
                     .font(.caption2.weight(.medium))
-                    .padding(.horizontal, 10)
+                    // Matched to the quote's own inset, so the name starts
+                    // exactly where the words it introduces do.
+                    .padding(.horizontal, 11)
             }
             Text(reply.text)
                 .font(.caption)

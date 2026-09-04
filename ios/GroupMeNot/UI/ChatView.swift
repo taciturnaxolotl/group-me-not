@@ -1130,10 +1130,13 @@ struct ChatView: View {
 
     private var field: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if let replyingTo {
-                replyBanner(replyingTo)
-                Divider().padding(.leading, 14)
+            SwiftUI.Group {
+                if let replyingTo { replyBanner(replyingTo) }
             }
+            // Scoped to the banner, like the tray's. An implicit animation here
+            // would reach the `TextField` below and animate the words away
+            // after a send; see `sendButton`.
+            .animation(.snappy(duration: 0.24), value: replyingTo?.id)
             if !staged.isEmpty {
                 SwiftUI.Group {
                     stagedStrip
@@ -1247,35 +1250,56 @@ struct ChatView: View {
     ///
     /// In the field rather than above it, for the same reason the attachments
     /// are: the thing being replied to is part of the message being written.
+    ///
+    /// Drawn as the same small grey pill the transcript quotes things in, under
+    /// a line of plain words saying what is about to happen. That pairing is
+    /// the whole of it: the reader is looking at the shape their message is
+    /// about to take, in the place it will take it.
+    ///
+    /// It replaced a tinted reply arrow, a bold name, and a hand-drawn grey
+    /// circle with an `xmark` in it, sitting over a full-width rule. Every one
+    /// of those is a decoration standing in for a sentence, and together they
+    /// were four pieces of furniture around one line of quoted text. The rule
+    /// went with them: a pill carries its own edge, so the line under it was
+    /// drawing a boundary that was already there.
     private func replyBanner(_ message: Message) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "arrowshape.turn.up.left.fill")
-                .font(.caption)
-                .foregroundStyle(.tint)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(message.name ?? "Someone")
-                    .font(.caption.weight(.semibold))
+        HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Replying to \(message.name ?? "Someone")")
+                    .font(.caption2.weight(.medium))
                 Text(Transcript.summarise(message))
                     .font(.caption)
-                    .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 6)
+                    .background(.quaternary, in: .rect(cornerRadius: 14, style: .continuous))
             }
-            Spacer(minLength: 4)
+            .foregroundStyle(.secondary)
+
+            Spacer(minLength: 0)
+
             Button {
                 replyingTo = nil
             } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 20, height: 20)
-                    .background(.quaternary, in: .circle)
+                // The system's own "clear this" glyph, which is what a search
+                // field and a mail token both use. Worth more than a bespoke
+                // circle: people already know what it does.
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 17))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 32, height: 32)
+                    .contentShape(.rect)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Cancel reply")
         }
-        .padding(.horizontal, 12)
+        .padding(.leading, 14)
+        .padding(.trailing, 6)
         .padding(.top, 9)
-        .padding(.bottom, 8)
+        // Slight, so the quote sits against the words answering it rather than
+        // a row above them. The same tuck the transcript gives a reply.
+        .padding(.bottom, 2)
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
         .accessibilityElement(children: .contain)
     }
 
