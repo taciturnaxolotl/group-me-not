@@ -162,7 +162,14 @@ actor SyncEngine {
         // thing until relaunch.
         if let running, !running.isCancelled {
             await running.value
-            return
+            // A sync that failed is not a sync this caller can inherit. The
+            // ordinary way that bites: the app comes forward before the radio
+            // is up, the foreground sync starts and is doomed, and the
+            // reconnect that arrives a second later joins it, returns, and
+            // reports success. Both callers walk away with nothing and the app
+            // sits a week behind until a heartbeat notices, which is a minute
+            // and a half of a transcript that will not fill in.
+            guard state.phase == .failed else { return }
         }
         let task = Task { [self] in
             await perform(reason: reason)
@@ -392,10 +399,20 @@ actor SyncEngine {
 
             guard moved(remote: remoteHead, local: localHead) else { continue }
             noteGap(id)
+            // A group with topics does not own its own summary. `last_message_id`
+            // there names the newest message anywhere under the group, topics
+            // included, so the shortcut would write the group's list preview in
+            // as a stand-in for a message that was never posted to the group:
+            // a phantom bubble in the parent transcript, under a topic
+            // message's id, with the verified head advanced to match. The topic
+            // loop below refuses the shortcut for exactly this reason; a parent
+            // is the other half of the same case.
+            let hasTopics = (group.childrenCount ?? 0) > 0
             plans.append(Plan(
                 conversation: id,
                 localHead: localHead,
-                embedded: advancedByOne(previous: previous, tip: tip, localHead: localHead)
+                embedded: !hasTopics
+                    && advancedByOne(previous: previous, tip: tip, localHead: localHead)
                     ? Self.previewMessage(for: group, id: remoteHead)
                     : nil
             ))
