@@ -1384,7 +1384,23 @@ struct ChatView: View {
         // locus measured against the untrimmed draft would be off by however
         // much leading whitespace was typed.
         let mentions = MentionDraft.attachment(for: text, naming: named)
+        let cleared = draft
         draft = ""
+        // Again, one turn of the run loop later.
+        //
+        // The field is a `UITextView` underneath, and tapping send while the
+        // keyboard is holding something unresolved — an inline prediction, an
+        // autocorrect candidate, a two-stage composition — leaves it with
+        // marked text that it writes back over the binding *after* this
+        // function returns. That is the message reappearing in a field that
+        // never shrank back to one line, because as far as the field is
+        // concerned the words were never taken away.
+        //
+        // Only the exact text that just went out, so the first keystroke of
+        // somebody already typing the next message is never eaten.
+        Task { @MainActor in
+            if draft == cleared { draft = "" }
+        }
         staged = []
         replyingTo = nil
         named = []
