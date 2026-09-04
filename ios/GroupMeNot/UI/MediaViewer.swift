@@ -135,7 +135,7 @@ struct MediaViewer: View {
 
     @ViewBuilder private func page(for item: Message.Attachment, at position: Int) -> some View {
         if item.type == "video", let url = Self.mediaURL(of: item) {
-            VideoPlayer(player: AVPlayer(url: url))
+            VideoPage(url: url, isCurrent: position == index)
         } else {
             ZoomableImage(
                 url: Self.mediaURL(of: item),
@@ -561,5 +561,47 @@ private struct ZoomableImage: View {
             return
         }
         if let loaded = await ImageLoader.shared.image(for: request) { onLoad(loaded) }
+    }
+}
+
+/// One video page, with a player it makes once and keeps.
+///
+/// `VideoPlayer(player: AVPlayer(url:))` written inline in a `body` is a new
+/// player on every update, and this view updates on every frame of a page drag.
+/// The first of those players is the expensive one: making it drags AVKit in
+/// for the first time — class realisation, category loading, a view controller
+/// full of transport chrome — and on a real phone that is a third of a second
+/// on the main thread, spent *inside* the presentation's own layout pass, so
+/// the viewer sits half-open while it happens.
+///
+/// Making it in a task instead lets the sheet finish arriving first, and ties
+/// the player to the page rather than to the body.
+private struct VideoPage: View {
+    let url: URL
+    /// True only for the page on screen. A player is a decoder and a network
+    /// connection; three of them for three pages is three times the cost of the
+    /// one actually being watched.
+    let isCurrent: Bool
+
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        ZStack {
+            Color.clear
+            if let player {
+                VideoPlayer(player: player)
+                    .transition(.opacity)
+            }
+        }
+        .task(id: isCurrent) {
+            guard isCurrent else {
+                // Kept rather than torn down: coming back to a page should not
+                // pay for it twice, and a paused player costs nothing to hold.
+                player?.pause()
+                return
+            }
+            guard player == nil else { return }
+            player = AVPlayer(url: url)
+        }
     }
 }

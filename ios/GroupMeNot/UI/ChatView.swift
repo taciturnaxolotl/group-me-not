@@ -1323,11 +1323,20 @@ struct ChatView: View {
     private func replyBanner(_ message: Message) -> some View {
         HStack(spacing: 6) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("Replying to \(message.name ?? "Someone")")
+                // The name alone. "Replying to" was a caption on a banner
+                // that only ever appears because somebody chose to reply, and
+                // it took the room the name needed.
+                Text(message.name ?? "Someone")
                     .font(.caption2.weight(.medium))
+                    .lineLimit(1)
                 Text(Transcript.summarise(message))
                     .font(.caption)
-                    .lineLimit(1)
+                    // Enough to recognise a paragraph by. One line was a rule
+                    // borrowed from the transcript's quotes, where the message
+                    // answering it is right underneath; here there is nothing
+                    // to answer yet, and the reader is checking they picked the
+                    // right thing.
+                    .lineLimit(4)
                     .padding(.horizontal, 11)
                     .padding(.vertical, 6)
                     .background(.quaternary, in: .rect(cornerRadius: 14, style: .continuous))
