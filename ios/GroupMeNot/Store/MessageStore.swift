@@ -17,6 +17,12 @@ actor MessageStore {
     /// goes through this actor, so a cache that is dropped on write is exact
     /// rather than hopeful: there is no staleness to reason about, because a row
     /// that changed is a row that is no longer in here.
+    ///
+    /// Three writers, and each must forget what it wrote: ``upsert(_:in:)``,
+    /// ``writeMerged(_:in:)``, and ``writeReactions(of:id:in:)``. A fourth that
+    /// did not would fail quietly rather than loudly — it would serve one
+    /// message's previous copy for as long as nothing else rewrote it, which is
+    /// exactly what happened the first time this cache shipped.
     private var decoded: [MessageKey: Message] = [:]
 
     private struct MessageKey: Hashable {
@@ -188,17 +194,7 @@ actor MessageStore {
             guard let stored = try loadMessage(id: messageID, in: conversation) else { return nil }
             let message = stored.settingReaction(glyph, by: userID)
 
-            try db.run(
-                """
-                UPDATE messages SET payload = ?, reactions = ?
-                 WHERE conversation_key = ? AND id = ?
-                """,
-                [
-                    SQLValue(try StoreCoding.encode(message)),
-                    SQLValue(StoreCoding.encodeIfPresent(message.reactions)),
-                    SQLValue(conversation.storageKey),
-                    SQLValue(messageID),
-                ])
+            try writeReactions(of: message, id: messageID, in: conversation)
             return message
         }
     }
@@ -234,19 +230,38 @@ actor MessageStore {
             message.reactions = reactions
             message.favoritedBy = nil
 
-            try db.run(
-                """
-                UPDATE messages SET payload = ?, reactions = ?
-                 WHERE conversation_key = ? AND id = ?
-                """,
-                [
-                    SQLValue(try StoreCoding.encode(message)),
-                    SQLValue(StoreCoding.encodeIfPresent(message.reactions)),
-                    SQLValue(conversation.storageKey),
-                    SQLValue(messageID),
-                ])
+            try writeReactions(of: message, id: messageID, in: conversation)
             return message
         }
+    }
+
+    /// The write both reaction paths make, in one place.
+    ///
+    /// One place because of what has to happen alongside it. A reaction does not
+    /// move `updated_at`, so these two are the only writes in this actor that
+    /// change a message without going through ``upsert(_:in:)`` or
+    /// ``writeMerged(_:in:)`` — and each of those forgets the row it wrote,
+    /// while these used not to. The decode cache then kept handing back the
+    /// copy from before the tap: the chip appeared, the next reload took it
+    /// away again, and a reaction arriving from somebody else never showed up
+    /// at all until a catch-up happened to rewrite the message for other
+    /// reasons. A cache is only exact if every writer says so; this is the
+    /// third writer, saying so.
+    private func writeReactions(
+        of message: Message, id: String, in conversation: ConversationID
+    ) throws {
+        try db.run(
+            """
+            UPDATE messages SET payload = ?, reactions = ?
+             WHERE conversation_key = ? AND id = ?
+            """,
+            [
+                SQLValue(try StoreCoding.encode(message)),
+                SQLValue(StoreCoding.encodeIfPresent(message.reactions)),
+                SQLValue(conversation.storageKey),
+                SQLValue(id),
+            ])
+        forget([id], in: conversation.storageKey)
     }
 
     // MARK: - Reading
