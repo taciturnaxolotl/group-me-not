@@ -736,7 +736,9 @@ actor GroupMeAPI {
     /// their anthem and their campus. `GET /v3/users/{id}` is not the same
     /// thing and does not exist; the modern API only ever describes *you*.
     func profile(of userID: String) async throws -> UserProfileBody {
-        try await client.get(.legacy, "/users/\(userID)", retry: .background)
+        // `.interactive`: a sheet is open and waiting on this, so it is worth a
+        // few quick attempts and not worth a minute of them.
+        try await client.get(.legacy, "/users/\(userID)", retry: .interactive)
     }
 
     /// The groups you and somebody else are both in.
@@ -747,7 +749,7 @@ actor GroupMeAPI {
     func sharedGroups(with userID: String) async throws -> [UserProfileBody.WireSharedGroup] {
         let body: UserProfileBody = try await client.get(
             .legacy, "/users/\(userID)",
-            query: ["include_shared_groups": "true"], retry: .background)
+            query: ["include_shared_groups": "true"], retry: .interactive)
         return body.sharedGroups ?? []
     }
 
@@ -766,9 +768,12 @@ actor GroupMeAPI {
     /// that arrives late is a status that has changed anyway, so a failure is
     /// worth one quiet attempt and no more.
     func presence(of userID: String, in groupID: String? = nil) async throws -> Presence {
+        // One attempt, which is what the note above actually says: a status is
+        // asked for again on the next tick, so spending a minute of backoff on
+        // this one would only be answering a question that has moved on.
         try await client.get(
             .v1, "/presence/users/\(userID)",
-            query: ["group_id": groupID], enveloped: false, retry: .background)
+            query: ["group_id": groupID], enveloped: false, retry: .none)
     }
 
     /// Say where *we* are.

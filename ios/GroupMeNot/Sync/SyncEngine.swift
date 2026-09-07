@@ -117,6 +117,9 @@ actor SyncEngine {
     /// Conversations with a targeted catch-up in flight, so opening a
     /// conversation twice in a second does not fetch it twice.
     private var catchingUp: Set<ConversationID> = []
+    /// Which sync the handle belongs to. See ``sync(reason:)``.
+    private var runningGeneration = 0
+
     /// When the group list last came down with its rosters attached.
     private var rostersFetchedAt: Date?
 
@@ -170,8 +173,18 @@ actor SyncEngine {
         // "join" it, return at once, and do nothing. An app backgrounded during
         // its first sync is exactly how that happens, and it wedges the whole
         // thing until relaunch.
-        if let running, !running.isCancelled {
-            await running.value
+        //
+        // A loop rather than an `if`, and this is the part that was wrong. The
+        // await below is a suspension point on an actor: two callers can be
+        // sitting on it at once, and when the sync they are waiting for fails,
+        // both used to walk on and start one. Whoever got there second replaced
+        // the first one's handle, so a third caller joined a sync nobody was
+        // tracking. Now the generation says whether the sync that finished is
+        // still the newest thing there is; if it is not, there is a fresh one to
+        // join instead.
+        while let inFlight = running, !inFlight.isCancelled {
+            let generation = runningGeneration
+            await inFlight.value
             // A sync that failed is not a sync this caller can inherit. The
             // ordinary way that bites: the app comes forward before the radio
             // is up, the foreground sync starts and is doomed, and the
@@ -180,16 +193,26 @@ actor SyncEngine {
             // sits a week behind until a heartbeat notices, which is a minute
             // and a half of a transcript that will not fill in.
             guard state.phase == .failed else { return }
+            guard runningGeneration == generation else { continue }
+            break
         }
+
+        // No await between here and the assignment, so nothing can slip in
+        // between deciding to start one and saying that we have.
+        runningGeneration &+= 1
+        let generation = runningGeneration
         let task = Task { [self] in
             await perform(reason: reason)
-            clearRunning()
+            clearRunning(generation: generation)
         }
         running = task
         await task.value
     }
 
-    private func clearRunning() {
+    /// Clears the handle only if it is still ours. A sync that finishes after a
+    /// newer one has started must not take the newer one's handle with it.
+    private func clearRunning(generation: Int) {
+        guard runningGeneration == generation else { return }
         running = nil
     }
 

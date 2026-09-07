@@ -342,7 +342,9 @@ actor MediaUploadService {
             } catch let urlError as URLError {
                 throw MediaUploadError.transport(urlError)
             }
-            let http = response as! HTTPURLResponse
+            guard let http = response as? HTTPURLResponse else {
+                throw MediaUploadError.malformed("answer was not HTTP")
+            }
 
             switch http.statusCode {
             case 201:
@@ -386,7 +388,9 @@ actor MediaUploadService {
         } catch let urlError as URLError {
             throw MediaUploadError.transport(urlError)
         }
-        let http = response as! HTTPURLResponse
+        guard let http = response as? HTTPURLResponse else {
+            throw MediaUploadError.malformed("answer was not HTTP")
+        }
         guard (200...299).contains(http.statusCode) else {
             throw Self.error(for: http, body: data)
         }

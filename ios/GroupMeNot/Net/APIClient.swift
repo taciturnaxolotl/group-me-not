@@ -153,7 +153,12 @@ actor APIClient {
     ) async throws -> T {
         guard let token = await tokenProvider() else { throw APIError.unauthenticated }
 
-        var components = URLComponents(string: host.rawValue + path)!
+        // A path is built from ids, and not every id in this API is a number we
+        // minted: a profile route carries one straight off the wire. A bad one
+        // is a failed request, not a crash.
+        guard var components = URLComponents(string: host.rawValue + path) else {
+            throw APIError.decoding("\(path): not a usable URL")
+        }
         var items = query.compactMap { key, value in value.map { URLQueryItem(name: key, value: $0) } }
         // Appended rather than merged: `queryItems` is an array and happily
         // carries the same name twice, which is the whole point of this
@@ -164,7 +169,10 @@ actor APIClient {
         }
         if !items.isEmpty { components.queryItems = items }
 
-        var request = URLRequest(url: components.url!)
+        guard let url = components.url else {
+            throw APIError.decoding("\(path): not a usable URL")
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue(token, forHTTPHeaderField: "X-Access-Token")
         if let body {
@@ -179,7 +187,11 @@ actor APIClient {
             throw APIError.transport(urlError)
         }
 
-        let http = response as! HTTPURLResponse
+        // Always an `HTTPURLResponse` for an http(s) request, and a cast that
+        // says "always" is a cast that crashes the day it is not.
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.decoding("\(path): answer was not HTTP")
+        }
         // Answered, with nothing in it. GroupMe signals "no results" this way
         // rather than with an empty collection: a page of messages past either
         // end of a conversation is a `304`, and some endpoints use `204`. Both
