@@ -195,6 +195,8 @@ struct MessageRow: View {
     var onOpenThread: (CGRect) -> Void = { _ in }
     /// Called when the reader holds a reaction chip, asking who reacted.
     var onInspectReaction: (Message.ReactionSummary) -> Void = { _ in }
+    /// A tap on the face beside a message, carrying whoever wrote it.
+    var onOpenPerson: (PersonRef) -> Void = { _ in }
 
     var body: some View {
         if item.message.isSystem {
@@ -215,7 +217,8 @@ struct MessageRow: View {
                 onReply: onReply,
                 onOpenConversation: onOpenConversation,
                 onOpenThread: onOpenThread,
-                onInspectReaction: onInspectReaction)
+                onInspectReaction: onInspectReaction,
+                onOpenPerson: onOpenPerson)
         }
     }
 }
@@ -275,6 +278,7 @@ private struct BubbleRow: View {
     let onOpenConversation: (ConversationRow) -> Void
     let onOpenThread: (CGRect) -> Void
     let onInspectReaction: (Message.ReactionSummary) -> Void
+    let onOpenPerson: (PersonRef) -> Void
 
     @Environment(AppSettings.self) private var settings
 
@@ -441,6 +445,16 @@ private struct BubbleRow: View {
     @ViewBuilder private var avatarSlot: some View {
         if item.showsSender {
             Avatar(url: item.senderAvatarURL, name: item.senderName, size: avatarSize)
+                // The face is the only part of a message that is about the
+                // person rather than about what they said, so it is the part
+                // that opens them. A plain tap: everything else a message
+                // offers is behind a press, and this must not compete with it.
+                .contentShape(.circle)
+                .onTapGesture {
+                    guard let id = item.message.senderId ?? item.message.userId else { return }
+                    onOpenPerson(
+                        PersonRef(id: id, name: item.senderName, avatarURL: item.senderAvatarURL))
+                }
         } else {
             Color.clear.frame(width: avatarSize, height: 1)
         }

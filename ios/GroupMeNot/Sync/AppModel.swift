@@ -82,11 +82,17 @@ final class AppModel {
     /// Expired entries are swept on each new event; see `PushEvent.Typing.expiry`.
     private(set) var typingUserIDs: [String: Date] = [:]
 
-    /// Whether the other person in the open DM is about, or nil while nobody has
-    /// asked yet. Held rather than stored: a status is minutes old at best, so
-    /// keeping one across launches would only mean showing a stale dot on the
-    /// first frame.
-    private(set) var partnerPresence: Presence?
+    /// Who is about, by user id, for as long as the app runs.
+    ///
+    /// Held rather than stored: a status is minutes old at best, so keeping one
+    /// across launches would only mean showing a stale dot on the first frame.
+    private(set) var presence: [String: Presence] = [:]
+
+    /// The status of whoever is on the other end of the open DM.
+    var partnerPresence: Presence? {
+        guard case .direct(let other)? = openConversationID else { return nil }
+        return presence[other]
+    }
 
     /// Whether to tell GroupMe when *we* are about.
     ///
@@ -356,6 +362,48 @@ final class AppModel {
         Task { [api] in try? await api.publishPresence(status, manual: manual) }
     }
 
+    // MARK: - People
+
+    /// Everything a profile sheet draws about somebody, gathered in one call.
+    ///
+    /// Four questions in parallel, because they are four unrelated servers'
+    /// worth of answer and the sheet wants them together: the profile, the
+    /// groups you share, whether they are about, and what their interest ids
+    /// mean. Any of them may come back empty; none of them may stop the others.
+    ///
+    /// The name passed in is what the roster or the transcript already knows,
+    /// and it stands until the fetch has something better. A sheet that opens
+    /// blank and fills in reads as broken even when it is working.
+    func person(_ userID: String, named name: String? = nil, avatarURL: String? = nil) async -> Person {
+        var person = Person(id: userID)
+        person.name = name
+        person.avatarURL = avatarURL
+        person.presence = presence[userID]
+
+        async let profile = try? api.profile(of: userID)
+        async let shared = try? api.sharedGroups(with: userID)
+        async let status = try? api.presence(of: userID)
+
+        if let body = await profile {
+            person.name = body.user?.name ?? person.name
+            person.avatarURL = body.user?.picture ?? person.avatarURL
+            person.bio = body.user?.bio?.isEmpty == true ? nil : body.user?.bio
+            person.anthem = body.user?.songUrl.flatMap(URL.init(string:))
+            person.since = body.user?.joined
+            person.school = body.school
+            person.charms = await InterestCatalog.shared.charms(for: body.interests ?? [])
+        }
+        person.sharedGroups = (await shared ?? []).compactMap { group in
+            guard let id = group.id, let name = group.groupName else { return nil }
+            return SharedGroup(id: id, name: name, avatarURL: group.groupAvatar)
+        }
+        if let found = await status {
+            presence[userID] = found
+            person.presence = found
+        }
+        return person
+    }
+
     /// Fetch the status of whoever is on the other end of the open DM.
     ///
     /// A group has no single answer, so it has none here. `GET
@@ -363,14 +411,14 @@ final class AppModel {
     /// a roster is not what a conversation header has room for.
     private func refreshPartnerPresence() {
         guard case .direct(let otherUserID)? = openConversationID else { return }
-        Task { [api] in
-            guard let found = try? await api.presence(of: otherUserID) else { return }
-            // Still the same conversation. A fetch that lands after the reader
-            // has moved on would otherwise put one person's dot on another
-            // person's name.
-            guard case .direct(otherUserID)? = self.openConversationID else { return }
-            self.partnerPresence = found
-        }
+        Task { await self.refreshPresence(of: otherUserID) }
+    }
+
+    /// Ask after one person. Kept by user id rather than by conversation, so the
+    /// profile sheet and a DM header asking about the same person ask once.
+    func refreshPresence(of userID: String) async {
+        guard let found = try? await api.presence(of: userID) else { return }
+        presence[userID] = found
     }
 
     /// Pull to refresh.
@@ -408,7 +456,6 @@ final class AppModel {
         typingSweep?.cancel()
         typingUserIDs = [:]
 
-        partnerPresence = nil
         refreshPartnerPresence()
 
         messages = await transcript(conversation) ?? []
@@ -443,7 +490,6 @@ final class AppModel {
         typingSweep?.cancel()
         typingSweep = nil
         openConversationID = nil
-        partnerPresence = nil
         messages = []
         outbox = []
         members = []

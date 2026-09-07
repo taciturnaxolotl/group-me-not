@@ -290,6 +290,8 @@ struct ChatView: View {
     /// that presents it.
     @State private var reactionDetail = RosterTarget()
     @State private var composerFocused = false
+    /// Whose profile is open, if anybody's.
+    @State private var viewingPerson: PersonRef?
 
     // MARK: Scroll state
 
@@ -515,6 +517,7 @@ struct ChatView: View {
                     onRetry: { retry($0) },
                     onDiscard: { discard($0) },
                     onOpenConversation: onOpenConversation,
+                    onOpenPerson: { viewingPerson = $0 },
                     onSend: { text, media in reply(text, media: media, into: focus.rootID) },
                     onDismiss: {
                         var instant = Transaction()
@@ -587,6 +590,11 @@ struct ChatView: View {
             .sheet(isPresented: $isInfoPresented) {
                 ConversationInfoView(
                     conversation: current, members: model.members,
+                    onOpenDirect: onOpenConversation)
+            }
+            .sheet(item: $viewingPerson) { person in
+                PersonView(
+                    userID: person.id, name: person.name, avatarURL: person.avatarURL,
                     onOpenDirect: onOpenConversation)
             }
     }
@@ -835,7 +843,8 @@ struct ChatView: View {
                 instant.disablesAnimations = true
                 withTransaction(instant) { thread = focus }
             },
-            onInspectReaction: { _ in reactionDetail.item = item }
+            onInspectReaction: { _ in reactionDetail.item = item },
+            onOpenPerson: { viewingPerson = $0 }
         )
     }
 

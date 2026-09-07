@@ -723,6 +723,29 @@ actor GroupMeAPI {
         }
     }
 
+    // MARK: - People
+
+    /// Somebody else's profile.
+    ///
+    /// The legacy host, and the only route that carries a person's interests,
+    /// their anthem and their campus. `GET /v3/users/{id}` is not the same
+    /// thing and does not exist; the modern API only ever describes *you*.
+    func profile(of userID: String) async throws -> UserProfileBody {
+        try await client.get(.legacy, "/users/\(userID)", retry: .background)
+    }
+
+    /// The groups you and somebody else are both in.
+    ///
+    /// The same route with a flag, and it answers with a different half of the
+    /// same object, so it is asked as a separate question. See
+    /// ``UserProfileBody``.
+    func sharedGroups(with userID: String) async throws -> [UserProfileBody.WireSharedGroup] {
+        let body: UserProfileBody = try await client.get(
+            .legacy, "/users/\(userID)",
+            query: ["include_shared_groups": "true"], retry: .background)
+        return body.sharedGroups ?? []
+    }
+
     // MARK: - Presence
 
     /// What somebody's status is right now.

@@ -338,7 +338,10 @@ private struct NewGroupDetails: View {
                     guard let userID = person.userId else { return nil }
                     return .init(userId: userID, nickname: person.name ?? "Someone")
                 }
-                await model.invite(members, to: groupID)
+                // Discarded deliberately, per the note above: the group is
+                // the thing being made here, `invite` logs a refusal, and
+                // anybody it dropped can be added from inside the group.
+                _ = await model.invite(members, to: groupID)
             }
 
             isSending = false

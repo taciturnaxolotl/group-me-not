@@ -22,6 +22,8 @@ struct ConversationInfoView: View {
     @State private var isDeleting = false
     @State private var removing: Member?
     @State private var memberQuery = ""
+    /// Whose profile is open, if anybody's.
+    @State private var viewing: PersonRef?
 
     private var isSearching: Bool {
         !memberQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -56,6 +58,19 @@ struct ConversationInfoView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
+            }
+            .sheet(item: $viewing) { person in
+                PersonView(
+                    userID: person.id, name: person.name, avatarURL: person.avatarURL,
+                    // Through this sheet and out: a DM opened from a profile
+                    // opened from the info sheet should land on the
+                    // conversation, not on two sheets and a conversation.
+                    onOpenDirect: onOpenDirect.map { open in
+                        { row in
+                            dismiss()
+                            open(row)
+                        }
+                    })
             }
             .sheet(isPresented: $isInvitePresented) {
                 InvitePeopleView(conversation: conversation, alreadyIn: members)
@@ -308,21 +323,34 @@ struct ConversationInfoView: View {
     @ViewBuilder private var roster: some View {
         Section(rosterTitle) {
             ForEach(matchingPeople, id: \.identity) { member in
-                HStack(spacing: 12) {
-                    Avatar(url: member.imageUrl, name: displayName(member), size: 34)
-                    Text(displayName(member))
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    if let badge = role(of: member) {
-                        Text(badge)
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(.quaternary, in: .capsule)
+                // A tap opens who they are; the press menu still holds what may
+                // be done to them. The two do not compete: one is about the
+                // person, the other about their membership.
+                Button {
+                    viewing = PersonRef(
+                        id: member.identity, name: displayName(member),
+                        avatarURL: member.imageUrl)
+                } label: {
+                    HStack(spacing: 12) {
+                        Avatar(url: member.imageUrl, name: displayName(member), size: 34)
+                        Text(displayName(member))
+                            .lineLimit(1)
+                            .foregroundStyle(.primary)
+                        Spacer(minLength: 4)
+                        if let badge = role(of: member) {
+                            Text(badge)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.quaternary, in: .capsule)
+                        }
                     }
+                    .contentShape(.rect)
                 }
+                .buttonStyle(.plain)
                 .accessibilityElement(children: .combine)
+                .accessibilityHint("Shows their profile")
                 .contextMenu { memberActions(member) }
             }
         }
