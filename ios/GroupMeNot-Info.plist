@@ -13,6 +13,15 @@
 	<false/>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Save photos from your conversations to your library.</string>
+	<!-- Not optional in the way the others are. Presenting a camera without
+	     this key does not fail politely: iOS terminates the process the moment
+	     the picker touches the hardware, which is what "taking a photo crashes
+	     the app" was. The microphone key is here for the same reason, because
+	     the picker offers video and video records sound. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Take a photo or video to send in a conversation.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Record sound with the videos you send.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
