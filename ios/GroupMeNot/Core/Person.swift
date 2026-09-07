@@ -96,8 +96,13 @@ nonisolated struct UserProfileBody: Decodable, Sendable {
         var shortName: String?
     }
 
+    /// `group_id`, not `id`, and the difference was the whole bug: every shared
+    /// group decoded with a nil id and was dropped on the floor, so a profile
+    /// that had six of them drew none. Measured against the live route on
+    /// 7 September 2026; the field list is `group_id`, `group_name`,
+    /// `group_avatar` and nothing else.
     nonisolated struct WireSharedGroup: Decodable, Sendable {
-        var id: String?
+        var groupId: String?
         var groupName: String?
         var groupAvatar: String?
     }

@@ -400,7 +400,7 @@ final class AppModel {
         // this phone has never opened, and we know about ones it declined to
         // mention.
         var groups: [SharedGroup] = (await shared ?? []).compactMap { group in
-            guard let id = group.id, let name = group.groupName else { return nil }
+            guard let id = group.groupId, let name = group.groupName else { return nil }
             return SharedGroup(id: id, name: name, avatarURL: group.groupAvatar)
         }
         let known = Set(groups.map(\.id))

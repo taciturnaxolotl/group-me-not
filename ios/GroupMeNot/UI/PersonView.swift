@@ -45,8 +45,11 @@ struct PersonView: View {
                 if !charms.isEmpty { chips }
                 if let anthem = person?.anthem { self.anthem(anthem) }
                 if !(person?.sharedGroups.isEmpty ?? true) { shared }
-                if let since = person?.since { self.since(since) }
                 actions
+                // Under the buttons, not above them. It is the least of what
+                // this sheet says: a footnote about how long they have been
+                // here, which belongs after the two things you might act on.
+                if let joined = person?.since { self.joined(joined) }
             }
             .padding(.horizontal, 20)
             .padding(.top, 24)
@@ -222,9 +225,9 @@ struct PersonView: View {
         return ["You're both in \(firstShared)", otherShared].compactMap { $0 }.joined(separator: " ")
     }
 
-    private func since(_ date: Date) -> some View {
+    private func joined(_ date: Date) -> some View {
         Label(
-            "Since \(date.formatted(.dateTime.month(.wide).year()))",
+            "Joined \(date.formatted(.dateTime.month(.wide).year()))",
             systemImage: "calendar")
             .font(.footnote)
             .foregroundStyle(.secondary)
