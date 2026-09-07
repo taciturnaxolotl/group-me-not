@@ -228,6 +228,10 @@ actor SyncEngine {
             //    sync that already delivered every message.
             await syncReadReceipts()
 
+            // 5. And now that both the messages and the cursors are current,
+            //    the badges follow from them.
+            await recountUnread()
+
             await housekeeping()
 
             state.phase = .idle
@@ -634,6 +638,9 @@ actor SyncEngine {
         }
 
         if stored > 0 {
+            // Whatever the list said this conversation had waiting, we can now
+            // see for ourselves.
+            await recountUnread(in: conversation)
             continuation.yield(.conversations)
             log.debug("stored \(stored) messages for \(conversation.storageKey, privacy: .public)")
         }
@@ -669,6 +676,24 @@ actor SyncEngine {
 
     // MARK: - Step 4: read state
 
+    /// Recount one conversation's badge from the messages on disk.
+    ///
+    /// Silent when we do not yet know who we are: without that, every message
+    /// looks like somebody else's and a conversation full of our own writing
+    /// would light up. The next sync after sign-in has the id and puts the
+    /// numbers right.
+    private func recountUnread(in conversation: ConversationID, lowering: Bool = false) async {
+        guard let currentUserID else { return }
+        try? await store.conversations.recountUnread(
+            in: conversation, mine: currentUserID, lowering: lowering)
+    }
+
+    private func recountUnread() async {
+        guard let currentUserID else { return }
+        try? await store.conversations.recountUnread(mine: currentUserID)
+        continuation.yield(.conversations)
+    }
+
     private func syncReadReceipts() async {
         do {
             let receipts = try await api.readReceipts()
@@ -695,6 +720,9 @@ actor SyncEngine {
                     } else {
                         row.lastReadMessageID = readID
                         try await store.conversations.upsert(row: row)
+                        // The cursor moved, so the badge may legitimately come
+                        // down: these are messages somebody read elsewhere.
+                        await recountUnread(in: conversation, lowering: true)
                     }
                 }
             }
@@ -770,9 +798,13 @@ actor SyncEngine {
                         sits ahead of verified history \(verified, privacy: .public)
                         """)
                 }
-                // Only a genuinely new message from somebody else moves a badge.
+                // Only a genuinely new message from somebody else moves a
+                // badge. What it moves it to is a count rather than a bump: the
+                // message is on disk by now, so asking how many sit past the
+                // read cursor already includes it, and asking twice cannot
+                // count it twice.
                 if !isMine, !known, !message.isSystem {
-                    try await store.conversations.incrementUnread(conversation)
+                    await recountUnread(in: conversation)
                 }
                 continuation.yield(.messages(conversation))
                 continuation.yield(.conversations)

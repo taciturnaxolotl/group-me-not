@@ -255,13 +255,75 @@ actor ConversationStore {
         )
     }
 
-    /// Bumps the badge by one. The push path uses this: an arriving message
-    /// should light up the list without waiting for a conversation refetch.
-    func incrementUnread(_ conversation: ConversationID, by amount: Int = 1) throws {
+    /// Count the badge from the messages we hold rather than carrying a running
+    /// total, for one conversation or for the whole list.
+    ///
+    /// The badge used to be a number three parties took turns writing: the
+    /// server's `unread_count`, a `+1` per arriving push, and a zero when the
+    /// reader reached the foot. Reconciling those is guesswork, and it has a
+    /// failure that never heals. A read posts its cursor once and does not
+    /// retry, so a conversation whose receipt did not land is left with a local
+    /// cursor permanently ahead of the server's — and the merge reads that as
+    /// "our tally is the better informed one" and keeps it, for good. The tally
+    /// it keeps is zero, and it stays zero however many messages arrive while
+    /// the app is not running. Topics are where it bites hardest, because a
+    /// topic is read on this phone and reported on by a list fetch that may
+    /// never carry a cursor for it at all.
+    ///
+    /// The cursor is the state worth keeping; the badge is a view of it. So it
+    /// is derived, the way the official client derives it: the messages after
+    /// the cursor that somebody else sent and that are not notices. Nothing
+    /// accumulates, so nothing can drift, and a wrong badge is one recount away
+    /// from being right instead of being wrong forever.
+    ///
+    /// - Parameters:
+    ///   - mine: our own user id. Our own messages are not unread.
+    ///   - lowering: whether the count may come *down*. Only a cursor that has
+    ///     moved may lower it. Otherwise this is a floor: a conversation whose
+    ///     history has not been paged yet holds none of the messages the server
+    ///     is counting, and a recount that could lower would wipe the server's
+    ///     number and call an unread conversation read.
+    func recountUnread(in conversation: ConversationID, mine: String, lowering: Bool) throws {
         try db.run(
-            "UPDATE conversations SET unread_count = MAX(0, unread_count + ?) WHERE key = ?",
-            [SQLValue(amount), SQLValue(conversation.storageKey)]
+            Self.recountSQL(lowering: lowering) + " AND key = ?2",
+            [SQLValue(mine), SQLValue(conversation.storageKey)]
         )
+    }
+
+    /// The same recount across the whole list, as a floor.
+    ///
+    /// Run at the end of every sync, which is what makes the badge self-healing:
+    /// whatever the merge made of the server's count, a conversation holding
+    /// messages the reader has not reached says so.
+    func recountUnread(mine: String) throws {
+        try db.run(Self.recountSQL(lowering: false), [SQLValue(mine)])
+    }
+
+    /// `?1` is our own user id. `IS NOT` rather than `<>` on purpose: a message
+    /// built from a list preview carries no sender, and `NULL <> '123'` is NULL,
+    /// which would drop it from the count. It is somebody else's message; that
+    /// is why there is a preview of it.
+    ///
+    /// A conversation with no cursor at all is left alone, and that guard is
+    /// what keeps a fresh install from lighting up. There is nothing to count
+    /// *from* there: every message we have just paged in is after "nowhere", so
+    /// a hundred messages somebody read last year would land as a hundred
+    /// unread. Until a read receipt says where the reader got to, the server's
+    /// own number is the only honest answer, and the merge already holds it.
+    nonisolated private static func recountSQL(lowering: Bool) -> String {
+        """
+        UPDATE conversations
+           SET unread_count = MAX(\(lowering ? "0" : "unread_count"), (
+                SELECT COUNT(*)
+                  FROM messages
+                 WHERE messages.conversation_key = conversations.key
+                   AND messages.sort_key
+                       > CAST(COALESCE(conversations.last_read_message_id, '0') AS INTEGER)
+                   AND messages.system = 0
+                   AND messages.deleted_at IS NULL
+                   AND messages.sender_id IS NOT ?1))
+         WHERE conversations.last_read_message_id IS NOT NULL
+        """
     }
 
     /// Records what a group says about itself, and nothing else on the row.
