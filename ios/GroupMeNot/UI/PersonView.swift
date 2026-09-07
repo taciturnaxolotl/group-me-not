@@ -76,8 +76,10 @@ struct PersonView: View {
                 // as another line of the sheet.
                 .overlay(alignment: .bottomTrailing) { presenceBadge }
             Text(displayName)
-                .font(.title2.weight(.semibold))
+                .font(.title.weight(.bold))
                 .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.7)
             if let summary = person?.presence?.summary {
                 Text(summary)
                     .font(.subheadline)
@@ -145,11 +147,7 @@ struct PersonView: View {
             Text("Anthem")
                 .font(.headline)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            // The same card a link in a message gets. A song is a link, and
-            // teaching the app a second way to draw one would be teaching it a
-            // second thing to keep right.
-            LinkPreviewCard(url: url, isOwn: false, service: model.previews)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            AnthemRow(url: url, previews: model.previews)
         }
     }
 
@@ -211,7 +209,13 @@ struct PersonView: View {
                 Button {
                     isAddingToGroup = true
                 } label: {
+                    // `lineLimit` on the label, not the button. Left to itself
+                    // "Add to Group" wraps onto two lines inside a capsule sized
+                    // for one, and a button half a line taller than the one
+                    // beside it is the first thing the eye finds on the sheet.
                     Label("Add to Group", systemImage: "person.badge.plus")
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -228,6 +232,8 @@ struct PersonView: View {
                         onOpenDirect(row)
                     } label: {
                         Label("Send DM", systemImage: "bubble.left")
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
@@ -236,6 +242,69 @@ struct PersonView: View {
             }
         }
         .padding(.top, 4)
+    }
+}
+
+// MARK: - Anthem
+
+/// The song somebody pinned to their profile.
+///
+/// Not the card a link in a message gets. That one is 232 points wide with the
+/// picture on top, which is right for a bubble it has to sit inside and wrong
+/// for a sheet, where it reads as a screenshot somebody pasted. A song is a row:
+/// art, title, who by, full width, and the whole of it is the tap target.
+///
+/// Everything is drawn from the same preview service the transcript uses, so a
+/// song already seen in a message costs nothing here.
+private struct AnthemRow: View {
+    let url: URL
+    let previews: LinkPreviewService?
+
+    @Environment(\.openURL) private var openURL
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var preview: LinkPreview?
+
+    private static let art: CGFloat = 62
+
+    var body: some View {
+        Button {
+            openURL(preview?.canonicalURL ?? url)
+        } label: {
+            HStack(spacing: 12) {
+                RemoteImage(url: preview?.imageURL, maxPixelSize: Self.art * 3) {
+                    Rectangle().fill(.quaternary)
+                }
+                .frame(width: Self.art, height: Self.art)
+                .clipShape(.rect(cornerRadius: 8, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(preview?.title ?? url.host() ?? "Anthem")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    if let detail = preview?.summary ?? preview?.siteName {
+                        Text(detail)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 26))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity)
+            .background(.quaternary, in: .rect(cornerRadius: 16, style: .continuous))
+            .contentShape(.rect(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .task(id: colorScheme) {
+            preview = await previews?.preview(for: url, dark: colorScheme == .dark)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(preview?.title.map { "Anthem, \($0)" } ?? "Anthem")
+        .accessibilityAddTraits(.isLink)
     }
 }
 

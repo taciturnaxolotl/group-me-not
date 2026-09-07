@@ -401,6 +401,11 @@ final class AppModel {
             presence[userID] = found
             person.presence = found
         }
+        // What the two reads actually carried. These are legacy routes whose
+        // shape is documented nowhere but in their own answers, so a line saying
+        // which parts arrived is what turns "the sheet looks empty" into a
+        // question with an answer.
+        log.debug("profile \(userID, privacy: .public): \(person.charms.count) interests, \(person.sharedGroups.count) shared groups")
         return person
     }
 

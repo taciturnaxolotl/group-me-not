@@ -106,19 +106,64 @@ nonisolated struct UserProfileBody: Decodable, Sendable {
         case user, interests, graduationYear, directories, sharedGroups
     }
 
+    /// Read from wherever it is.
+    ///
+    /// The legacy host has been through several ideas about the shape of a
+    /// profile, and which level a field sits at is one of them: `interests` and
+    /// `shared_groups` turn up beside `user` on some reads and inside it on
+    /// others, and interests arrive as bare ids in one place and as little
+    /// objects carrying one in another. None of that is worth a guess, so every
+    /// field is looked for at both levels and in every spelling seen. What is
+    /// not there is simply absent, and a sheet missing a row is a sheet.
     init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        user = try? container.decodeIfPresent(WireUser.self, forKey: .user)
-        interests = (try? container.decodeIfPresent([Int].self, forKey: .interests)) ?? nil
-        directories = (try? container.decodeIfPresent([WireDirectory].self, forKey: .directories)) ?? nil
-        sharedGroups = (try? container.decodeIfPresent([WireSharedGroup].self, forKey: .sharedGroups)) ?? nil
-        if let year = try? container.decodeIfPresent(String.self, forKey: .graduationYear) {
-            graduationYear = year
-        } else if let year = try? container.decodeIfPresent(Int.self, forKey: .graduationYear) {
-            graduationYear = String(year)
-        } else {
-            graduationYear = nil
+        let outer = try decoder.container(keyedBy: CodingKeys.self)
+        let inner = try? outer.nestedContainer(keyedBy: CodingKeys.self, forKey: .user)
+
+        user = try? outer.decodeIfPresent(WireUser.self, forKey: .user)
+        interests = Self.interests(in: outer) ?? inner.flatMap(Self.interests(in:))
+        directories = Self.value([WireDirectory].self, .directories, outer, inner)
+        sharedGroups = Self.value([WireSharedGroup].self, .sharedGroups, outer, inner)
+        graduationYear = Self.text(.graduationYear, outer, inner)
+    }
+
+    /// A container's value for a key, from the outer object or the inner one.
+    private static func value<T: Decodable>(
+        _ type: T.Type, _ key: CodingKeys,
+        _ outer: KeyedDecodingContainer<CodingKeys>,
+        _ inner: KeyedDecodingContainer<CodingKeys>?
+    ) -> T? {
+        if let found = try? outer.decodeIfPresent(type, forKey: key) { return found }
+        return (try? inner?.decodeIfPresent(type, forKey: key)) ?? nil
+    }
+
+    /// A string that may have been sent as a number. `graduation_year` is both.
+    private static func text(
+        _ key: CodingKeys,
+        _ outer: KeyedDecodingContainer<CodingKeys>,
+        _ inner: KeyedDecodingContainer<CodingKeys>?
+    ) -> String? {
+        if let found = value(String.self, key, outer, inner) { return found }
+        return value(Int.self, key, outer, inner).map(String.init)
+    }
+
+    /// Interest ids, however they were spelled.
+    private static func interests(in container: KeyedDecodingContainer<CodingKeys>) -> [Int]? {
+        if let ids = try? container.decodeIfPresent([Int].self, forKey: .interests), !ids.isEmpty {
+            return ids
         }
+        if let ids = try? container.decodeIfPresent([String].self, forKey: .interests) {
+            let numbers = ids.compactMap(Int.init)
+            if !numbers.isEmpty { return numbers }
+        }
+        if let objects = try? container.decodeIfPresent([WireInterest].self, forKey: .interests) {
+            let numbers = objects.compactMap(\.id)
+            if !numbers.isEmpty { return numbers }
+        }
+        return nil
+    }
+
+    nonisolated struct WireInterest: Decodable, Sendable {
+        var id: Int?
     }
 
     /// The school chip: "Cedarville 2030". Either half alone is not worth a chip
