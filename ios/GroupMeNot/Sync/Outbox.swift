@@ -182,6 +182,69 @@ actor Outbox {
 
     private static let backgroundTimeName = "sh.dunkirk.GroupMeNot.send" 
 
+    /// A background transfer finished with nobody waiting for it.
+    ///
+    /// This is the whole reason uploads survive the app being put away. The
+    /// await inside ``MediaUploadService`` belongs to a process that may have
+    /// been suspended hours ago; what the system hands back on relaunch is a
+    /// task, a body, and the job that was written on it. Turning that into "this
+    /// attachment is uploaded" is a database write, and the send that follows is
+    /// an ordinary drain.
+    ///
+    /// Idempotent by construction: an attachment that already has a URL is left
+    /// alone, so a duplicate delivery costs a lookup.
+    func apply(_ outcome: UploadOutcome) async {
+        let job = outcome.job
+        guard outcome.error == nil, let status = outcome.status, (200...299).contains(status) else {
+            // Left in the queue exactly as it was. The next drain re-posts it,
+            // which for a failed transfer is the right answer and for a video
+            // means asking the transcoder rather than sending the file again.
+                log.notice("background upload for \(job.guid, privacy: .public) did not land: HTTP \(outcome.status ?? -1, privacy: .public)")
+            await drain()
+            return
+        }
+
+        guard var entry = try? await store.outbox.entry(job.guid),
+              entry.media.indices.contains(job.index),
+              !entry.media[job.index].isUploaded
+        else { return }
+
+        switch job.step {
+        case .presignedPut:
+            entry.media[job.index].uploadedUrl = job.renderURL
+            entry.media[job.index].uploadedPreviewUrl =
+                job.thumbnailURL ?? entry.media[job.index].uploadedPreviewUrl
+        case .pictureService:
+            guard let url = Self.pictureURL(in: outcome.body) else { return }
+            entry.media[job.index].uploadedUrl = url
+        case .transcode:
+            // Not finished, only accepted. The video is on the transcoder's side
+            // now, and where to ask about it is the thing worth writing down:
+            // the next drain waits rather than uploading it again.
+            guard let statusURL = Self.transcodeStatusURL(in: outcome.body) else { return }
+            entry.media[job.index].transcodeStatusUrl = statusURL
+        }
+
+        try? await store.outbox.setMedia(entry.media, for: entry.id)
+        continuation.yield(entry.conversation)
+        await drain()
+    }
+
+    private static func pictureURL(in body: Data) -> String? {
+        struct Payload: Decodable {
+            struct Inner: Decodable { var url: String? }
+            var payload: Inner?
+        }
+        let url = (try? JSONDecoder().decode(Payload.self, from: body))?.payload?.url
+        return url?.isEmpty == false ? url : nil
+    }
+
+    private static func transcodeStatusURL(in body: Data) -> String? {
+        struct Started: Decodable { var status_url: String? }
+        let url = (try? JSONDecoder().decode(Started.self, from: body))?.status_url
+        return url?.isEmpty == false ? url : nil
+    }
+
     /// The network came back. Anything sitting out a backoff sized for a network
     /// that no longer exists gets its wait cancelled, and then we send.
     func connectivityDidReturn() async {
@@ -336,6 +399,8 @@ actor Outbox {
                 group.addTask { [uploads] in
                     let uploaded = try await uploads.upload(
                         media,
+                        guid: guid,
+                        index: index,
                         senderID: senderID,
                         groupID: groupID,
                         conversationID: conversationID,

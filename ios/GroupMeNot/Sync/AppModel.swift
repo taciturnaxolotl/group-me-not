@@ -259,6 +259,16 @@ final class AppModel {
             await sync.catchUp(conversation)
         }
 
+        // Re-adopt whatever the system carried on with while the app was away,
+        // and be ready for the answers it is about to hand over. Creating the
+        // session under the same identifier is what reconnects this process to
+        // transfers a previous one started; the handler is what turns an answer
+        // arriving with nobody waiting into a message that finally sends.
+        await BackgroundUploads.shared.start { [sends] outcome in
+            Task { await sends.apply(outcome) }
+        }
+        MediaUploadService.sweepStagedBodies()
+
         // Hops to the main actor because it redraws, and coalesces there rather
         // than here: `didSendBodyData` fires per packet, and a photo on a slow
         // connection would otherwise ask for a hundred frames a second.
@@ -1378,7 +1388,8 @@ final class AppModel {
         do {
             let media = try await MediaVault.shared.adopt(picked)
             let uploaded = try await uploads.upload(
-                media, senderID: currentUser?.id, groupID: groupID, conversationID: nil)
+                media, guid: media.id, index: 0,
+                senderID: currentUser?.id, groupID: groupID, conversationID: nil)
             await MediaVault.shared.remove(media)
             guard let updated = try await api.updateGroup(groupID, imageURL: uploaded.url)
             else { return true }
@@ -1426,7 +1437,8 @@ final class AppModel {
         do {
             let media = try await MediaVault.shared.adopt(picked)
             let uploaded = try await uploads.upload(
-                media, senderID: currentUser?.id, groupID: nil, conversationID: nil)
+                media, guid: media.id, index: 0,
+                senderID: currentUser?.id, groupID: nil, conversationID: nil)
             await MediaVault.shared.remove(media)
             return await updateProfile(avatarURL: uploaded.url)
         } catch {

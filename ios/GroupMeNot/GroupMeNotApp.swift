@@ -1,7 +1,26 @@
 import SwiftUI
+import UIKit
+
+/// The one thing SwiftUI has no modifier for.
+///
+/// A background upload that finishes while the app is not running gets the app
+/// relaunched, and the system hands over a completion handler that must be
+/// called once the answers have been dealt with. There is no `App` hook for
+/// this — it is a `UIApplicationDelegate` method or nothing — so this is the
+/// whole of why an adaptor exists.
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        Task { await BackgroundUploads.shared.adoptLaunchEvents(completionHandler) }
+    }
+}
 
 @main
 struct GroupMeNotApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     /// One model for the process. It owns the store, the API, sync and realtime,
     /// and it opens the database on init so the first frame can render from disk
     /// without waiting for anything.

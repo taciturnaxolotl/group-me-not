@@ -120,28 +120,117 @@ actor MediaUploadService {
     ///     requires as a header.
     ///   - onProgress: called with 0...1 as the bytes go out. Off the main
     ///     actor, and often, so a caller that redraws from it should coalesce.
+    /// - Parameters:
+    ///   - guid: the queued message this belongs to, and `index` which of its
+    ///     attachments. Neither is used to talk to GroupMe. They ride on the
+    ///     transfer so that an answer arriving in some later launch of the app
+    ///     can be matched back to the row that was waiting for it; see
+    ///     ``UploadJob``.
     func upload(
         _ media: PendingMedia,
+        guid: String,
+        index: Int,
         senderID: String?,
         groupID: String?,
         conversationID: String?,
         onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> UploadedMedia {
-        let data: Data
-        do {
-            data = try MediaVault.shared.data(for: media)
-        } catch {
-            throw MediaUploadError.missingFile
-        }
-        guard !data.isEmpty else { throw MediaUploadError.missingFile }
+        // Measured, not read. The only thing every path needs about the file up
+        // front is how big it is, and a video read into memory to find that out
+        // is a hundred megabytes of a phone's RAM spent on a number the file
+        // system already knows.
+        let size = (try? media.localURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        guard size > 0 else { throw MediaUploadError.missingFile }
 
         switch media.kind {
         case .image:
             return try await uploadImage(
-                data, media: media, senderID: senderID, groupID: groupID, onProgress: onProgress)
+                size: size, media: media, guid: guid, index: index,
+                senderID: senderID, groupID: groupID, onProgress: onProgress)
         case .video:
             return try await uploadVideo(
-                data, media: media, conversationID: conversationID, onProgress: onProgress)
+                media: media, guid: guid, index: index,
+                conversationID: conversationID, onProgress: onProgress)
+        }
+    }
+
+    // MARK: - Sending bytes
+
+    /// Every request that carries a file goes out this way.
+    ///
+    /// Through the background session, always, and not only when the app is on
+    /// its way out: a transfer that starts in the foreground and is still going
+    /// when the screen locks is exactly the one worth saving, and there is no
+    /// moment at which we could usefully have switched it over. The await here
+    /// is the ordinary case; the durable one is ``BackgroundUploads``.
+    private func sendFile(
+        _ request: URLRequest, from file: URL, job: UploadJob,
+        onProgress: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> Data {
+        do {
+            return try await BackgroundUploads.shared.send(
+                request, from: file, job: job, onProgress: onProgress)
+        } catch let urlError as URLError {
+            throw MediaUploadError.transport(urlError)
+        }
+    }
+
+    /// A multipart body around a file, written out without ever holding it.
+    ///
+    /// The envelope is a few dozen bytes and the file is the rest, so this
+    /// copies the file through in chunks rather than loading it to concatenate.
+    /// A minute of 4K video is a few hundred megabytes; the difference between
+    /// streaming it and holding it is the difference between an upload and a
+    /// memory warning.
+    private func stagedMultipart(
+        _ file: URL, boundary: String, filename: String, mimeType: String, for job: UploadJob
+    ) throws -> URL {
+        let directory = Self.stagingDirectory
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let staged = directory.appendingPathComponent("\(job.guid)-\(job.index)-\(job.step.rawValue)")
+        try? FileManager.default.removeItem(at: staged)
+        guard FileManager.default.createFile(atPath: staged.path, contents: nil) else {
+            throw MediaUploadError.missingFile
+        }
+
+        let out = try FileHandle(forWritingTo: staged)
+        defer { try? out.close() }
+        var prologue = Data()
+        prologue.append(Data("--\(boundary)\r\n".utf8))
+        prologue.append(Data(
+            "Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n".utf8))
+        prologue.append(Data("Content-Type: \(mimeType)\r\n\r\n".utf8))
+        try out.write(contentsOf: prologue)
+
+        let input = try FileHandle(forReadingFrom: file)
+        defer { try? input.close() }
+        while let chunk = try input.read(upToCount: 1 << 20), !chunk.isEmpty {
+            try out.write(contentsOf: chunk)
+        }
+        try out.write(contentsOf: Data("\r\n--\(boundary)--\r\n".utf8))
+        return staged
+    }
+
+
+    static let stagingDirectory = FileManager.default
+        .urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("uploads", isDirectory: true)
+
+    /// Throw away staged bodies nothing is using any more.
+    ///
+    /// A day, because a background transfer may legitimately still be queued
+    /// hours later on a connection the system is waiting for.
+    static func sweepStagedBodies(olderThan age: TimeInterval = 24 * 3_600) {
+        let manager = FileManager.default
+        guard let files = try? manager.contentsOfDirectory(
+            at: stagingDirectory, includingPropertiesForKeys: [.contentModificationDateKey])
+        else { return }
+        let cutoff = Date().addingTimeInterval(-age)
+        for file in files {
+            let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate
+            if let modified, modified > cutoff { continue }
+            try? manager.removeItem(at: file)
         }
     }
 
@@ -155,25 +244,28 @@ actor MediaUploadService {
     /// *retryable* v2 failure is not swallowed, though, because falling back on
     /// a dead radio would just fail twice and blame the wrong endpoint.
     private func uploadImage(
-        _ data: Data, media: PendingMedia, senderID: String?, groupID: String?,
+        size: Int, media: PendingMedia, guid: String, index: Int,
+        senderID: String?, groupID: String?,
         onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> UploadedMedia {
         if let senderID {
             do {
                 return try await uploadViaMediaV2(
-                    data, media: media, senderID: senderID, groupID: groupID,
+                    size: size, media: media, guid: guid, index: index,
+                    senderID: senderID, groupID: groupID,
                     onProgress: onProgress)
             } catch let error as MediaUploadError where !error.isRetryable && !error.needsCredentials {
                 log.notice("media v2 refused this image, trying the picture service")
             }
         }
-        return try await uploadToPictureService(data, media: media, onProgress: onProgress)
+        return try await uploadToPictureService(
+            media: media, guid: guid, index: index, onProgress: onProgress)
     }
 
     /// `POST https://image.groupme.com/pictures`, one multipart part named
     /// `file`. Returns `{ "payload": { "url": … } }`.
     private func uploadToPictureService(
-        _ data: Data, media: PendingMedia,
+        media: PendingMedia, guid: String, index: Int,
         onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> UploadedMedia {
         guard let token = await tokenProvider() else { throw MediaUploadError.unauthenticated }
@@ -185,13 +277,13 @@ actor MediaUploadService {
         let boundary = "gmn.\(UUID().uuidString)"
         request.setValue(
             "multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.httpBody = Self.multipartBody(
-            boundary: boundary,
-            filename: "file.\(media.fileExtension)",
-            mimeType: media.mimeType,
-            data: data)
+        let job = UploadJob(guid: guid, index: index, step: .pictureService)
+        let staged = try stagedMultipart(
+            media.localURL, boundary: boundary,
+            filename: "file.\(media.fileExtension)", mimeType: media.mimeType, for: job)
 
-        let body = try await perform(request, reporting: onProgress)
+        let body = try await sendFile(request, from: staged, job: job, onProgress: onProgress)
+        try? FileManager.default.removeItem(at: staged)
         guard let payload = try? JSONDecoder().decode(PictureResponse.self, from: body),
               let uploaded = payload.payload?.url, !uploaded.isEmpty
         else { throw MediaUploadError.malformed("image.groupme.com returned no url") }
@@ -200,26 +292,36 @@ actor MediaUploadService {
 
     /// Ask `m.groupme.com` for a pre-signed URL, then PUT the bytes at Azure.
     private func uploadViaMediaV2(
-        _ data: Data, media: PendingMedia, senderID: String, groupID: String?,
+        size: Int, media: PendingMedia, guid: String, index: Int,
+        senderID: String, groupID: String?,
         onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> UploadedMedia {
         let ticket = try await requestUploadURL(
-            data, media: media, senderID: senderID, groupID: groupID)
+            size: size, media: media, senderID: senderID, groupID: groupID)
         guard let target = URL(string: ticket.uploadUrl ?? ""),
               let render = ticket.renderUrl, !render.isEmpty
         else { throw MediaUploadError.malformed("m.groupme.com returned an incomplete ticket") }
 
         // The ticket is a few hundred bytes and the blob is the whole picture,
         // so the PUT is the only part of this path worth reporting on.
+        //
+        // It is also the one transfer whose answer we do not need: the ticket
+        // has already said what the file will be called, so the job carries the
+        // finished URL with it and a PUT that lands while the app is asleep is
+        // self-explaining.
         try await putToPresignedURL(
-            target, data: data, mimeType: media.mimeType, onProgress: onProgress)
+            target, file: media.localURL, mimeType: media.mimeType,
+            job: UploadJob(
+                guid: guid, index: index, step: .presignedPut,
+                renderURL: render, thumbnailURL: ticket.thumbnailUrl),
+            onProgress: onProgress)
         return UploadedMedia(url: render, previewURL: ticket.thumbnailUrl)
     }
 
     /// `POST https://m.groupme.com/uploads`. Retried twice on 5xx and nothing
     /// else, which is the rule the service documents.
     private func requestUploadURL(
-        _ data: Data, media: PendingMedia, senderID: String, groupID: String?
+        size: Int, media: PendingMedia, senderID: String, groupID: String?
     ) async throws -> UploadTicket {
         guard let token = await tokenProvider() else { throw MediaUploadError.unauthenticated }
 
@@ -232,7 +334,7 @@ actor MediaUploadService {
             extension: media.fileExtension,
             senderId: senderID,
             // A string, not a number. The service is picky about it.
-            fileSize: String(data.count),
+            fileSize: String(size),
             width: media.width,
             height: media.height,
             groupId: groupID))
@@ -265,15 +367,16 @@ actor MediaUploadService {
     /// that has no business holding it. `x-ms-blob-type` is Azure's, and the
     /// PUT is rejected without it.
     private func putToPresignedURL(
-        _ url: URL, data: Data, mimeType: String,
+        _ url: URL, file: URL, mimeType: String, job: UploadJob,
         onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws {
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         request.setValue(mimeType, forHTTPHeaderField: "Content-Type")
         request.setValue("BlockBlob", forHTTPHeaderField: "x-ms-blob-type")
-        request.httpBody = data
-        _ = try await perform(request, reporting: onProgress)
+        // Straight from the vault. The file is already on disk and already the
+        // exact bytes to send, so there is nothing to stage.
+        _ = try await sendFile(request, from: file, job: job, onProgress: onProgress)
     }
 
     // MARK: - Video
@@ -281,10 +384,18 @@ actor MediaUploadService {
     /// Post to the transcoder, then poll until it says done, fails, or the
     /// deadline passes.
     private func uploadVideo(
-        _ data: Data, media: PendingMedia, conversationID: String?,
+        media: PendingMedia, guid: String, index: Int, conversationID: String?,
         onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> UploadedMedia {
         guard let token = await tokenProvider() else { throw MediaUploadError.unauthenticated }
+
+        // Already handed to the transcoder on some earlier attempt. Pushing the
+        // file again would be uploading a video twice to ask the same question.
+        if let existing = media.transcodeStatusUrl.flatMap(URL.init(string:)) {
+            onProgress?(1)
+            return try await pollTranscode(existing, token: token)
+        }
+
         guard let conversationID, !conversationID.isEmpty else {
             throw MediaUploadError.rejected(
                 status: nil, detail: "the transcoder requires a conversation id")
@@ -297,13 +408,13 @@ actor MediaUploadService {
         let boundary = "gmn.\(UUID().uuidString)"
         request.setValue(
             "multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.httpBody = Self.multipartBody(
-            boundary: boundary,
-            filename: "file.\(media.fileExtension)",
-            mimeType: media.mimeType,
-            data: data)
+        let job = UploadJob(guid: guid, index: index, step: .transcode)
+        let staged = try stagedMultipart(
+            media.localURL, boundary: boundary,
+            filename: "file.\(media.fileExtension)", mimeType: media.mimeType, for: job)
 
-        let body = try await perform(request, reporting: onProgress)
+        let body = try await sendFile(request, from: staged, job: job, onProgress: onProgress)
+        try? FileManager.default.removeItem(at: staged)
         guard let started = try? JSONDecoder().decode(TranscodeStart.self, from: body),
               let statusURL = started.status_url.flatMap(URL.init(string:))
         else { throw MediaUploadError.malformed("the transcoder returned no status url") }
@@ -372,19 +483,13 @@ actor MediaUploadService {
     /// is watching. The two do the same thing on the wire; only the upload form
     /// takes a per-task delegate, and that delegate is the only way URLSession
     /// will say how many bytes have actually left the phone.
-    private func perform(
-        _ request: URLRequest, reporting progress: (@Sendable (Double) -> Void)? = nil
-    ) async throws -> Data {
+    /// The small requests: the ticket, and the transcode polls. Anything
+    /// carrying a file goes through ``sendFile(_:from:job:onProgress:)``
+    /// instead, which is a different session for a different reason.
+    private func perform(_ request: URLRequest) async throws -> Data {
         let data: Data, response: URLResponse
         do {
-            if let progress, let body = request.httpBody {
-                var request = request
-                request.httpBody = nil
-                (data, response) = try await session.upload(
-                    for: request, from: body, delegate: UploadProgressDelegate(progress))
-            } else {
-                (data, response) = try await session.data(for: request)
-            }
+            (data, response) = try await session.data(for: request)
         } catch let urlError as URLError {
             throw MediaUploadError.transport(urlError)
         }
@@ -411,20 +516,6 @@ actor MediaUploadService {
         }
     }
 
-    /// A one-part `multipart/form-data` body. Both the picture service and the
-    /// transcoder want exactly this and nothing more.
-    private static func multipartBody(
-        boundary: String, filename: String, mimeType: String, data: Data
-    ) -> Data {
-        var body = Data()
-        body.append(Data("--\(boundary)\r\n".utf8))
-        body.append(Data(
-            "Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n".utf8))
-        body.append(Data("Content-Type: \(mimeType)\r\n\r\n".utf8))
-        body.append(data)
-        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
-        return body
-    }
 
     // MARK: - Wire shapes
 
@@ -463,25 +554,3 @@ actor MediaUploadService {
     }
 }
 
-/// The only way `URLSession` will say how much of a body has gone out.
-///
-/// A per-task delegate, so it lives exactly as long as the one upload it
-/// watches. `@unchecked Sendable` because it holds nothing mutable: the closure
-/// is `@Sendable` and the delegate is called on the session's own queue.
-private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    private let report: @Sendable (Double) -> Void
-
-    init(_ report: @escaping @Sendable (Double) -> Void) {
-        self.report = report
-    }
-
-    func urlSession(
-        _ session: URLSession, task: URLSessionTask,
-        didSendBodyData bytesSent: Int64,
-        totalBytesSent: Int64, totalBytesExpectedToSend: Int64
-    ) {
-        // `-1` means the length is unknown, which is not a fraction of anything.
-        guard totalBytesExpectedToSend > 0 else { return }
-        report(min(Double(totalBytesSent) / Double(totalBytesExpectedToSend), 1))
-    }
-}

@@ -38,6 +38,15 @@ nonisolated struct PendingMedia: Codable, Hashable, Sendable, Identifiable {
     var uploadedUrl: String?
     /// The transcoder's thumbnail, for video.
     var uploadedPreviewUrl: String?
+    /// Where the transcoder is reporting on this video, once it has been given
+    /// one to work on.
+    ///
+    /// Kept because posting a video and waiting for it are two different
+    /// waits, and only the first is worth doing twice. A send interrupted
+    /// during the wait — the app suspended, the phone locked, the transcoder
+    /// simply slow — resumes by asking this URL how the job is getting on,
+    /// rather than pushing the whole file up the wire again.
+    var transcodeStatusUrl: String?
 
     var isUploaded: Bool { uploadedUrl != nil }
 
