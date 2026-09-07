@@ -18,9 +18,15 @@ struct ConversationListView: View {
     /// Groups whose topics are showing, by group id. Not persisted: which
     /// branches of a list are open is the shape of one visit to it.
     @State private var isRequestsPresented = false
-    /// The tile a long press landed on, named in the sheet that follows so
-    /// there is no doubt which one is about to change.
-    @State private var pinTarget: ConversationRow?
+    /// The tile a long press landed on, and where it was, so the menu stands
+    /// beside the pin rather than in the middle of the screen.
+    @State private var pinPress: PinPress?
+
+    nonisolated struct PinPress: Identifiable {
+        var row: ConversationRow
+        var frame: CGRect
+        var id: String { row.id.storageKey }
+    }
     @State private var isNewConversationPresented = false
     /// The width one pin gets, worked out from the grid rather than guessed.
     @State private var tileSize: CGFloat = 96
@@ -67,34 +73,7 @@ struct ConversationListView: View {
                         path.append(.chat(row))
                     }
                 }
-                .confirmationDialog(
-                    pinTarget?.name ?? "",
-                    isPresented: .init(
-                        get: { pinTarget != nil },
-                        set: { if !$0 { pinTarget = nil } }
-                    ),
-                    titleVisibility: .visible
-                ) {
-                    if let target = pinTarget {
-                        // Resolved against the live list: the target is a
-                        // snapshot taken when the press landed, and a mute
-                        // toggled a moment ago would otherwise offer to be
-                        // toggled the same way twice.
-                        let row = live(target)
-                        let key = row.id.storageKey
-                        let isPinned = settings.isPinned(key)
-                        Button(isPinned ? "Unpin" : "Pin") {
-                            withAnimation(.snappy(duration: 0.25)) { settings.togglePin(key) }
-                            pinTarget = nil
-                        }
-                        .disabled(!isPinned && !settings.canPinMore)
-                        Button(row.isMuted ? "Unmute" : "Mute") {
-                            Task { await model.setMuted(!row.isMuted, for: row.id) }
-                            pinTarget = nil
-                        }
-                        Button("Cancel", role: .cancel) { pinTarget = nil }
-                    }
-                }
+                .overlay { pinActions }
         }
     }
 
@@ -201,6 +180,50 @@ struct ConversationListView: View {
         .disabled(!isPinned && !settings.canPinMore)
     }
 
+    /// The menu a held pin opens.
+    ///
+    /// The same overlay a pressed message gets, which is the point: one dim, one
+    /// card, one way of asking. A `confirmationDialog` was here before and it is
+    /// the wrong instrument — the system draws it in the middle of the screen
+    /// with nothing to say which of nine faces it belongs to, which for a grid
+    /// of near-identical circles is most of the question.
+    @ViewBuilder private var pinActions: some View {
+        ZStack {
+            if let press = pinPress {
+                let row = live(press.row)
+                MessageActionsOverlay(
+                    anchor: press.frame,
+                    actions: pinMenu(for: row),
+                    // A face is a circle, so the hole it sits in is one too.
+                    anchorRadius: press.frame.height / 2,
+                    onDismiss: { pinPress = nil })
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.18), value: pinPress?.id)
+    }
+
+    private func pinMenu(for row: ConversationRow) -> [MessageAction] {
+        let key = row.id.storageKey
+        let isPinned = settings.isPinned(key)
+        return [
+            MessageAction(
+                isPinned ? "Unpin" : "Pin",
+                symbol: isPinned ? "pin.slash.fill" : "pin.fill"
+            ) {
+                pinPress = nil
+                withAnimation(.snappy(duration: 0.25)) { settings.togglePin(key) }
+            },
+            MessageAction(
+                row.isMuted ? "Unmute" : "Mute",
+                symbol: row.isMuted ? "bell.fill" : "bell.slash.fill"
+            ) {
+                pinPress = nil
+                Task { await model.setMuted(!row.isMuted, for: row.id) }
+            },
+        ]
+    }
+
     /// Mute, in the three places it is offered: the swipe, the row's menu, and
     /// the sheet a held pin opens. One builder rather than three spellings, so
     /// the word and the bell always agree about which way round they are.
@@ -290,7 +313,8 @@ struct ConversationListView: View {
             unread: unreadTotal(for: row),
             size: tileSize,
             topics: topics(of: row),
-            onLongPress: { pinTarget = row }
+            onLongPress: { pinPress = PinPress(row: row, frame: $0) },
+            isHeld: pinPress?.id == row.id.storageKey
         ) {
             path.append(destination(for: row))
         }
@@ -724,7 +748,10 @@ struct ConversationTile: View {
     /// and the row here is the whole grid: holding one tile offered a menu for
     /// all of them at once. An explicit gesture on the tile is attached to the
     /// tile, which is the only thing that reliably is.
-    var onLongPress: (() -> Void)?
+    var onLongPress: ((CGRect) -> Void)?
+    /// True while this tile's menu is the one on screen. It keeps its lift for
+    /// as long as the menu is up, which is what says the menu is about *it*.
+    var isHeld: Bool = false
     let action: () -> Void
 
     /// True while a finger is down, which is the tile's half of the bargain: a
@@ -734,6 +761,10 @@ struct ConversationTile: View {
     /// Bumped when the press succeeds, so the tap that follows knows it has
     /// already been spoken for, and so the haptic has something to fire on.
     @State private var pressCount = 0
+    /// Where this tile is on screen, so the menu can be put beside it rather
+    /// than in the middle of the screen. The same trick the transcript uses for
+    /// a pressed message; see ``MessageActionsOverlay``.
+    @State private var frame: CGRect = .zero
 
     var body: some View {
         content
@@ -744,9 +775,10 @@ struct ConversationTile: View {
             // which one happened: held, and the tap never fires.
             .contentShape(.rect)
             .onTapGesture(perform: action)
+            .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { frame = $0 }
             .onLongPressGesture(minimumDuration: 0.35) {
                 pressCount += 1
-                onLongPress?()
+                onLongPress?(frame)
             } onPressingChanged: { pressing in
                 withAnimation(.snappy(duration: 0.18)) { isPressed = pressing }
             }
@@ -776,11 +808,10 @@ struct ConversationTile: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
-        // The lift a held tile gets in place of the system's. Smaller and
-        // slightly faded rather than swollen: the tile stays inside its column,
-        // so nothing under it moves while the finger is down.
-        .scaleEffect(isPressed ? 0.93 : 1)
-        .opacity(isPressed ? 0.75 : 1)
+        // Down under the finger, up once the menu is up: the same two beats a
+        // list row gets from the system, which presses in and then lifts out.
+        .scaleEffect(isHeld ? 1.08 : (isPressed ? 0.93 : 1))
+        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: isHeld)
     }
 
     /// One picture, or the whole group in one.

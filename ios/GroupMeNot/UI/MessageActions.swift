@@ -18,7 +18,7 @@ nonisolated struct MessageAction: Identifiable {
 }
 
 /// What a long press puts on screen: a floating row of reactions above the
-/// message, and a menu card below it.
+/// thing pressed, and a menu card below it.
 ///
 /// Two separate pieces rather than one popover, which is the shape Messages
 /// uses and the reason it reads so well: the bubble stays exactly where it was,
@@ -31,14 +31,19 @@ nonisolated struct MessageAction: Identifiable {
 struct MessageActionsOverlay: View {
     /// The pressed row's frame, in global coordinates.
     let anchor: CGRect
-    /// The five glyphs the quick row offers.
-    let glyphs: [String]
+    /// The five glyphs the quick row offers. Empty for anything that is not a
+    /// message: a pinned conversation is held for the same reason and wants the
+    /// same dim, the same lift and the same card, and none of the reactions.
+    var glyphs: [String] = []
     /// The glyph this user already holds, drawn as selected. Picking it again
     /// clears the reaction.
-    let selected: String?
+    var selected: String?
     let actions: [MessageAction]
-    var onPick: (String) -> Void
-    var onMore: () -> Void
+    /// How round the undimmed hole is. A bubble's radius by default; a face
+    /// wants its own.
+    var anchorRadius: CGFloat = 22
+    var onPick: (String) -> Void = { _ in }
+    var onMore: () -> Void = {}
     var onDismiss: () -> Void
 
     @ScaledMetric(relativeTo: .title2) private var glyphSlot: CGFloat = 38
@@ -60,11 +65,13 @@ struct MessageActionsOverlay: View {
             ZStack(alignment: .topLeading) {
                 backdrop(in: geo)
 
-                pill
-                    .onGeometryChange(for: CGSize.self, of: \.size) { pillSize = $0 }
-                    .position(
-                        x: clampedX(pillSize.width, in: geo),
-                        y: pillY(in: geo))
+                if !glyphs.isEmpty {
+                    pill
+                        .onGeometryChange(for: CGSize.self, of: \.size) { pillSize = $0 }
+                        .position(
+                            x: clampedX(pillSize.width, in: geo),
+                            y: pillY(in: geo))
+                }
 
                 if !actions.isEmpty {
                     card
@@ -98,7 +105,7 @@ struct MessageActionsOverlay: View {
             path.addRect(CGRect(origin: .zero, size: geo.size))
             path.addRoundedRect(
                 in: anchor.insetBy(dx: -Self.halo, dy: -Self.halo),
-                cornerSize: CGSize(width: 22, height: 22),
+                cornerSize: CGSize(width: anchorRadius, height: anchorRadius),
                 style: .continuous)
         }
         .fill(.black.opacity(0.28), style: FillStyle(eoFill: true))
