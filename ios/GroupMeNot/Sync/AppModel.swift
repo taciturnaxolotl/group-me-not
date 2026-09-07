@@ -82,6 +82,33 @@ final class AppModel {
     /// Expired entries are swept on each new event; see `PushEvent.Typing.expiry`.
     private(set) var typingUserIDs: [String: Date] = [:]
 
+    /// Whether the other person in the open DM is about, or nil while nobody has
+    /// asked yet. Held rather than stored: a status is minutes old at best, so
+    /// keeping one across launches would only mean showing a stale dot on the
+    /// first frame.
+    private(set) var partnerPresence: Presence?
+
+    /// Whether to tell GroupMe when *we* are about.
+    ///
+    /// Off unless asked for, and that is the deliberate default. Reading
+    /// somebody's status costs them nothing; broadcasting our own is a change to
+    /// what other people see, and it is not one to make on their behalf because
+    /// they wanted a dot next to a name.
+    ///
+    /// Set from the preference, which is where a person chooses. Turning it off
+    /// says so once, so a client that simply stops talking is not left looking
+    /// like a client that is still listening.
+    var sharesPresence = false {
+        didSet {
+            guard sharesPresence != oldValue, isSignedIn else { return }
+            if sharesPresence {
+                publishPresence(.online)
+            } else {
+                publishPresence(.offline, manual: true)
+            }
+        }
+    }
+
     /// Network and socket state, for the offline banner.
     let realtime = RealtimeMonitor()
 
@@ -155,6 +182,9 @@ final class AppModel {
     /// server never replaces cannot spin the catch-up forever.
     @ObservationIgnored private var attemptedHeals: Set<String> = []
     @ObservationIgnored private var typingSweep: Task<Void, Never>?
+    /// When we last told the server we are here, so the heartbeat can run at
+    /// GroupMe's three minutes rather than at whatever the sync happens to use.
+    @ObservationIgnored private var presencePublishedAt: Date?
 
     /// Where the signed-in user is remembered between launches. Small enough for
     /// defaults, and needed before the first request: DM routes are addressed
@@ -259,6 +289,8 @@ final class AppModel {
         // lately, so it is asked.
         await bayeux.reconnectIfStale()
         startHeartbeat()
+        publishPresence(.online)
+        refreshPartnerPresence()
         await sync.sync(reason: .foreground)
     }
 
@@ -267,6 +299,10 @@ final class AppModel {
     func backgrounded() {
         heartbeat?.cancel()
         heartbeat = nil
+        // The last thing said before going quiet. Without it the status decays
+        // to offline on its own, which takes longer and reads as having left
+        // rather than as having put the phone down.
+        publishPresence(.away)
     }
 
     /// How often the app syncs on its own while somebody is looking at it.
@@ -295,7 +331,46 @@ final class AppModel {
 
     private func beat() async {
         guard isSignedIn, realtime.reachability != .offline else { return }
+        publishPresence(.online)
+        refreshPartnerPresence()
         await sync.sync(reason: .heartbeat)
+    }
+
+    // MARK: - Presence
+
+    /// GroupMe's own heartbeat interval. The sync beats more often than this, so
+    /// the interval is kept here rather than borrowed from there.
+    private static let presenceInterval: TimeInterval = 180
+
+    /// Tell the server where we are, at most every three minutes.
+    ///
+    /// Started rather than awaited everywhere it is called: nothing on screen
+    /// depends on it, and a status is not worth holding a foreground up for.
+    private func publishPresence(_ status: Presence.Status, manual: Bool = false) {
+        guard sharesPresence, isSignedIn else { return }
+        if status == .online, let last = presencePublishedAt,
+            Date().timeIntervalSince(last) < Self.presenceInterval {
+            return
+        }
+        presencePublishedAt = status == .online ? Date() : nil
+        Task { [api] in try? await api.publishPresence(status, manual: manual) }
+    }
+
+    /// Fetch the status of whoever is on the other end of the open DM.
+    ///
+    /// A group has no single answer, so it has none here. `GET
+    /// /v1/presence/groups/{id}/members` exists and would light up a roster, but
+    /// a roster is not what a conversation header has room for.
+    private func refreshPartnerPresence() {
+        guard case .direct(let otherUserID)? = openConversationID else { return }
+        Task { [api] in
+            guard let found = try? await api.presence(of: otherUserID) else { return }
+            // Still the same conversation. A fetch that lands after the reader
+            // has moved on would otherwise put one person's dot on another
+            // person's name.
+            guard case .direct(otherUserID)? = self.openConversationID else { return }
+            self.partnerPresence = found
+        }
     }
 
     /// Pull to refresh.
@@ -333,6 +408,9 @@ final class AppModel {
         typingSweep?.cancel()
         typingUserIDs = [:]
 
+        partnerPresence = nil
+        refreshPartnerPresence()
+
         messages = await transcript(conversation) ?? []
         outbox = await sends.pending(in: conversation)
         members = (try? await store.conversations.members(of: conversation)) ?? []
@@ -365,6 +443,7 @@ final class AppModel {
         typingSweep?.cancel()
         typingSweep = nil
         openConversationID = nil
+        partnerPresence = nil
         messages = []
         outbox = []
         members = []

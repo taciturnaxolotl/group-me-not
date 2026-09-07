@@ -51,6 +51,7 @@ final class AppSettings {
     private enum Key {
         static let ownMessageAlignment = "sh.dunkirk.GroupMeNot.settings.ownMessageAlignment"
         static let pinned = "sh.dunkirk.GroupMeNot.settings.pinnedConversations"
+        static let sharesPresence = "sh.dunkirk.GroupMeNot.settings.sharesPresence"
     }
 
     /// Conversations kept at the top of the list, by storage key.
@@ -82,6 +83,19 @@ final class AppSettings {
         }
     }
 
+    /// Whether to tell GroupMe when you are here.
+    ///
+    /// Off by default, which is the only defensible default for a switch that
+    /// changes what other people see. Reading somebody's status is between you
+    /// and the server; publishing your own puts a green dot next to your name on
+    /// every phone that knows you.
+    var sharesPresence: Bool {
+        didSet {
+            guard sharesPresence != oldValue else { return }
+            defaults.set(sharesPresence, forKey: Key.sharesPresence)
+        }
+    }
+
     var ownMessageAlignment: OwnMessageAlignment {
         didSet {
             guard ownMessageAlignment != oldValue else { return }
@@ -98,5 +112,6 @@ final class AppSettings {
         self.ownMessageAlignment = defaults.string(forKey: Key.ownMessageAlignment)
             .flatMap(OwnMessageAlignment.init(rawValue:)) ?? .sided
         self.pinned = defaults.stringArray(forKey: Key.pinned) ?? []
+        self.sharesPresence = defaults.bool(forKey: Key.sharesPresence)
     }
 }

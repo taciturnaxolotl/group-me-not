@@ -723,6 +723,37 @@ actor GroupMeAPI {
         }
     }
 
+    // MARK: - Presence
+
+    /// What somebody's status is right now.
+    ///
+    /// `retry: .background` on purpose. Nobody is waiting on this and a status
+    /// that arrives late is a status that has changed anyway, so a failure is
+    /// worth one quiet attempt and no more.
+    func presence(of userID: String) async throws -> Presence {
+        try await client.get(
+            .v1, "/presence/users/\(userID)", enveloped: false, retry: .background)
+    }
+
+    /// Say where *we* are.
+    ///
+    /// The heartbeat sends `online` every few minutes while somebody is looking
+    /// at the app, and `away` when they stop. A status the user picked is sent
+    /// with `manual`, which is what stops the next heartbeat overwriting it.
+    ///
+    /// A 200 with an empty body is a yes, not a failure: this route answers with
+    /// whatever it likes and the caller has nothing to read.
+    func publishPresence(_ status: Presence.Status, manual: Bool = false) async throws {
+        do {
+            try await client.putIgnoringResponse(
+                .v1, "/presence/status",
+                body: PresenceUpdate(status: status.apiValue, manual: manual ? true : nil),
+                retry: .background)
+        } catch APIError.noContent {
+            return
+        }
+    }
+
     /// One message by id, for a quote whose original is out of the loaded
     /// window.
     ///

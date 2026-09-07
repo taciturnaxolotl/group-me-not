@@ -22,6 +22,7 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 appearance
+                presence
                 account
                 storage
                 about
@@ -88,6 +89,18 @@ struct SettingsView: View {
             Text("Appearance")
         } footer: {
             Text(settings.ownMessageAlignment.detail)
+        }
+    }
+
+    private var presence: some View {
+        Section {
+            @Bindable var settings = settings
+            Toggle("Share When You're Online", isOn: $settings.sharesPresence)
+        } header: {
+            Text("Presence")
+        } footer: {
+            Text("Lets other people see a status beside your name while you have "
+                 + "GroupMeNot open. You can see theirs either way.")
         }
     }
 

@@ -25,6 +25,11 @@ struct GroupMeNotApp: App {
                 .onChange(of: model.totalUnread, initial: true) { _, count in
                     Task { await Notifier.shared.setBadge(count) }
                 }
+                // The preference lives with the other preferences; acting on
+                // it is the model's business. This is the one wire between them.
+                .onChange(of: settings.sharesPresence, initial: true) { _, shares in
+                    model.sharesPresence = shares
+                }
                 .onChange(of: scenePhase) { _, phase in
                     // Faye replays nothing it missed, so coming back from the
                     // background means running the whole catch-up loop again.

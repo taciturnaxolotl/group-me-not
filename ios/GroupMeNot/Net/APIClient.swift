@@ -45,15 +45,21 @@ actor APIClient {
     ///   dictionary cannot spell. GroupMe's `include` is the one that needs it:
     ///   the group index sends `&include=visibility&include=locations`, and a
     ///   builder that silently kept only the last value would drop half of it.
+    ///
+    /// - Parameter enveloped: whether the answer is wrapped in GroupMe's
+    ///   `{response, meta}`. Almost everything is. The v1 presence routes are
+    ///   not, and reading one of those through the envelope finds no `response`
+    ///   and reports a decoding failure over a perfectly good body.
     func get<T: Decodable & Sendable>(
         _ host: Host, _ path: String,
         query: [String: String?] = [:],
         repeating: [String: [String]] = [:],
+        enveloped: Bool = true,
         retry: RetryPolicy = .interactive
     ) async throws -> T {
         try await send(
             host, path, method: "GET", query: query, repeating: repeating,
-            body: Optional<Empty>.none, retry: retry)
+            body: Optional<Empty>.none, retry: retry, unwrap: enveloped)
     }
 
     @discardableResult
