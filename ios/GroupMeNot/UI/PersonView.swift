@@ -64,6 +64,18 @@ struct PersonView: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+        // Stated, rather than left to the system.
+        //
+        // A sheet with no background of its own is drawn on the presentation's
+        // material, and that material is not one thing: it is translucent while
+        // the sheet is on its way up and opaque once it has settled, and the
+        // swap happens a beat after the dimming behind it has finished. On a
+        // `Form` or a `List` nobody sees it, because those paint their own
+        // ground on the first frame. This sheet is a plain stack, so the swap
+        // is the whole background of the thing changing colour in front of you.
+        //
+        // One colour from the first frame has nothing to swap to.
+        .presentationBackground(Color(.systemBackground))
         .scrollBounceBehavior(.basedOnSize)
         .task {
             person = await model.person(userID, named: name, avatarURL: avatarURL)
@@ -174,16 +186,30 @@ struct PersonView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            HStack(spacing: 8) {
-                ForEach(sharedGroups.prefix(Self.facesShown)) { group in
-                    Avatar(url: group.avatarURL, name: group.name, size: 48, isGroup: true)
+            // Overlapped, and capped at five plus a count. A row of faces
+            // shoulder to shoulder reads as a set — these belong together —
+            // where evenly spaced circles read as a list that ran out of room.
+            // The ring is the background colour cut into each face, which is
+            // what stops the pile from becoming a smear.
+            HStack(spacing: -Self.faceOverlap) {
+                ForEach(Array(shownFaces.enumerated()), id: \.element.id) { index, group in
+                    Avatar(url: group.avatarURL, name: group.name, size: Self.faceSize, isGroup: true)
+                        .overlay {
+                            Circle().strokeBorder(Color(.systemBackground), lineWidth: 2)
+                        }
+                        // First on top, so the pile reads left to right the way
+                        // the sentence above it does.
+                        .zIndex(Double(shownFaces.count - index))
                 }
                 if let extra = overflow {
                     Text("+\(extra)")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.secondary)
-                        .frame(width: 48, height: 48)
+                        .frame(width: Self.faceSize, height: Self.faceSize)
                         .background(.quaternary, in: .circle)
+                        .overlay {
+                            Circle().strokeBorder(Color(.systemBackground), lineWidth: 2)
+                        }
                 }
             }
         }
@@ -191,7 +217,17 @@ struct PersonView: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// Five faces and then a number. Past that they are too small to be
+    /// pictures of anything, and the count says the rest.
     private static let facesShown = 5
+    private static let faceSize: CGFloat = 48
+    /// How far each face sits over the one before it. A third of a face: enough
+    /// to read as a pile, not so much that they stop being recognisable.
+    private static let faceOverlap: CGFloat = 16
+
+    private var shownFaces: [SharedGroup] {
+        Array(sharedGroups.prefix(Self.facesShown))
+    }
 
     private var overflow: Int? {
         let count = person?.sharedGroups.count ?? 0
@@ -337,6 +373,7 @@ private struct SharedGroupsView: View {
             }
         }
         .presentationDetents([.medium, .large])
+        .presentationBackground(Color(.systemBackground))
     }
 }
 
