@@ -2070,10 +2070,11 @@ private struct TypingIndicator: View {
         }
         .padding(.horizontal, 2)
         .padding(.top, 4)
-        // Clearance from the composer. The bar insets the transcript, but the
-        // soft scroll edge dissolves the last stretch of content into it, and a
-        // bubble of dots is small enough to be dissolved entirely.
-        .padding(.bottom, 14)
+        // Enough clearance that the soft scroll edge does not dissolve a bubble
+        // this small into the composer, and no more: the foot of the transcript
+        // already carries room of its own, and stacking a second gap on top of
+        // it left the dots floating well above the bar they belong under.
+        .padding(.bottom, 4)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(sentence)
     }
