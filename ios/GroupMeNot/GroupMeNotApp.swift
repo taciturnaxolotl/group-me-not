@@ -14,7 +14,18 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         handleEventsForBackgroundURLSession identifier: String,
         completionHandler: @escaping () -> Void
     ) {
-        Task { await BackgroundUploads.shared.adoptLaunchEvents(completionHandler) }
+        // UIKit hands this over as a plain closure with no `Sendable` promise,
+        // and it has to travel to an actor and back to be called. The promise it
+        // does make is the one that matters: call it once, on the main thread,
+        // when the answers have been dealt with. `nonisolated(unsafe)` is that
+        // statement in the language's own words rather than a cast that hides
+        // it — and the hop back to `@MainActor` is what makes it true.
+        nonisolated(unsafe) let handler = completionHandler
+        Task {
+            await BackgroundUploads.shared.adoptLaunchEvents {
+                Task { @MainActor in handler() }
+            }
+        }
     }
 }
 
