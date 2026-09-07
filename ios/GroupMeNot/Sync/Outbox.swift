@@ -168,11 +168,19 @@ actor Outbox {
             await draining.value
             return
         }
+        // Claimed around the whole drain, not around each request. A queue of
+        // three photos that is interrupted between two of them is interrupted
+        // just the same; the point is to keep going until the queue is empty or
+        // the system says stop.
+        await BackgroundTime.begin(Self.backgroundTimeName)
         let task = Task { await performDrain() }
         draining = task
         await task.value
         draining = nil
+        await BackgroundTime.end(Self.backgroundTimeName)
     }
+
+    private static let backgroundTimeName = "sh.dunkirk.GroupMeNot.send" 
 
     /// The network came back. Anything sitting out a backoff sized for a network
     /// that no longer exists gets its wait cancelled, and then we send.
@@ -279,6 +287,11 @@ actor Outbox {
         }
     }
 
+    /// How many attachments of one message go up at once. Two is the whole of
+    /// the reasoning: it halves the wait for a photo set without turning a
+    /// message into a burst that a media service is entitled to throttle.
+    private static let uploadConcurrency = 2
+
     /// Push every attachment that has not been pushed, and hand back the entry
     /// with its URLs filled in.
     ///
@@ -299,30 +312,60 @@ actor Outbox {
         // photographs. Attachments already uploaded count as whole, which is
         // what makes a resumed send pick up where the ring left off.
         let total = Double(entry.media.count)
-        let done = { Double(entry.media.count(where: \.isUploaded)) }
         let guid = entry.id
         let report = progressHook
+        let progress = UploadProgress(
+            finished: entry.media.count(where: \.isUploaded), total: entry.media.count)
 
-        for index in entry.media.indices where !entry.media[index].isUploaded {
-            let base = done()
-            let uploaded = try await uploads.upload(
-                entry.media[index],
-                senderID: senderID,
-                groupID: groupID,
-                conversationID: conversationID,
-                onProgress: { fraction in
-                    guard total > 0 else { return }
-                    report?(guid, min((base + fraction) / total, 1))
-                })
-            entry.media[index].uploadedUrl = uploaded.url
-            entry.media[index].uploadedPreviewUrl =
-                uploaded.previewURL ?? entry.media[index].uploadedPreviewUrl
-            try? await store.outbox.setMedia(entry.media, for: entry.id)
-            progressHook?(entry.id, min(done() / total, 1))
-            // The bubble picks up the real URL as soon as the row does, which
-            // is what makes a slow send show its photo arriving rather than
-            // sitting there looking stuck.
-            continuation.yield(entry.conversation)
+        let waiting = entry.media.indices.filter { !entry.media[$0].isUploaded }
+
+        // A few at a time rather than one after another.
+        //
+        // Three photos used to go up strictly in turn, so the message took as
+        // long as the sum of them and a slow first file held two finished ones
+        // behind it. They are independent uploads to a service that is happy to
+        // take them at once; what they are not is unlimited, hence the window.
+        //
+        // Each result is still written to disk the moment it lands, in whatever
+        // order they land in, so a send interrupted halfway resumes with exactly
+        // the ones that finished.
+        try await withThrowingTaskGroup(of: (Int, UploadedMedia).self) { group in
+            var next = 0
+            func start(_ index: Int) {
+                let media = entry.media[index]
+                group.addTask { [uploads] in
+                    let uploaded = try await uploads.upload(
+                        media,
+                        senderID: senderID,
+                        groupID: groupID,
+                        conversationID: conversationID,
+                        onProgress: { fraction in
+                            guard total > 0 else { return }
+                            report?(guid, progress.report(index, at: fraction))
+                        })
+                    return (index, uploaded)
+                }
+            }
+
+            while next < min(Self.uploadConcurrency, waiting.count) {
+                start(waiting[next])
+                next += 1
+            }
+            while let (index, uploaded) = try await group.next() {
+                entry.media[index].uploadedUrl = uploaded.url
+                entry.media[index].uploadedPreviewUrl =
+                    uploaded.previewURL ?? entry.media[index].uploadedPreviewUrl
+                try? await store.outbox.setMedia(entry.media, for: entry.id)
+                progressHook?(entry.id, progress.finish(index))
+                // The bubble picks up the real URL as soon as the row does,
+                // which is what makes a slow send show its photo arriving
+                // rather than sitting there looking stuck.
+                continuation.yield(entry.conversation)
+                if next < waiting.count {
+                    start(waiting[next])
+                    next += 1
+                }
+            }
         }
         return entry
     }
@@ -453,3 +496,46 @@ actor Outbox {
         }
     }
 }
+
+/// How far a message's attachments have got, across uploads running at once.
+///
+/// A tally rather than arithmetic at the call site, because with two files in
+/// the air the fraction is a sum: what has finished, plus how far each of the
+/// ones still going has got. A lock because the callbacks arrive off whatever
+/// thread the transfer is on, often.
+nonisolated private final class UploadProgress: @unchecked Sendable {
+    private let lock = NSLock()
+    private var finished: Int
+    private let total: Int
+    private var inFlight: [Int: Double] = [:]
+
+    init(finished: Int, total: Int) {
+        self.finished = finished
+        self.total = total
+    }
+
+    func report(_ index: Int, at fraction: Double) -> Double {
+        lock.lock()
+        inFlight[index] = fraction
+        let value = combined()
+        lock.unlock()
+        return value
+    }
+
+    func finish(_ index: Int) -> Double {
+        lock.lock()
+        inFlight[index] = nil
+        finished += 1
+        let value = combined()
+        lock.unlock()
+        return value
+    }
+
+    /// Called under the lock.
+    private func combined() -> Double {
+        guard total > 0 else { return 1 }
+        let partial = inFlight.values.reduce(0, +)
+        return min((Double(finished) + partial) / Double(total), 1)
+    }
+}
+

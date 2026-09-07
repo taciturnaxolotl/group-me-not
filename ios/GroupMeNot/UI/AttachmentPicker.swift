@@ -97,10 +97,24 @@ private struct AttachmentPickerModifier: ViewModifier {
 nonisolated enum MediaLoader {
     private static let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "picker")
 
-    /// The longest edge we will upload. Bigger than any screen it will be shown
-    /// on, small enough that a modern camera's 12-megapixel output stops being a
-    /// twelve-megabyte upload over a cell connection.
-    static let maxImageEdge: CGFloat = 4096
+    /// The longest edge we will upload.
+    ///
+    /// 4096 was here first and it is the wrong trade. A phone camera's output is
+    /// already under it, so nothing was being scaled at all: a photo went up at
+    /// full size, four or five megabytes of it, over whatever connection
+    /// happened to be there — and then came back down displayed at a fraction of
+    /// that, because GroupMe serves its own smaller variants to everybody
+    /// reading. The upload was paying for detail nobody would be shown.
+    ///
+    /// 2560 is still larger than any screen this lands on and larger than the
+    /// biggest variant the service hands back, so a picture opened full screen
+    /// is unchanged to look at. It is roughly a third of the bytes.
+    static let maxImageEdge: CGFloat = 2560
+
+    /// Quality for the re-encode. 0.85 is the knee: below it JPEG starts
+    /// showing itself around text and edges, above it the file grows for
+    /// detail the eye is not collecting.
+    static let imageQuality: CGFloat = 0.85
 
     static func load(_ items: [PhotosPickerItem]) async -> [PickedMedia] {
         var results: [PickedMedia] = []
@@ -158,7 +172,7 @@ nonisolated enum MediaLoader {
                 width: image.size.width * (maxImageEdge / longest),
                 height: image.size.height * (maxImageEdge / longest))) ?? image)
             : image
-        guard let jpeg = scaled.jpegData(compressionQuality: 0.9) else { return nil }
+        guard let jpeg = scaled.jpegData(compressionQuality: Self.imageQuality) else { return nil }
         let url = try write(jpeg, extension: "jpg")
         return PickedMedia(
             kind: .image, fileURL: url, mimeType: "image/jpeg", fileExtension: "jpg",
