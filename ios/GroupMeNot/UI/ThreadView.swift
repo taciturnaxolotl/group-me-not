@@ -70,7 +70,7 @@ struct ThreadView: View {
     @State private var staged: [PickedMedia] = []
     @State private var isAttachmentPickerPresented = false
     @State private var isInfoPresented = false
-    @FocusState private var isWriting: Bool
+    @State private var isWriting = false
 
     /// How far each reply starts above where it belongs, per step of distance
     /// from the root. Small: this is a gathering, not a fountain.
@@ -322,12 +322,10 @@ struct ThreadView: View {
                 Divider().padding(.leading, 14)
             }
             HStack(alignment: .bottom, spacing: 4) {
-                TextField("Reply", text: $draft, axis: .vertical)
-                    .textInputAutocapitalization(.sentences)
-                    .lineLimit(1...6)
+                ComposerField("Reply", text: $draft, isFocused: $isWriting)
                     .padding(.leading, 16)
                     .padding(.vertical, 11)
-                    .focused($isWriting)
+                    .frame(minHeight: Self.composerHeight)
                     .accessibilityLabel("Reply")
 
                 sendButton

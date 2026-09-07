@@ -289,7 +289,7 @@ struct ChatView: View {
     /// target off to one side means the only thing invalidated is the host
     /// that presents it.
     @State private var reactionDetail = RosterTarget()
-    @FocusState private var composerFocused: Bool
+    @State private var composerFocused = false
 
     // MARK: Scroll state
 
@@ -1238,12 +1238,10 @@ struct ChatView: View {
             }
 
             HStack(alignment: .bottom, spacing: 4) {
-                TextField("Message", text: $draft, axis: .vertical)
-                    .textInputAutocapitalization(.sentences)
-                    .lineLimit(1...6)
+                ComposerField("Message", text: $draft, isFocused: $composerFocused)
                     .padding(.leading, 16)
                     .padding(.vertical, 11)
-                    .focused($composerFocused)
+                    .frame(minHeight: Self.composerHeight)
                     .accessibilityLabel("Message")
                     .onChange(of: draft) { _, text in
                         // Throttled inside the socket client, so every keystroke
@@ -1520,23 +1518,10 @@ struct ChatView: View {
         // locus measured against the untrimmed draft would be off by however
         // much leading whitespace was typed.
         let mentions = MentionDraft.attachment(for: text, naming: named)
-        let cleared = draft
+        // Emptying the binding is the whole of it: `ComposerField` unmarks the
+        // field before it assigns, so an unresolved prediction cannot write the
+        // sent message back a frame later.
         draft = ""
-        // Again, one turn of the run loop later.
-        //
-        // The field is a `UITextView` underneath, and tapping send while the
-        // keyboard is holding something unresolved — an inline prediction, an
-        // autocorrect candidate, a two-stage composition — leaves it with
-        // marked text that it writes back over the binding *after* this
-        // function returns. That is the message reappearing in a field that
-        // never shrank back to one line, because as far as the field is
-        // concerned the words were never taken away.
-        //
-        // Only the exact text that just went out, so the first keystroke of
-        // somebody already typing the next message is never eaten.
-        Task { @MainActor in
-            if draft == cleared { draft = "" }
-        }
         staged = []
         replyingTo = nil
         named = []
