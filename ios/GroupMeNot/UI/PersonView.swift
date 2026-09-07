@@ -154,10 +154,7 @@ struct PersonView: View {
     private var shared: some View {
         VStack(spacing: 10) {
             VStack(spacing: 2) {
-                // The name in the sentence, weighted. "You're both in" is the
-                // grammar; the group is the fact, and a line of even weight
-                // makes the reader find it for themselves.
-                (Text("You're both in ") + Text(firstShared).fontWeight(.semibold))
+                Text(sharedLine)
                     .font(.title3)
                     .multilineTextAlignment(.center)
                 if let rest = otherShared {
@@ -195,6 +192,22 @@ struct PersonView: View {
     /// not.
     private var firstShared: String {
         person?.sharedGroups.first?.name ?? ""
+    }
+
+    /// The name in the sentence, weighted. "You're both in" is the grammar; the
+    /// group is the fact, and a line of even weight makes the reader find it for
+    /// themselves.
+    ///
+    /// Built as an `AttributedString` rather than as markdown in a
+    /// `LocalizedStringKey`, because the emphasised half is a group's name and
+    /// names are not ours to parse: a group called `**hi**` would come out
+    /// wearing somebody else's bold.
+    private var sharedLine: AttributedString {
+        var line = AttributedString("You're both in ")
+        var name = AttributedString(firstShared)
+        name.font = .title3.weight(.semibold)
+        line.append(name)
+        return line
     }
 
     private var otherShared: String? {
