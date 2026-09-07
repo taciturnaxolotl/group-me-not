@@ -498,14 +498,21 @@ actor ConversationStore {
     /// Groups only. A DM with somebody is not a group you are both in, and a
     /// topic is its parent wearing a different name.
     func conversations(with userID: String) throws -> [ConversationRow] {
+        // `EXISTS` rather than a join, for two reasons. A join puts `members`
+        // in scope, and both tables have a `name` and an `avatar_url`, so every
+        // column in the list becomes ambiguous and SQLite refuses the statement
+        // outright. And a membership is a yes-or-no question about a
+        // conversation, not a row to be multiplied by.
         try db.query(
             """
             SELECT \(Self.columns) FROM conversations
-              JOIN members ON members.conversation_key = conversations.key
-             WHERE members.user_id = ?
-               AND conversations.kind = 0
-               AND conversations.parent_id IS NULL
-             ORDER BY conversations.last_message_at DESC
+             WHERE kind = 0
+               AND parent_id IS NULL
+               AND EXISTS (
+                    SELECT 1 FROM members
+                     WHERE members.conversation_key = conversations.key
+                       AND members.user_id = ?)
+             ORDER BY last_message_at DESC
             """,
             [SQLValue(userID)],
             Self.decode

@@ -96,15 +96,34 @@ nonisolated struct UserProfileBody: Decodable, Sendable {
         var shortName: String?
     }
 
-    /// `group_id`, not `id`, and the difference was the whole bug: every shared
-    /// group decoded with a nil id and was dropped on the floor, so a profile
-    /// that had six of them drew none. Measured against the live route on
-    /// 7 September 2026; the field list is `group_id`, `group_name`,
-    /// `group_avatar` and nothing else.
+    /// `group_id`, not `id`, and it is a **number**.
+    ///
+    /// Both halves of that were a bug in turn. The field list here is
+    /// `group_id`, `group_name`, `group_avatar` and nothing else — measured
+    /// against the live route — so reading `id` found nil every time and dropped
+    /// every group. Reading `group_id` as a string then threw, which is worse:
+    /// one bad element fails the whole array, so the count went from wrong to
+    /// still nothing. Group ids are strings everywhere else in this API; here,
+    /// like a subgroup's, they arrive as integers.
     nonisolated struct WireSharedGroup: Decodable, Sendable {
         var groupId: String?
         var groupName: String?
         var groupAvatar: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case groupId, groupName, groupAvatar
+        }
+
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let number = (try? container.decodeIfPresent(Int.self, forKey: .groupId)) ?? nil {
+                groupId = String(number)
+            } else {
+                groupId = (try? container.decodeIfPresent(String.self, forKey: .groupId)) ?? nil
+            }
+            groupName = (try? container.decodeIfPresent(String.self, forKey: .groupName)) ?? nil
+            groupAvatar = (try? container.decodeIfPresent(String.self, forKey: .groupAvatar)) ?? nil
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
