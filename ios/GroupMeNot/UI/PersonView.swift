@@ -29,6 +29,10 @@ struct PersonView: View {
     var avatarURL: String?
     /// Open a DM with them. Nil where there is nowhere to open one from.
     var onOpenDirect: ((ConversationRow) -> Void)?
+    /// The conversation this profile was opened from. A group here is what
+    /// entitles us to ask after somebody's status; see
+    /// ``GroupMeAPI/presence(of:in:)``.
+    var asking: ConversationID?
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -60,7 +64,8 @@ struct PersonView: View {
         .presentationDragIndicator(.visible)
         .scrollBounceBehavior(.basedOnSize)
         .task {
-            person = await model.person(userID, named: name, avatarURL: avatarURL)
+            person = await model.person(
+                userID, named: name, avatarURL: avatarURL, asking: asking)
         }
         .sheet(isPresented: $isAddingToGroup) {
             AddToGroupView(userID: userID, name: displayName)

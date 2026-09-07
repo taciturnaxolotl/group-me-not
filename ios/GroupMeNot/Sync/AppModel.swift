@@ -374,7 +374,10 @@ final class AppModel {
     /// The name passed in is what the roster or the transcript already knows,
     /// and it stands until the fetch has something better. A sheet that opens
     /// blank and fills in reads as broken even when it is working.
-    func person(_ userID: String, named name: String? = nil, avatarURL: String? = nil) async -> Person {
+    func person(
+        _ userID: String, named name: String? = nil, avatarURL: String? = nil,
+        asking conversation: ConversationID? = nil
+    ) async -> Person {
         var person = Person(id: userID)
         person.name = name
         person.avatarURL = avatarURL
@@ -382,7 +385,7 @@ final class AppModel {
 
         async let profile = try? api.profile(of: userID)
         async let shared = try? api.sharedGroups(with: userID)
-        async let status = try? api.presence(of: userID)
+        async let status = try? api.presence(of: userID, in: askingGroup(conversation))
 
         if let body = await profile {
             person.name = body.user?.name ?? person.name
@@ -429,14 +432,32 @@ final class AppModel {
     /// a roster is not what a conversation header has room for.
     private func refreshPartnerPresence() {
         guard case .direct(let otherUserID)? = openConversationID else { return }
+        // No group to name: a DM is asked plainly, which is what the official
+        // client does from the same place.
         Task { await self.refreshPresence(of: otherUserID) }
     }
 
     /// Ask after one person. Kept by user id rather than by conversation, so the
     /// profile sheet and a DM header asking about the same person ask once.
-    func refreshPresence(of userID: String) async {
-        guard let found = try? await api.presence(of: userID) else { return }
-        presence[userID] = found
+    func refreshPresence(of userID: String, in conversation: ConversationID? = nil) async {
+        do {
+            presence[userID] = try await api.presence(of: userID, in: askingGroup(conversation))
+        } catch {
+            // Said out loud rather than swallowed. This route answers `401
+            // device_verification_failed` to a token that was not minted through
+            // a verified device, and a status that silently never appears is
+            // indistinguishable from everybody being offline.
+            log.notice("presence for \(userID, privacy: .public) unavailable: \(diagnosticText(error), privacy: .public)")
+        }
+    }
+
+    /// The group a presence question is being asked from inside, if any.
+    ///
+    /// A topic answers with its parent: a topic has no membership of its own, so
+    /// naming it would be naming a group this person is not in.
+    private func askingGroup(_ conversation: ConversationID?) -> String? {
+        guard case .group(let id)? = conversation else { return nil }
+        return conversations.first { $0.id == conversation }?.parentID ?? id
     }
 
     /// Pull to refresh.

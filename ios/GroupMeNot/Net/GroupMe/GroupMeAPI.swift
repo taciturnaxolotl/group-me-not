@@ -755,12 +755,20 @@ actor GroupMeAPI {
 
     /// What somebody's status is right now.
     ///
+    /// - Parameter groupID: the group the question is being asked from inside,
+    ///   when there is one. The official client sends it whenever a profile is
+    ///   opened from a group and leaves it off for a DM, which is the rule
+    ///   followed here. It is presumably how the server decides whether you are
+    ///   entitled to an answer about somebody who is not a contact: you are both
+    ///   in this group, and here it is.
+    ///
     /// `retry: .background` on purpose. Nobody is waiting on this and a status
     /// that arrives late is a status that has changed anyway, so a failure is
     /// worth one quiet attempt and no more.
-    func presence(of userID: String) async throws -> Presence {
+    func presence(of userID: String, in groupID: String? = nil) async throws -> Presence {
         try await client.get(
-            .v1, "/presence/users/\(userID)", enveloped: false, retry: .background)
+            .v1, "/presence/users/\(userID)",
+            query: ["group_id": groupID], enveloped: false, retry: .background)
     }
 
     /// Say where *we* are.
