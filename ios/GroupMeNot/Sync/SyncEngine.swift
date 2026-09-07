@@ -117,6 +117,9 @@ actor SyncEngine {
     /// Conversations with a targeted catch-up in flight, so opening a
     /// conversation twice in a second does not fetch it twice.
     private var catchingUp: Set<ConversationID> = []
+    /// When the group list last came down with its rosters attached.
+    private var rostersFetchedAt: Date?
+
     /// When the read-cursor drain may speak to the server again, after a 429.
     private var readCursorPauseUntil: Date?
 
@@ -201,11 +204,16 @@ actor SyncEngine {
 
             // 2. Both lists at once. Neither depends on the other and together
             //    they are the whole conversation list.
-            async let groupsTask = allGroups()
+            let deep = wantsRosters
+            async let groupsTask = allGroups(withMembers: deep)
             async let chatsTask = allChats()
             let (groups, chats) = try await (groupsTask, chatsTask)
 
+            // `upsert(groups:)` writes whatever rosters arrived, so this is
+            // the whole of it. Stamped only on success: a failed list is not a
+            // reason to wait six hours before trying again.
             try await store.conversations.upsert(groups: groups)
+            if deep { rostersFetchedAt = Date() }
             try await store.conversations.upsert(chats: chats)
             continuation.yield(.conversations)
 
@@ -343,15 +351,36 @@ actor SyncEngine {
 
     // MARK: - Step 2: the lists
 
-    private func allGroups() async throws -> [Group] {
+    private func allGroups(withMembers: Bool = false) async throws -> [Group] {
         var all: [Group] = []
         for page in 1...Self.maxListPages {
-            let batch = try await api.groups(page: page, perPage: Self.listPageSize)
+            let batch = try await api.groups(
+                page: page, perPage: Self.listPageSize, withMembers: withMembers)
             all.append(contentsOf: batch)
             if batch.count < Self.listPageSize { break }
         }
         return all
     }
+
+    /// Whether this sync should bring the rosters down with the list.
+    ///
+    /// The list is asked for without memberships nearly always, and rightly: a
+    /// roster is hundreds of rows the list will never draw, and the one that
+    /// matters is fetched when a conversation opens. But "fetched when a
+    /// conversation opens" means we only know who is in the groups somebody has
+    /// been in lately, and that is not a good enough answer to "which groups are
+    /// we both in" — a profile sheet came up naming two groups out of six
+    /// because the other four had not been opened on this phone.
+    ///
+    /// So every few hours the list comes down whole. One request per page rather
+    /// than one per group, and everything that reads a roster gets better at
+    /// once: mention suggestions, sender names, and the profile sheet.
+    private var wantsRosters: Bool {
+        guard let last = rostersFetchedAt else { return true }
+        return Date().timeIntervalSince(last) > Self.rosterInterval
+    }
+
+    private static let rosterInterval: TimeInterval = 6 * 3_600
 
     private func allChats() async throws -> [Chat] {
         var all: [Chat] = []

@@ -75,11 +75,16 @@ actor GroupMeAPI {
     /// ``group(id:)`` when someone opens a conversation.
     ///
     /// Offset-paged: keep asking until a short page comes back.
-    func groups(page: Int = 1, perPage: Int = 100) async throws -> [Group] {
+    /// - Parameter withMembers: whether to let the rosters come too. Normally
+    ///   they are omitted, because a member list runs to hundreds of rows the
+    ///   conversation list will never draw. Now and then they are worth having
+    ///   in one request rather than one per group: knowing who is in what is
+    ///   what answers "which groups are we both in" without asking anybody.
+    func groups(page: Int = 1, perPage: Int = 100, withMembers: Bool = false) async throws -> [Group] {
         try await client.get(.v3, "/groups", query: [
             "page": String(page),
             "per_page": String(perPage),
-            "omit": "memberships",
+            "omit": withMembers ? nil : "memberships",
         ], repeating: Self.listInclude)
     }
 
