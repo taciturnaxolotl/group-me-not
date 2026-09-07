@@ -755,27 +755,6 @@ actor GroupMeAPI {
 
     // MARK: - Presence
 
-    /// What somebody's status is right now.
-    ///
-    /// - Parameter groupID: the group the question is being asked from inside,
-    ///   when there is one. The official client sends it whenever a profile is
-    ///   opened from a group and leaves it off for a DM, which is the rule
-    ///   followed here. It is presumably how the server decides whether you are
-    ///   entitled to an answer about somebody who is not a contact: you are both
-    ///   in this group, and here it is.
-    ///
-    /// `retry: .background` on purpose. Nobody is waiting on this and a status
-    /// that arrives late is a status that has changed anyway, so a failure is
-    /// worth one quiet attempt and no more.
-    func presence(of userID: String, in groupID: String? = nil) async throws -> Presence {
-        // One attempt, which is what the note above actually says: a status is
-        // asked for again on the next tick, so spending a minute of backoff on
-        // this one would only be answering a question that has moved on.
-        try await client.get(
-            .v1, "/presence/users/\(userID)",
-            query: ["group_id": groupID], enveloped: false, retry: .none)
-    }
-
     /// Say where *we* are.
     ///
     /// The heartbeat sends `online` every few minutes while somebody is looking
@@ -784,7 +763,7 @@ actor GroupMeAPI {
     ///
     /// A 200 with an empty body is a yes, not a failure: this route answers with
     /// whatever it likes and the caller has nothing to read.
-    func publishPresence(_ status: Presence.Status, manual: Bool = false) async throws {
+    func publishPresence(_ status: PresenceStatus, manual: Bool = false) async throws {
         do {
             try await client.putIgnoringResponse(
                 .v1, "/presence/status",

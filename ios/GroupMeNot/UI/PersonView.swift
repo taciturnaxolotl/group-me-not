@@ -29,10 +29,6 @@ struct PersonView: View {
     var avatarURL: String?
     /// Open a DM with them. Nil where there is nowhere to open one from.
     var onOpenDirect: ((ConversationRow) -> Void)?
-    /// The conversation this profile was opened from. A group here is what
-    /// entitles us to ask after somebody's status; see
-    /// ``GroupMeAPI/presence(of:in:)``.
-    var asking: ConversationID?
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -64,8 +60,7 @@ struct PersonView: View {
         .presentationDragIndicator(.visible)
         .scrollBounceBehavior(.basedOnSize)
         .task {
-            person = await model.person(
-                userID, named: name, avatarURL: avatarURL, asking: asking)
+            person = await model.person(userID, named: name, avatarURL: avatarURL)
         }
         .sheet(isPresented: $isAddingToGroup) {
             AddToGroupView(userID: userID, name: displayName)
@@ -79,20 +74,11 @@ struct PersonView: View {
     private var header: some View {
         VStack(spacing: 10) {
             Avatar(url: person?.avatarURL ?? avatarURL, name: displayName, size: 104)
-                // The status rides on the face rather than standing beside it,
-                // which is what makes it read as a fact about the person and not
-                // as another line of the sheet.
-                .overlay(alignment: .bottomTrailing) { presenceBadge }
             Text(displayName)
                 .font(.title.weight(.bold))
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
                 .minimumScaleFactor(0.7)
-            if let summary = person?.presence?.summary {
-                Text(summary)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
             if let bio = person?.bio {
                 Text(bio)
                     .font(.subheadline)
@@ -103,27 +89,6 @@ struct PersonView: View {
         }
         .animation(.snappy(duration: 0.2), value: person)
         .accessibilityElement(children: .combine)
-    }
-
-    /// A dot for here, a moon for idle, and nothing at all for away: an
-    /// indicator that is always lit says nothing, and "offline" is mostly "has
-    /// not opened GroupMe lately" rather than news about a person.
-    @ViewBuilder private var presenceBadge: some View {
-        switch person?.presence?.status {
-        case .online:
-            Circle()
-                .fill(.green)
-                .frame(width: 20, height: 20)
-                .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 3))
-        case .away:
-            Image(systemName: "moon.fill")
-                .font(.system(size: 13))
-                .foregroundStyle(.orange)
-                .padding(4)
-                .background(Color(.systemBackground), in: .circle)
-        case .offline, nil:
-            EmptyView()
-        }
     }
 
     /// The school first, then whatever they picked. The school is the one chip

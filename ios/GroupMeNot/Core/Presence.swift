@@ -1,95 +1,46 @@
 import Foundation
 
-/// Whether somebody is at their phone.
+/// Saying whether we are here.
 ///
-/// GroupMe keeps this outside the conversation API entirely: presence lives on
-/// the v1 host, under `/presence`, and it is the one family of routes that
-/// answers with the object rather than with the `{response, meta}` envelope
-/// everything else uses. It is also not pushed. The official client learns a
-/// status by asking for it, and keeps its own current by sending "online" every
-/// three minutes for as long as somebody is looking at the app, so a status is
-/// only ever a few minutes old and "offline" mostly means "has not said
-/// anything for a while".
+/// Only that direction. Presence has two halves in GroupMe and a third-party
+/// client can only have one of them:
 ///
-/// Which is worth stating plainly, because it decides how this is drawn: a dot
-/// here is a claim about the last few minutes, not about this instant.
-nonisolated struct Presence: Hashable, Sendable {
-    var status: Status
-    /// When they were last seen, as the server reckons it. Absent for somebody
-    /// who is here now, and for somebody who has never been seen at all.
-    var lastActive: Date?
+/// - **Publishing works.** `PUT /v1/presence/status` with `{"status":"online"}`
+///   answers 200 and echoes the status back. The official client sends it every
+///   three minutes for as long as somebody is looking at the app, and `away`
+///   when they stop.
+/// - **Reading is refused.** `GET /v1/presence/users/{id}`, the batch form with
+///   `?ids=`, and `GET /v1/presence/groups/{id}/members` all answer
+///   `401 {"code": 40102, "errors": ["device_verification_failed"]}` — with and
+///   without the `group_id` the official client sends, and whatever the User-Agent
+///   claims to be. Measured 7 September 2026 against a live account, from both a
+///   developer token and the app's own.
+///
+/// The gate is Google Play Integrity on Android and App Attest on iOS: the app
+/// fetches a nonce from `/v1/nonce`, has the platform sign an attestation over
+/// it, and sends the result as `x-verify-token` / `x-verify-token-standard` for
+/// the client id `com.groupme.android` (`ProtectedRequestQueue`, `OkHttp3Stack`).
+/// An attestation is a statement by Google or Apple that this is *their* app,
+/// signed by *their* certificate. There is no version of this a different app
+/// can produce, which is the entire point of it — so there is no cleverness to
+/// find here, and no reading code to keep warm against the day it works.
+///
+/// What is left is worth keeping: with the preference on, other people's
+/// official clients show you as here, which is the half of the feature that
+/// costs them nothing to grant.
+nonisolated enum PresenceStatus: Sendable, Hashable {
+    case online
+    case away
+    case offline
 
-    nonisolated enum Status: Sendable, Hashable {
-        case online
-        case away
-        case offline
-
-        /// The wire has more words than there are states. `clear` is what the
-        /// server calls a manually-set status that has been cleared again, and
-        /// `active` turns up beside `online`; both mean here. Anything
-        /// unrecognised is offline, which is the honest reading of a word we do
-        /// not know.
-        init(wire: String?) {
-            switch wire {
-            case "online", "active", "clear": self = .online
-            case "away": self = .away
-            default: self = .offline
-            }
+    /// What to send. `clear` and `active` also arrive as "here" when reading,
+    /// which is recorded for the next person to look at this and nothing else.
+    var apiValue: String {
+        switch self {
+        case .online: "online"
+        case .away: "away"
+        case .offline: "offline"
         }
-
-        /// What to send when *we* are the subject.
-        var apiValue: String {
-            switch self {
-            case .online: "online"
-            case .away: "away"
-            case .offline: "offline"
-            }
-        }
-    }
-
-    /// A line for under a name, or nil when there is nothing worth saying.
-    ///
-    /// The wording and the six-hour cut-off are GroupMe's, kept deliberately:
-    /// past that the number stops being news and starts being a record of
-    /// somebody's evening.
-    var summary: String? {
-        switch status {
-        case .online: "Online"
-        case .away: "Idle"
-        case .offline: lastActive.flatMap { Self.sinceSeen($0) }
-        }
-    }
-
-    private static func sinceSeen(_ date: Date, now: Date = Date()) -> String? {
-        let minutes = Int(now.timeIntervalSince(date) / 60)
-        guard minutes >= 0, minutes <= 360 else { return nil }
-        if minutes >= 60 { return "Active \(minutes / 60)h ago" }
-        return "Active \(max(1, minutes))m ago"
-    }
-}
-
-// MARK: - Wire
-
-nonisolated extension Presence: Decodable {
-    private enum CodingKeys: String, CodingKey {
-        case response, status, lastActive
-    }
-
-    /// `GET /v1/presence/users/{id}` hands back `{user_id, status, last_active,
-    /// sms_enabled}` with nothing around it, which is why the client is asked
-    /// not to unwrap. The envelope is still tried, because one unenveloped
-    /// family in an API of enveloped ones is a thing to be careful about rather
-    /// than certain of, and the fallback costs three lines.
-    ///
-    /// `last_active` is **milliseconds**, unlike every timestamp elsewhere in
-    /// this API, which are seconds. Measured against the Android client, which
-    /// subtracts it straight from `System.currentTimeMillis()`.
-    init(from decoder: any Decoder) throws {
-        let outer = try decoder.container(keyedBy: CodingKeys.self)
-        let body = (try? outer.nestedContainer(keyedBy: CodingKeys.self, forKey: .response)) ?? outer
-        status = Status(wire: (try? body.decodeIfPresent(String.self, forKey: .status)) ?? nil)
-        let millis = ((try? body.decodeIfPresent(Double.self, forKey: .lastActive)) ?? nil) ?? 0
-        lastActive = millis > 0 ? Date(timeIntervalSince1970: millis / 1000) : nil
     }
 }
 

@@ -668,7 +668,7 @@ struct ChatView: View {
             .sheet(item: $viewingPerson) { person in
                 PersonView(
                     userID: person.id, name: person.name, avatarURL: person.avatarURL,
-                    onOpenDirect: onOpenConversation, asking: current.id)
+                    onOpenDirect: onOpenConversation)
             }
     }
 
@@ -1682,7 +1682,7 @@ struct ChatView: View {
         }
         ToolbarItem(placement: .principal) {
             Button(action: openDetails) {
-                ConversationTitle(conversation: current, presence: model.partnerPresence)
+                ConversationTitle(conversation: current)
             }
                 .buttonStyle(.plain)
                 .accessibilityLabel(titleAccessibilityLabel)
@@ -1707,11 +1707,7 @@ struct ChatView: View {
     }
 
     private var titleAccessibilityLabel: String {
-        guard current.isGroup else {
-            guard let summary = model.partnerPresence?.summary else { return current.name }
-            return "\(current.name), \(summary)"
-        }
-        guard let count = memberCount else { return current.name }
+        guard current.isGroup, let count = memberCount else { return current.name }
         return "\(current.name), \(count) members"
     }
 
@@ -2566,24 +2562,8 @@ struct ReactionRoster: View {
 /// chain is presented over the chat, so the real toolbar is behind the scrim
 /// and dimmed with everything else, and the reader should not have to close
 /// the chain to find out which conversation they are in.
-extension Presence {
-    /// The colour of the dot beside the words, or none when the words are
-    /// already the whole answer: "Active 20m ago" with a grey dot next to it is
-    /// a dot saying nothing the sentence has not said.
-    var dot: Color? {
-        switch status {
-        case .online: .green
-        case .away: .orange
-        case .offline: nil
-        }
-    }
-}
-
 struct ConversationTitle: View {
     let conversation: ConversationRow
-    /// Whether the other person in a DM is about. Nil for a group, and for a DM
-    /// nobody has asked about yet.
-    var presence: Presence?
 
     var body: some View {
         VStack(spacing: -6) {
@@ -2598,29 +2578,10 @@ struct ConversationTitle: View {
             // round: the face stays whole and the pill runs behind it.
             .zIndex(1)
             HStack(spacing: 3) {
-                VStack(spacing: 0) {
-                    Text(conversation.name)
-                        .font(.footnote.weight(.semibold))
-                        .lineLimit(1)
-                        .foregroundStyle(.primary)
-                    // Under the name rather than beside it, because it is about
-                    // the name: a second line inside the same pill reads as one
-                    // label with a note, where a second pill would read as two
-                    // things to look at.
-                    if let summary = presence?.summary {
-                        HStack(spacing: 4) {
-                            if let dot = presence?.dot {
-                                Circle()
-                                    .fill(dot)
-                                    .frame(width: 6, height: 6)
-                            }
-                            Text(summary)
-                                .font(.caption2)
-                                .lineLimit(1)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
+                Text(conversation.name)
+                    .font(.footnote.weight(.semibold))
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
                 Image(systemName: "chevron.right")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(.secondary)
@@ -2628,10 +2589,6 @@ struct ConversationTitle: View {
             .padding(.horizontal, 15)
             .padding(.vertical, 6)
             .glassEffect(.regular.interactive(), in: .capsule)
-            // The pill grows by a line when a status arrives, which is a frame
-            // or two after the conversation opens. Animated, so the bar settles
-            // rather than jumps.
-            .animation(.snappy(duration: 0.2), value: presence)
         }
         // Clear of the status bar. A picture that starts where the safe area
         // does is a picture touching the clock, and this item is tall enough

@@ -3,9 +3,8 @@ import Foundation
 /// Somebody else, as a profile sheet draws them.
 ///
 /// Assembled rather than fetched: GroupMe keeps a person's profile, the groups
-/// you share with them, the meaning of their interests and whether they are
-/// about in four different places, and this is the one shape that has all of it
-/// at once. Everything past the id is optional, because every part of it can be
+/// you share with them and the meaning of their interests in three different
+/// places, and this is the one shape that has all of it at once. Everything past the id is optional, because every part of it can be
 /// absent and a sheet with a face and a name on it is still worth showing.
 nonisolated struct Person: Hashable, Sendable {
     var id: String
@@ -21,7 +20,6 @@ nonisolated struct Person: Hashable, Sendable {
     var school: String?
     var charms: [InterestCharm]
     var sharedGroups: [SharedGroup]
-    var presence: Presence?
 
     init(id: String) {
         self.id = id

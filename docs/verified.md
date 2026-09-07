@@ -235,6 +235,32 @@ Two small differences from Android worth noting: the web client sends `acceptFil
 Android sends `acceptFiles=true` (both work), and it fetches static assets from
 `groupme.com/assets/…` rather than `cdn.groupme.com/assets/…`.
 
+## Presence can be published but not read
+
+Measured 7 September 2026 against a live account, with a developer token and with the app's
+own:
+
+```
+PUT  /v1/presence/status  {"status":"online"}     200  {"user_id":"…","status":"online"}
+GET  /v1/presence/users/{id}                      401  40102 device_verification_failed
+GET  /v1/presence/users?ids={id}                  401  40102
+GET  /v1/presence/groups/{id}/members             401  40102
+GET  /v1/presence/users/{id}?group_id={groupId}   401  40102
+```
+
+The `group_id` the official client sends when a profile is opened from inside a group makes
+no difference, and neither does a User-Agent claiming to be GroupMe. The web client gets the
+same 401 on its own presence calls, so this is not a matter of which token you hold.
+
+The gate is platform attestation. `ProtectedRequestQueue` fetches a nonce from `/v1/nonce`,
+has Play Integrity sign over it, and sends the result as `x-verify-token` and
+`x-verify-token-standard` for the client id `com.groupme.android` (see `OkHttp3Stack`). That
+is Google or Apple stating that this is *their* app with *their* signing certificate; no
+other app can produce one, which is the point of it.
+
+So a third-party client can tell people it is here, and cannot see anybody else. Reading is
+not a thing to keep code warm for.
+
 ## Still open
 
 - Which endpoints send `Retry-After` on a 429. Group joins do, per the client source. The

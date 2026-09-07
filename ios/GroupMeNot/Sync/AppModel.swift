@@ -96,18 +96,6 @@ final class AppModel {
     /// Expired entries are swept on each new event; see `PushEvent.Typing.expiry`.
     private(set) var typingUserIDs: [String: Date] = [:]
 
-    /// Who is about, by user id, for as long as the app runs.
-    ///
-    /// Held rather than stored: a status is minutes old at best, so keeping one
-    /// across launches would only mean showing a stale dot on the first frame.
-    private(set) var presence: [String: Presence] = [:]
-
-    /// The status of whoever is on the other end of the open DM.
-    var partnerPresence: Presence? {
-        guard case .direct(let other)? = openConversationID else { return nil }
-        return presence[other]
-    }
-
     /// Whether to tell GroupMe when *we* are about.
     ///
     /// Off unless asked for, and that is the deliberate default. Reading
@@ -312,7 +300,6 @@ final class AppModel {
         await bayeux.reconnectIfStale()
         startHeartbeat()
         publishPresence(.online)
-        refreshPartnerPresence()
         await sync.sync(reason: .foreground)
     }
 
@@ -373,14 +360,12 @@ final class AppModel {
 
     /// The tick, which is not the same thing as the sync.
     ///
-    /// Presence is cheap and wants to be current — one small request, and the
-    /// status on a DM header is worth nothing if it is five minutes old — so it
-    /// runs every time round. The sync is six or seven requests and only runs
-    /// when it is actually due.
+    /// Saying we are here is one small request on its own three-minute
+    /// throttle, so it runs every time round. The sync is six or seven requests
+    /// and only runs when it is actually due.
     private func beat() async {
         guard isSignedIn, realtime.reachability != .offline else { return }
         publishPresence(.online)
-        refreshPartnerPresence()
 
         let due = lastHeartbeatSyncAt.map { Date().timeIntervalSince($0) >= syncInterval } ?? true
         guard due else { return }
@@ -398,7 +383,7 @@ final class AppModel {
     ///
     /// Started rather than awaited everywhere it is called: nothing on screen
     /// depends on it, and a status is not worth holding a foreground up for.
-    private func publishPresence(_ status: Presence.Status, manual: Bool = false) {
+    private func publishPresence(_ status: PresenceStatus, manual: Bool = false) {
         guard sharesPresence, isSignedIn else { return }
         if status == .online, let last = presencePublishedAt,
             Date().timeIntervalSince(last) < Self.presenceInterval {
@@ -412,26 +397,21 @@ final class AppModel {
 
     /// Everything a profile sheet draws about somebody, gathered in one call.
     ///
-    /// Four questions in parallel, because they are four unrelated servers'
+    /// Three questions in parallel, because they are three unrelated servers'
     /// worth of answer and the sheet wants them together: the profile, the
-    /// groups you share, whether they are about, and what their interest ids
-    /// mean. Any of them may come back empty; none of them may stop the others.
+    /// groups you share, and what their interest ids mean. Any of them may come
+    /// back empty; none of them may stop the others.
     ///
     /// The name passed in is what the roster or the transcript already knows,
     /// and it stands until the fetch has something better. A sheet that opens
     /// blank and fills in reads as broken even when it is working.
-    func person(
-        _ userID: String, named name: String? = nil, avatarURL: String? = nil,
-        asking conversation: ConversationID? = nil
-    ) async -> Person {
+    func person(_ userID: String, named name: String? = nil, avatarURL: String? = nil) async -> Person {
         var person = Person(id: userID)
         person.name = name
         person.avatarURL = avatarURL
-        person.presence = presence[userID]
 
         async let profile = try? api.profile(of: userID)
         async let shared = try? api.sharedGroups(with: userID)
-        async let status = try? api.presence(of: userID, in: askingGroup(conversation))
 
         if let body = await profile {
             person.name = body.user?.name ?? person.name
@@ -459,51 +439,12 @@ final class AppModel {
             groups.append(SharedGroup(id: id, name: row.name, avatarURL: row.avatarURL))
         }
         person.sharedGroups = groups
-        if let found = await status {
-            presence[userID] = found
-            person.presence = found
-        }
         // What the two reads actually carried. These are legacy routes whose
         // shape is documented nowhere but in their own answers, so a line saying
         // which parts arrived is what turns "the sheet looks empty" into a
         // question with an answer.
         log.debug("profile \(userID, privacy: .public): \(person.charms.count) interests, \(person.sharedGroups.count) shared groups")
         return person
-    }
-
-    /// Fetch the status of whoever is on the other end of the open DM.
-    ///
-    /// A group has no single answer, so it has none here. `GET
-    /// /v1/presence/groups/{id}/members` exists and would light up a roster, but
-    /// a roster is not what a conversation header has room for.
-    private func refreshPartnerPresence() {
-        guard case .direct(let otherUserID)? = openConversationID else { return }
-        // No group to name: a DM is asked plainly, which is what the official
-        // client does from the same place.
-        Task { await self.refreshPresence(of: otherUserID) }
-    }
-
-    /// Ask after one person. Kept by user id rather than by conversation, so the
-    /// profile sheet and a DM header asking about the same person ask once.
-    func refreshPresence(of userID: String, in conversation: ConversationID? = nil) async {
-        do {
-            presence[userID] = try await api.presence(of: userID, in: askingGroup(conversation))
-        } catch {
-            // Said out loud rather than swallowed. This route answers `401
-            // device_verification_failed` to a token that was not minted through
-            // a verified device, and a status that silently never appears is
-            // indistinguishable from everybody being offline.
-            log.notice("presence for \(userID, privacy: .public) unavailable: \(diagnosticText(error), privacy: .public)")
-        }
-    }
-
-    /// The group a presence question is being asked from inside, if any.
-    ///
-    /// A topic answers with its parent: a topic has no membership of its own, so
-    /// naming it would be naming a group this person is not in.
-    private func askingGroup(_ conversation: ConversationID?) -> String? {
-        guard case .group(let id)? = conversation else { return nil }
-        return conversations.first { $0.id == conversation }?.parentID ?? id
     }
 
     /// Pull to refresh.
@@ -540,8 +481,6 @@ final class AppModel {
         window = Self.transcriptPage
         typingSweep?.cancel()
         typingUserIDs = [:]
-
-        refreshPartnerPresence()
 
         messages = await transcript(conversation) ?? []
         outbox = await sends.pending(in: conversation)
