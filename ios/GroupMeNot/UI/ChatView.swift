@@ -668,7 +668,7 @@ struct ChatView: View {
             .sheet(item: $viewingPerson) { person in
                 PersonView(
                     userID: person.id, name: person.name, avatarURL: person.avatarURL,
-                    onOpenDirect: onOpenConversation)
+                    onOpenDirect: onOpenConversation, openedFrom: current.id)
             }
     }
 

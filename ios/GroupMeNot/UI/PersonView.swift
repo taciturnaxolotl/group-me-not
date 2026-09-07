@@ -27,14 +27,20 @@ struct PersonView: View {
     /// on it from the first frame.
     var name: String
     var avatarURL: String?
-    /// Open a DM with them. Nil where there is nowhere to open one from.
+    /// Open a conversation: the DM with them, or one of the groups you share.
+    /// Nil where there is nowhere to open one from.
     var onOpenDirect: ((ConversationRow) -> Void)?
+    /// The conversation this profile was opened from, which is the one the
+    /// shared-groups line names first. You are looking at somebody *here*, so
+    /// here is the group worth naming.
+    var openedFrom: ConversationID?
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
     @State private var person: Person?
     @State private var isAddingToGroup = false
+    @State private var isShowingShared = false
 
     private var isMe: Bool { userID == model.currentUser?.id }
 
@@ -64,6 +70,12 @@ struct PersonView: View {
         }
         .sheet(isPresented: $isAddingToGroup) {
             AddToGroupView(userID: userID, name: displayName)
+        }
+        .sheet(isPresented: $isShowingShared) {
+            SharedGroupsView(groups: sharedGroups, name: displayName) { row in
+                dismiss()
+                onOpenDirect?(row)
+            }
         }
     }
 
@@ -124,7 +136,33 @@ struct PersonView: View {
         }
     }
 
+    /// The groups you share, the one you are in first.
+    ///
+    /// Ordering rather than filtering: every group is still there, and still
+    /// counted. A topic answers with its parent, which is the group you are
+    /// actually both in.
+    private var sharedGroups: [SharedGroup] {
+        let all = person?.sharedGroups ?? []
+        guard case .group(let here)? = openedFrom else { return all }
+        let parent = model.conversations.first { $0.id == openedFrom }?.parentID ?? here
+        guard let index = all.firstIndex(where: { $0.id == parent }) else { return all }
+        var reordered = all
+        reordered.insert(reordered.remove(at: index), at: 0)
+        return reordered
+    }
+
     private var shared: some View {
+        Button {
+            isShowingShared = true
+        } label: {
+            sharedContent
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(sharedSummary)
+        .accessibilityHint("Shows every group you share")
+    }
+
+    private var sharedContent: some View {
         VStack(spacing: 10) {
             VStack(spacing: 2) {
                 Text(sharedLine)
@@ -137,7 +175,7 @@ struct PersonView: View {
                 }
             }
             HStack(spacing: 8) {
-                ForEach((person?.sharedGroups ?? []).prefix(Self.facesShown)) { group in
+                ForEach(sharedGroups.prefix(Self.facesShown)) { group in
                     Avatar(url: group.avatarURL, name: group.name, size: 48, isGroup: true)
                 }
                 if let extra = overflow {
@@ -149,8 +187,8 @@ struct PersonView: View {
                 }
             }
         }
+        .contentShape(.rect)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(sharedSummary)
     }
 
     private static let facesShown = 5
@@ -164,7 +202,7 @@ struct PersonView: View {
     /// both in Residents of Rivendell" places somebody, where "6 groups" does
     /// not.
     private var firstShared: String {
-        person?.sharedGroups.first?.name ?? ""
+        sharedGroups.first?.name ?? ""
     }
 
     /// The name in the sentence, weighted. "You're both in" is the grammar; the
@@ -242,6 +280,63 @@ struct PersonView: View {
             }
         }
         .padding(.top, 4)
+    }
+}
+
+// MARK: - Shared groups
+
+/// Every group two people are both in, as a list you can walk into.
+///
+/// The row on the profile shows five faces and a count, which answers "how
+/// much do we overlap" and nothing else. This answers "which ones" — and since
+/// each one is a conversation, each one opens.
+private struct SharedGroupsView: View {
+    let groups: [SharedGroup]
+    /// Whose profile this came from, so the title says what the list is.
+    let name: String
+    let onOpen: (ConversationRow) -> Void
+
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List(groups) { group in
+                let row = model.conversations.first { $0.id == .group(group.id) }
+                Button {
+                    guard let row else { return }
+                    dismiss()
+                    onOpen(row)
+                } label: {
+                    HStack(spacing: 12) {
+                        Avatar(url: group.avatarURL, name: group.name, size: 38, isGroup: true)
+                        Text(group.name)
+                            .lineLimit(1)
+                            .foregroundStyle(.primary)
+                        Spacer(minLength: 8)
+                        if row != nil {
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                // A group the server counts and this device has never listed
+                // is a row with nowhere to go. Shown, because it is still an
+                // answer to "which ones", and not offered as a tap.
+                .disabled(row == nil)
+            }
+            .navigationTitle("You and \(name)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
 

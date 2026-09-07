@@ -70,7 +70,8 @@ struct ConversationInfoView: View {
                             dismiss()
                             open(row)
                         }
-                    })
+                    },
+                    openedFrom: conversation.id)
             }
             .sheet(isPresented: $isInvitePresented) {
                 InvitePeopleView(conversation: conversation, alreadyIn: members)
