@@ -508,9 +508,19 @@ final class AppModel {
         Task { await self.sync.catchUp(conversation) }
     }
 
-    /// Leave the open conversation. Synchronous, because it runs from
-    /// `onDisappear` and a view teardown should not have to await anything.
-    func closeConversation() {
+    /// Leave a conversation. Synchronous, because it runs from `onDisappear` and
+    /// a view teardown should not have to await anything.
+    ///
+    /// - Parameter conversation: the one being left. Ignored when it is not the
+    ///   one that is open, and that guard is the whole reason it is a parameter.
+    ///   Going from one chat straight to another is two views changing places,
+    ///   and SwiftUI does not promise which end goes first: the arriving view's
+    ///   `task` can open its conversation before the leaving view's
+    ///   `onDisappear` has run. Unguarded, the departing view then closes the
+    ///   conversation that has just been opened — the transcript empties, the
+    ///   socket unfocuses, and the chat you asked for sits there blank.
+    func closeConversation(_ conversation: ConversationID? = nil) {
+        if let conversation, openConversationID != conversation { return }
         typingSweep?.cancel()
         typingSweep = nil
         openConversationID = nil

@@ -51,7 +51,15 @@ struct ConversationListView: View {
                 .navigationDestination(for: Route.self) { route in
                     switch route {
                     case .chat(let row):
-                        ChatView(conversation: row) { path.append(.chat($0)) }
+                        // Replaced, not stacked. A conversation reached from
+                        // inside another one — a share link, a DM opened from a
+                        // profile, a group you are both in — is somewhere you
+                        // went, not somewhere you are on the way to. Pushing it
+                        // made Back lead to the chat you came through rather
+                        // than to the list, and left two transcripts alive at
+                        // once, each telling the model to open a different
+                        // conversation.
+                        ChatView(conversation: row) { path = [.chat($0)] }
                     case .topics(let group):
                         TopicChooserView(group: group) { path.append(.chat($0)) }
                     }

@@ -370,8 +370,9 @@ struct ChatView: View {
 
     /// The clear strip that closes the transcript. Its visibility is what
     /// answers "is the reader at the foot", so it needs enough height to be a
-    /// tolerance rather than a hairline.
-    private static let footHeight: CGFloat = 24
+    /// tolerance rather than a hairline — but no more than that, because it is
+    /// also the whole of the gap between the last bubble and the composer.
+    private static let footHeight: CGFloat = 16
 
     /// Whether the foot of the transcript is on screen.
     ///
@@ -1723,7 +1724,7 @@ struct ChatView: View {
     private func teardown() {
         rebuildTask?.cancel()
         anchorResetTask?.cancel()
-        model.closeConversation()
+        model.closeConversation(conversation.id)
     }
 
     private func messagesChanged() {
