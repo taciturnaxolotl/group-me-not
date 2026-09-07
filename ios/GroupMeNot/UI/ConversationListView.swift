@@ -76,13 +76,22 @@ struct ConversationListView: View {
                     titleVisibility: .visible
                 ) {
                     if let target = pinTarget {
-                        let key = target.id.storageKey
+                        // Resolved against the live list: the target is a
+                        // snapshot taken when the press landed, and a mute
+                        // toggled a moment ago would otherwise offer to be
+                        // toggled the same way twice.
+                        let row = live(target)
+                        let key = row.id.storageKey
                         let isPinned = settings.isPinned(key)
                         Button(isPinned ? "Unpin" : "Pin") {
                             withAnimation(.snappy(duration: 0.25)) { settings.togglePin(key) }
                             pinTarget = nil
                         }
                         .disabled(!isPinned && !settings.canPinMore)
+                        Button(row.isMuted ? "Unmute" : "Mute") {
+                            Task { await model.setMuted(!row.isMuted, for: row.id) }
+                            pinTarget = nil
+                        }
                         Button("Cancel", role: .cancel) { pinTarget = nil }
                     }
                 }
@@ -112,7 +121,10 @@ struct ConversationListView: View {
                 .listRowInsets(.init(top: 11, leading: 16, bottom: 11, trailing: 16))
                 // Long press to pin. The swipe is still there; this is the
                 // gesture people reach for.
-                .contextMenu { pinButton(for: entry.row) }
+                .contextMenu {
+                    pinButton(for: entry.row)
+                    muteButton(for: entry.row)
+                }
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
                     if entry.row.hasUnread {
                         Button {
@@ -124,16 +136,7 @@ struct ConversationListView: View {
                     }
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button {
-                        Task { await model.setMuted(!entry.row.isMuted, for: entry.row.id) }
-                    } label: {
-                        Label(
-                            entry.row.isMuted ? "Unmute" : "Mute",
-                            systemImage: entry.row.isMuted ? "bell.fill" : "bell.slash.fill"
-                        )
-                    }
-                    .tint(.indigo)
-
+                    muteButton(for: entry.row).tint(.indigo)
                     pinButton(for: entry.row).tint(.orange)
                 }
             }
@@ -196,6 +199,28 @@ struct ConversationListView: View {
         // Silently doing nothing at the limit would read as broken, so at the
         // limit the action is simply not offered.
         .disabled(!isPinned && !settings.canPinMore)
+    }
+
+    /// Mute, in the three places it is offered: the swipe, the row's menu, and
+    /// the sheet a held pin opens. One builder rather than three spellings, so
+    /// the word and the bell always agree about which way round they are.
+    ///
+    /// A DM has no mute route in this API, so muting one is a preference on this
+    /// phone. Offered all the same: a silenced conversation that is silent only
+    /// here is still what the person asked for.
+    @ViewBuilder private func muteButton(for row: ConversationRow) -> some View {
+        Button {
+            Task { await model.setMuted(!row.isMuted, for: row.id) }
+        } label: {
+            Label(
+                row.isMuted ? "Unmute" : "Mute",
+                systemImage: row.isMuted ? "bell.fill" : "bell.slash.fill")
+        }
+    }
+
+    /// The list's copy of a row held in view state, which may have moved on.
+    private func live(_ row: ConversationRow) -> ConversationRow {
+        model.conversations.first { $0.id == row.id } ?? row
     }
 
     /// The pinned conversations, in the order they were pinned.
@@ -723,7 +748,13 @@ struct ConversationTile: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .onLongPressGesture(minimumDuration: 0.35) { onLongPress?() }
+        // Simultaneous, not `onLongPressGesture`. A button already claims the
+        // touch, and a second gesture attached in sequence has to win it back
+        // from both the button and the scroll view the grid sits in — which it
+        // does most of the time, and "most of the time" is what a long press
+        // that people believe in cannot be.
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.35).onEnded { _ in onLongPress?() })
         .accessibilityElement(children: .combine)
         .accessibilityLabel(spokenLabel)
     }
