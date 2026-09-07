@@ -727,36 +727,60 @@ struct ConversationTile: View {
     var onLongPress: (() -> Void)?
     let action: () -> Void
 
+    /// True while a finger is down, which is the tile's half of the bargain: a
+    /// held thing has to look held, or the wait before the menu reads as the
+    /// app having missed the touch.
+    @State private var isPressed = false
+    /// Bumped when the press succeeds, so the tap that follows knows it has
+    /// already been spoken for, and so the haptic has something to fire on.
+    @State private var pressCount = 0
+
     var body: some View {
-        Button(action: action) {
-            VStack(spacing: 6) {
-                face
-                    .overlay(alignment: .topTrailing) {
-                        UnreadBadge(count: unread, isMuted: row.isMuted)
-                            .offset(x: 6, y: -2)
-                    }
-                    .overlay(alignment: .bottomTrailing) { hints }
-                Text(name)
-                    .font(.caption)
-                    .lineLimit(1)
-                    // Secondary, like every caption under a picture: the face
-                    // is the thing being read, and a name in full-strength text
-                    // competes with it for the eye.
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity)
+        content
+            // Not a `Button`. A button claims the touch and hands it back on
+            // release, so the press opened the menu *and* the chat behind it —
+            // and a gesture bolted onto one alongside gets no say in that. A
+            // plain view with both gestures declared on it lets SwiftUI settle
+            // which one happened: held, and the tap never fires.
             .contentShape(.rect)
+            .onTapGesture(perform: action)
+            .onLongPressGesture(minimumDuration: 0.35) {
+                pressCount += 1
+                onLongPress?()
+            } onPressingChanged: { pressing in
+                withAnimation(.snappy(duration: 0.18)) { isPressed = pressing }
+            }
+            // What a row in the list gets from its context menu, which this
+            // cannot use; see `onLongPress`. The weight is matched to it:
+            // the menu arriving is a soft knock, not an alert.
+            .sensoryFeedback(.impact(weight: .medium), trigger: pressCount)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(spokenLabel)
+            .accessibilityAddTraits(.isButton)
+    }
+
+    private var content: some View {
+        VStack(spacing: 6) {
+            face
+                .overlay(alignment: .topTrailing) {
+                    UnreadBadge(count: unread, isMuted: row.isMuted)
+                        .offset(x: 6, y: -2)
+                }
+                .overlay(alignment: .bottomTrailing) { hints }
+            Text(name)
+                .font(.caption)
+                .lineLimit(1)
+                // Secondary, like every caption under a picture: the face is
+                // the thing being read, and a name in full-strength text
+                // competes with it for the eye.
+                .foregroundStyle(.secondary)
         }
-        .buttonStyle(.plain)
-        // Simultaneous, not `onLongPressGesture`. A button already claims the
-        // touch, and a second gesture attached in sequence has to win it back
-        // from both the button and the scroll view the grid sits in — which it
-        // does most of the time, and "most of the time" is what a long press
-        // that people believe in cannot be.
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.35).onEnded { _ in onLongPress?() })
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(spokenLabel)
+        .frame(maxWidth: .infinity)
+        // The lift a held tile gets in place of the system's. Smaller and
+        // slightly faded rather than swollen: the tile stays inside its column,
+        // so nothing under it moves while the finger is down.
+        .scaleEffect(isPressed ? 0.93 : 1)
+        .opacity(isPressed ? 0.75 : 1)
     }
 
     /// One picture, or the whole group in one.
