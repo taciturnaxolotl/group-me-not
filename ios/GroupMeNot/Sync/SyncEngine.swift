@@ -117,6 +117,13 @@ actor SyncEngine {
     /// Conversations with a targeted catch-up in flight, so opening a
     /// conversation twice in a second does not fetch it twice.
     private var catchingUp: Set<ConversationID> = []
+    /// When the read-cursor drain may speak to the server again, after a 429.
+    private var readCursorPauseUntil: Date?
+
+    /// How long to stand down when the server refuses a batch and says nothing
+    /// about when to come back. An hour, which is what the official client uses.
+    private static let readCursorPause: TimeInterval = 3_600
+
     /// What the last list fetch said about each conversation's newest message.
     /// In memory only: after a cold start the shortcut simply does not fire, and
     /// the loop falls back to a normal `after_id` page.
@@ -224,8 +231,9 @@ actor SyncEngine {
             // under. Now that history is current, the guid should resolve.
             await outbox.reconcile()
 
-            // 4. Read state. Best effort: a stale badge is not worth failing a
-            //    sync that already delivered every message.
+            // 4. Read state, in both directions. Best effort: a stale badge is
+            //    not worth failing a sync that already delivered every message.
+            await flushReadCursors()
             await syncReadReceipts()
 
             // 5. And now that both the messages and the cursors are current,
@@ -694,6 +702,48 @@ actor SyncEngine {
         continuation.yield(.conversations)
     }
 
+    /// Post every read cursor the server has not acknowledged, in one call.
+    ///
+    /// The dirty flag is the queue and this is the drain; see
+    /// `read_cursor_synced` in ``Schema``. A failure leaves the flags alone, so
+    /// the next sync tries again, which is the whole point of writing them down.
+    ///
+    /// A 429 is the one failure worth remembering. GroupMe rate-limits this
+    /// route hard, and a client that answers a refusal by asking again every
+    /// ninety seconds is the reason routes get rate-limited. So the drain stands
+    /// down for as long as the server asks, or an hour, which is what the
+    /// official client waits.
+    private func flushReadCursors() async {
+        if let until = readCursorPauseUntil {
+            guard Date() >= until else { return }
+            readCursorPauseUntil = nil
+        }
+        guard let currentUserID else { return }
+        let pending = (try? await store.conversations.pendingReadCursors()) ?? []
+        guard !pending.isEmpty else { return }
+
+        do {
+            try await api.markRead(pending.map {
+                GroupMeAPI.ReadReceipt(
+                    conversationId: $0.conversation.restID(myUserID: currentUserID),
+                    lastReadMessageId: $0.messageID)
+            })
+            for item in pending {
+                try? await store.conversations
+                    .markReadCursorSynced(item.conversation, at: item.messageID)
+            }
+            log.debug("posted \(pending.count) read cursor(s)")
+        } catch {
+            if (error as? APIError)?.status == 429 {
+                let pause = (error as? APIError)?.retryAfter ?? Self.readCursorPause
+                readCursorPauseUntil = Date().addingTimeInterval(pause)
+                log.notice("read cursors rate limited; standing down for \(Int(pause), privacy: .public)s")
+            } else {
+                log.notice("read cursors unposted: \(diagnosticText(error), privacy: .public)")
+            }
+        }
+    }
+
     private func syncReadReceipts() async {
         do {
             let receipts = try await api.readReceipts()
@@ -707,16 +757,17 @@ actor SyncEngine {
                 // is read, whatever the list said. Otherwise keep the list's
                 // unread count and just record where the cursor is.
                 if let head = row.lastMessageID, !Message.isNewer(head, than: readID) {
-                    try await store.conversations.markRead(conversation, upTo: readID)
+                    try await store.conversations.markRead(
+                        conversation, upTo: readID, reportedByServer: true)
                 } else if row.lastReadMessageID != readID {
                     // We are ahead: something was read on this device and the
-                    // receipt did not reach the server. `markRead` posts once
-                    // and does not retry, which is right for a tap and wrong
-                    // forever, so this is where forever gets fixed. Without it
-                    // every other device keeps showing a badge for a
-                    // conversation that was read here days ago.
+                    // receipt did not reach the server. Flagged rather than
+                    // posted from here, so it goes out batched with everything
+                    // else owed on the next pass. Without this, every other
+                    // device keeps showing a badge for a conversation that was
+                    // read here days ago.
                     if let local = row.lastReadMessageID, Message.isNewer(local, than: readID) {
-                        try? await api.markRead(conversation: conversation, messageId: local)
+                        try await store.conversations.markReadCursorPending(conversation)
                     } else {
                         row.lastReadMessageID = readID
                         try await store.conversations.upsert(row: row)

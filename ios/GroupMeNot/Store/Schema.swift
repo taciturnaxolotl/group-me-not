@@ -10,7 +10,7 @@ import OSLog
 /// `Message` never needs a migration.
 nonisolated enum Schema {
     /// Bump this and add a `case` to `apply(step:)` for every change.
-    static let version: Int32 = 10
+    static let version: Int32 = 11
 
     private static let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "schema")
 
@@ -57,6 +57,7 @@ nonisolated enum Schema {
         case 8: try db.execute(addSubgroups)
         case 9: try db.execute(addShareURL)
         case 10: try db.execute(addGroupProfile)
+        case 11: try db.execute(addReadCursorSync)
         default:
             throw SQLError(code: 1, message: "no migration defined for schema \(step)", sql: nil)
         }
@@ -118,6 +119,35 @@ nonisolated enum Schema {
     ALTER TABLE conversations ADD COLUMN created_at INTEGER;
     ALTER TABLE conversations ADD COLUMN requires_approval INTEGER;
     ALTER TABLE conversations ADD COLUMN join_question TEXT;
+    """
+
+    // MARK: - Version 11
+
+    /// Whether the server has been told where the reader got to.
+    ///
+    /// A read receipt is posted once and not retried, which is right for the
+    /// tap: a cursor that misses is not worth the rate limit a retry storm would
+    /// earn, and GroupMe rate-limits this route hard enough that the official
+    /// client backs off for an hour on a 429. The trouble is that "once" also
+    /// means "never again", and a receipt lost to a dead radio leaves this phone
+    /// permanently ahead of the server. Every other device then shows a badge
+    /// for a conversation that was read here days ago.
+    ///
+    /// So the flag is the queue. A read clears it, a sync posts every
+    /// conversation still carrying a zero in one batch, and an accepted post
+    /// sets it back — but only where the cursor is still the one that was sent,
+    /// so a read that happened while the request was in flight stays pending.
+    ///
+    /// Existing rows default to synced. They may not be, but the alternative is
+    /// a first run that posts a cursor for every conversation on the account,
+    /// and the ordinary reconciliation against `GET /v4/read_receipts` catches
+    /// the ones that matter.
+    private static let addReadCursorSync = """
+    ALTER TABLE conversations ADD COLUMN read_cursor_synced INTEGER NOT NULL DEFAULT 1;
+
+    -- The drain's query: every conversation the server has not heard about.
+    CREATE INDEX conversations_unsynced_cursor
+        ON conversations(read_cursor_synced) WHERE read_cursor_synced = 0;
     """
 
     // MARK: - Version 1

@@ -473,10 +473,17 @@ final class AppModel {
         try? await store.conversations.markRead(conversation, upTo: head)
         await reloadConversations()
         guard let head else { return }
-        Task { [api] in
-            // One shot: a read cursor that misses is worth nothing next to the
-            // rate limit a retry storm would earn.
-            try? await api.markRead(conversation: conversation, messageId: head)
+        Task { [api, store] in
+            // One shot, still: a read cursor that misses is worth nothing next
+            // to the rate limit a retry storm would earn. What is new is that
+            // missing is no longer forever — `markRead` left the row flagged as
+            // owed, and the next sync posts it batched with the rest. So this
+            // call is for the other devices to hear about it now rather than in
+            // a minute and a half, and clearing the flag is what says it landed.
+            do {
+                try await api.markRead(conversation: conversation, messageId: head)
+                try await store.conversations.markReadCursorSynced(conversation, at: head)
+            } catch {}
         }
     }
 

@@ -242,16 +242,84 @@ actor ConversationStore {
 
     /// Marks read locally. Clears the badge immediately; the read receipt POST
     /// can follow whenever the network is willing.
-    func markRead(_ conversation: ConversationID, upTo messageID: String? = nil) throws {
+    ///
+    /// A cursor that moved forward here is left flagged for posting. One that
+    /// arrived from `GET /v4/read_receipts` is not: the server is where it came
+    /// from, so sending it back is a request that can only tell it what it
+    /// already said.
+    ///
+    /// Every SET expression reads the row as it was before the statement, which
+    /// is what lets the flag be decided by comparing against the cursor the same
+    /// statement is replacing.
+    func markRead(
+        _ conversation: ConversationID,
+        upTo messageID: String? = nil,
+        reportedByServer: Bool = false
+    ) throws {
         let target = try messageID ?? currentLastMessageID(conversation)
         try db.run(
             """
             UPDATE conversations
                SET unread_count = 0,
-                   last_read_message_id = COALESCE(?, last_read_message_id)
-             WHERE key = ?
+                   read_cursor_synced = CASE
+                       WHEN ?3 THEN 1
+                       WHEN ?1 IS NOT NULL
+                            AND CAST(?1 AS INTEGER)
+                                > CAST(COALESCE(last_read_message_id, '0') AS INTEGER)
+                       THEN 0
+                       ELSE read_cursor_synced END,
+                   last_read_message_id = COALESCE(?1, last_read_message_id)
+             WHERE key = ?2
             """,
-            [SQLValue(target), SQLValue(conversation.storageKey)]
+            [SQLValue(target), SQLValue(conversation.storageKey), SQLValue(reportedByServer)]
+        )
+    }
+
+    /// Every read cursor the server has not acknowledged, for the batch post.
+    ///
+    /// Paired with ``markReadCursorSynced(_:at:)``: what comes out of here goes
+    /// into one `POST /v4/read_receipts`, and what that call accepts goes back
+    /// in there.
+    func pendingReadCursors() throws -> [(conversation: ConversationID, messageID: String)] {
+        try db.query(
+            """
+            SELECT kind, remote_id, last_read_message_id
+              FROM conversations
+             WHERE read_cursor_synced = 0
+               AND last_read_message_id IS NOT NULL
+               AND CAST(last_read_message_id AS INTEGER) > 0
+            """
+        ) { (kind: $0.int64(0), remoteID: $0.string(1), cursor: $0.string(2)) }
+        .compactMap { row in
+            ConversationID(storageKind: row.kind, remoteID: row.remoteID)
+                .map { (conversation: $0, messageID: row.cursor) }
+        }
+    }
+
+    /// Flags a cursor as owed to the server.
+    ///
+    /// The receipts sync uses this when it finds the server behind us, which is
+    /// a receipt that went missing however it went missing.
+    func markReadCursorPending(_ conversation: ConversationID) throws {
+        try db.run(
+            "UPDATE conversations SET read_cursor_synced = 0 WHERE key = ?",
+            [SQLValue(conversation.storageKey)]
+        )
+    }
+
+    /// Records that the server has the cursor we sent.
+    ///
+    /// Only where it is still the cursor we sent. A read that happened while the
+    /// post was in flight left a newer one behind, and marking that synced would
+    /// strand it: the flag is the only thing that remembers to send it.
+    func markReadCursorSynced(_ conversation: ConversationID, at messageID: String) throws {
+        try db.run(
+            """
+            UPDATE conversations
+               SET read_cursor_synced = 1
+             WHERE key = ?1 AND last_read_message_id = ?2
+            """,
+            [SQLValue(conversation.storageKey), SQLValue(messageID)]
         )
     }
 
