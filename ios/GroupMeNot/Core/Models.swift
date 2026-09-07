@@ -207,7 +207,19 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
             buckets[glyph] = merged
         }
 
-        return order.compactMap { glyph in
+        // Sorted by glyph, and deliberately not by anything that moves.
+        //
+        // The order the wire hands back is the server's own, and it is not a
+        // promise: a reaction landing rewrites the whole set, so chips could
+        // rearrange themselves under a thumb that was already on its way down.
+        // Counting is worse, not better — order by popularity and every chip on
+        // a busy message shuffles each time somebody votes.
+        //
+        // The glyph is the one thing about a bucket that cannot change, so the
+        // same reactions always draw in the same places; a new one arrives at a
+        // fixed spot and nothing else moves. Unicode order also keeps the
+        // faces together and the hands together, which is free.
+        return order.sorted().compactMap { glyph in
             guard let users = buckets[glyph], !users.isEmpty else { return nil }
             return ReactionSummary(
                 glyph: glyph,
