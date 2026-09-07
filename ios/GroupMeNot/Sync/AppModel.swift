@@ -22,7 +22,21 @@ final class AppModel {
     /// The conversation list, newest activity first.
     private(set) var conversations: [ConversationRow] = []
     /// The open conversation's transcript, oldest first.
-    private(set) var messages: [Message] = []
+    private(set) var messages: [Message] = [] {
+        // Every write, wherever it comes from — a reload, an optimistic
+        // reaction, an edit landing in place. See ``messagesRevision``.
+        didSet { messagesRevision &+= 1 }
+    }
+
+    /// A counter that moves whenever ``messages`` does.
+    ///
+    /// What the transcript watches, instead of watching the array. `onChange`
+    /// compares what it is given, and comparing two hundred `Message` values
+    /// element by element — each with its attachments, reactions and strings —
+    /// is real work to answer a question the setter already knew the answer to.
+    /// A conversation is one array assignment away from a rebuild either way;
+    /// this way the check costs a machine word.
+    private(set) var messagesRevision = 0
     /// Queued sends for the open conversation, to append below `messages`.
     private(set) var outbox: [OutboxEntry] = []
     /// How far along each queued message's attachments are, by source guid.
@@ -191,6 +205,8 @@ final class AppModel {
     /// When we last told the server we are here, so the heartbeat can run at
     /// GroupMe's three minutes rather than at whatever the sync happens to use.
     @ObservationIgnored private var presencePublishedAt: Date?
+    /// When the heartbeat last ran a whole sync, as opposed to merely ticking.
+    @ObservationIgnored private var lastHeartbeatSyncAt: Date?
 
     /// Where the signed-in user is remembered between launches. Small enough for
     /// defaults, and needed before the first request: DM routes are addressed
@@ -311,8 +327,20 @@ final class AppModel {
         publishPresence(.away)
     }
 
-    /// How often the app syncs on its own while somebody is looking at it.
+    /// How often the app syncs on its own while the push socket is down or
+    /// unproven. The fallback has to be brisk, because it is the only thing
+    /// bringing messages in.
     private static let heartbeatInterval: TimeInterval = 90
+
+    /// How often it syncs while the socket is up and delivering.
+    ///
+    /// A full sync is both list endpoints, a subgroups call per group that has
+    /// topics, and the read receipts — six or seven requests to be told what the
+    /// socket has already said. Every ninety seconds of that is an hour of
+    /// somebody's battery spent confirming nothing changed. Five minutes is
+    /// still often enough to catch the failure this exists for, which is a
+    /// socket that has stopped delivering without saying so.
+    private static let relaxedHeartbeat: TimeInterval = 300
 
     /// Sync on a timer, quietly, for as long as the app is in front.
     ///
@@ -335,10 +363,28 @@ final class AppModel {
         }
     }
 
+    /// How long a quiet sync may be put off for. Paced by how much the socket
+    /// can be trusted to have covered the gap, and asked fresh each tick so a
+    /// socket that drops mid-session tightens the loop on the next pass rather
+    /// than at the next foreground.
+    private var syncInterval: TimeInterval {
+        realtime.connection.isConnected ? Self.relaxedHeartbeat : Self.heartbeatInterval
+    }
+
+    /// The tick, which is not the same thing as the sync.
+    ///
+    /// Presence is cheap and wants to be current — one small request, and the
+    /// status on a DM header is worth nothing if it is five minutes old — so it
+    /// runs every time round. The sync is six or seven requests and only runs
+    /// when it is actually due.
     private func beat() async {
         guard isSignedIn, realtime.reachability != .offline else { return }
         publishPresence(.online)
         refreshPartnerPresence()
+
+        let due = lastHeartbeatSyncAt.map { Date().timeIntervalSince($0) >= syncInterval } ?? true
+        guard due else { return }
+        lastHeartbeatSyncAt = Date()
         await sync.sync(reason: .heartbeat)
     }
 
@@ -800,12 +846,19 @@ final class AppModel {
     /// DMs report no window, so this is false for them; see
     /// ``ConversationRow/canEdit(_:now:)``.
     func canEdit(_ message: Message) -> Bool {
+        guard let conversation = openConversationID else { return false }
+        return canEdit(message, in: conversations.first { $0.id == conversation })
+    }
+
+    /// The same question asked by somebody who already has the row.
+    ///
+    /// The transcript asks this once per bubble, and looking the conversation up
+    /// each time is a scan of the whole list per row: two hundred rows against a
+    /// hundred conversations, on every pass. The caller holds the row already.
+    func canEdit(_ message: Message, in row: ConversationRow?) -> Bool {
         guard let me = currentUser?.id, (message.senderId ?? message.userId) == me else { return false }
         guard !message.isDeleted, !message.isSystem, !message.isListPreview else { return false }
-        guard let conversation = openConversationID,
-              let row = conversations.first(where: { $0.id == conversation })
-        else { return false }
-        return row.canEdit(message)
+        return row?.canEdit(message) ?? false
     }
 
     /// Rewrite one of our own messages, optimistically.
@@ -868,12 +921,15 @@ final class AppModel {
     /// editing this is normally available — but a group that has switched
     /// deletion off gets no action rather than one the server refuses.
     func canDelete(_ message: Message) -> Bool {
+        guard let conversation = openConversationID else { return false }
+        return canDelete(message, in: conversations.first { $0.id == conversation })
+    }
+
+    /// As ``canEdit(_:in:)``: for the caller that already holds the row.
+    func canDelete(_ message: Message, in row: ConversationRow?) -> Bool {
         guard let me = currentUser?.id, (message.senderId ?? message.userId) == me else { return false }
         guard !message.isDeleted, !message.isSystem, !message.isListPreview else { return false }
-        guard let conversation = openConversationID,
-              let row = conversations.first(where: { $0.id == conversation })
-        else { return false }
-        return row.canDelete(message)
+        return row?.canDelete(message) ?? false
     }
 
     /// Take one of our own messages back.

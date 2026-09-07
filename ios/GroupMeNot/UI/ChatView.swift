@@ -54,6 +54,67 @@ nonisolated struct UnreadMark: Hashable, Sendable {
 /// convenient and be reasoned about on its own. It decides three things: where
 /// days break, where runs of one person's messages begin and end, and which
 /// queued sends still need a bubble of their own.
+/// Parsed and styled message text, remembered between transcript rebuilds.
+///
+/// Keyed by a message's id and the stamp of its last revision, so an edit or a
+/// reaction lands a new entry and everything else is answered from memory. Held
+/// by the view, so it lives and dies with one open conversation.
+///
+/// A class with a lock rather than an actor: `Transcript.rows` is synchronous
+/// and runs off the main actor, and hopping onto an actor for every message
+/// would cost more than the parse it is saving.
+nonisolated final class StyledTextCache: @unchecked Sendable {
+    struct Entry {
+        var text: MessageText
+        var styled: AttributedString
+    }
+
+    private struct Key: Hashable {
+        var id: String
+        var stamp: Int
+        var isOwn: Bool
+    }
+
+    private let lock = NSLock()
+    private var entries: [Key: Entry] = [:]
+
+    /// Past this the conversation has been scrolled a very long way back, and
+    /// the oldest entries are cheaper to rebuild than to keep.
+    private static let capacity = 3_000
+
+    func entry(for message: Message, isOwn: Bool) -> Entry {
+        // `updated_at` is the revision marker for the only two things this
+        // draws: an edit moves it, and so does the optimistic copy the composer
+        // writes before the server has agreed — and a failed edit puts the old
+        // stamp back, which correctly finds the old entry again. A tombstone
+        // joins it because deleting is the other way text stops being text.
+        let key = Key(
+            id: message.id,
+            stamp: (message.updatedAt ?? 0) &+ (message.deletedAt ?? 0),
+            isOwn: isOwn)
+
+        lock.lock()
+        if let hit = entries[key] {
+            lock.unlock()
+            return hit
+        }
+        lock.unlock()
+
+        let derived = Self.derive(message, isOwn: isOwn)
+
+        lock.lock()
+        if entries.count >= Self.capacity { entries.removeAll(keepingCapacity: true) }
+        entries[key] = derived
+        lock.unlock()
+        return derived
+    }
+
+    static func derive(_ message: Message, isOwn: Bool) -> Entry {
+        let text = message.announcesItsAttachment ? .empty : MessageTextParser.parse(message)
+        return Entry(text: text, styled: MessageStyling.style(text, isOwn: isOwn))
+    }
+}
+
 nonisolated enum Transcript {
 
     /// Messages closer together than this, from the same person, on the same
@@ -75,6 +136,7 @@ nonisolated enum Transcript {
         unresolved: Set<String> = [],
         members: [Member] = [],
         unread: UnreadMark? = nil,
+        styling: StyledTextCache? = nil,
         calendar: Calendar = .current
     ) -> [TranscriptRow] {
         let myID = currentUser?.id
@@ -139,7 +201,12 @@ nonisolated enum Transcript {
             // `body`. This whole function runs off the main actor; see
             // `ChatView.rebuild()`.
             let own = isOwn(message, myID: myID)
-            let text = message.announcesItsAttachment ? .empty : MessageTextParser.parse(message)
+            // Parsed once per revision of a message rather than once per pass.
+            // A catch-up rewrites the transcript several times a second, and
+            // running a data detector over two hundred messages each time to
+            // arrive at the same answer is most of what this function costs.
+            let styled = styling?.entry(for: message, isOwn: own)
+                ?? StyledTextCache.derive(message, isOwn: own)
 
             rows.append(.message(MessageDisplay(
                 // Already unique: history carries a server id, and an echo
@@ -152,8 +219,8 @@ nonisolated enum Transcript {
                 showsSender: opensRun,
                 isRunTail: closesRun,
                 delivery: delivery,
-                text: text,
-                styledText: MessageStyling.style(text, isOwn: own),
+                text: styled.text,
+                styledText: styled.styled,
                 reactions: message.reactionSummaries(currentUserID: myID),
                 reply: replyPreview(
                     for: message, in: byID, unresolved: unresolved, names: names),
@@ -292,6 +359,12 @@ struct ChatView: View {
     @State private var composerFocused = false
     /// Whose profile is open, if anybody's.
     @State private var viewingPerson: PersonRef?
+    /// Parsed text, kept across rebuilds. Lives as long as this view does,
+    /// which is as long as the conversation is open.
+    @State private var styling = StyledTextCache()
+    /// The open conversation's row, resolved when the list changes rather than
+    /// once per bubble per pass; see ``current``.
+    @State private var currentRow: ConversationRow?
 
     // MARK: Scroll state
 
@@ -646,7 +719,14 @@ struct ChatView: View {
                            meID: model.currentUser?.id)
             }
             .onDisappear(perform: teardown)
-            .onChange(of: model.messages, initial: true) { messagesChanged() }
+            .onChange(of: model.messagesRevision, initial: true) { messagesChanged() }
+            // One scan when the list moves, rather than one per bubble per
+            // pass. Only assigned when it differs, so a sync that changes some
+            // other conversation does not redraw this one.
+            .onChange(of: model.conversations, initial: true) {
+                let resolved = model.conversations.first { $0.id == conversation.id }
+                if resolved != currentRow { currentRow = resolved }
+            }
             .onChange(of: model.outbox, initial: true) { rebuild() }
             // A fetched original turns "Loading…" into the message itself, and
             // a failed one turns it into an answer rather than a promise.
@@ -809,7 +889,7 @@ struct ChatView: View {
             onDiscard: { discard(item) },
             // Asked each time the row is built, so the action disappears on its
             // own once the server's edit window closes.
-            canEdit: model.canEdit(item.message),
+            canEdit: model.canEdit(item.message, in: currentRow),
             onEdit: { text in edit(item, to: text) },
             onPress: { frame in
                 // Derived off the main actor, and the first derivation is a
@@ -821,8 +901,8 @@ struct ChatView: View {
                 Task.detached(priority: .utility) { _ = await EmojiCatalog.shared.all() }
                 pressed = MessagePress(
                     item: item, frame: frame,
-                    canEdit: model.canEdit(item.message),
-                    canDelete: model.canDelete(item.message))
+                    canEdit: model.canEdit(item.message, in: currentRow),
+                    canDelete: model.canDelete(item.message, in: currentRow))
             },
             isHeld: pressed?.item.id == item.id,
             onOpenConversation: onOpenConversation,
@@ -1575,7 +1655,7 @@ struct ChatView: View {
     /// so an unread count or a name that changes underneath is picked up. The
     /// row passed in is the fallback for the frame before the list has it.
     private var current: ConversationRow {
-        model.conversations.first { $0.id == conversation.id } ?? conversation
+        currentRow ?? conversation
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
@@ -1686,10 +1766,11 @@ struct ChatView: View {
 
         rebuildTask?.cancel()
         rebuildTask = Task {
-            let built = await Task.detached(priority: .userInitiated) {
+            let built = await Task.detached(priority: .userInitiated) { [styling] in
                 Transcript.rows(
                     messages: messages, outbox: outbox, currentUser: currentUser,
-                    quoted: quoted, unresolved: unresolved, members: members, unread: unread)
+                    quoted: quoted, unresolved: unresolved, members: members, unread: unread,
+                    styling: styling)
             }.value
             guard !Task.isCancelled else { return }
             // Only when something actually moved.

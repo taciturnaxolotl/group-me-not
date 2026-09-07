@@ -8,6 +8,27 @@ import Foundation
 actor MessageStore {
     private let db: Database
 
+    /// Messages already decoded, so a reload does not turn the same JSON into
+    /// the same values again.
+    ///
+    /// The transcript is re-read whenever anything in it changes, and during a
+    /// catch-up that is several times a second over a window of hundreds. Almost
+    /// all of those rows are the ones that were there a moment ago. Every write
+    /// goes through this actor, so a cache that is dropped on write is exact
+    /// rather than hopeful: there is no staleness to reason about, because a row
+    /// that changed is a row that is no longer in here.
+    private var decoded: [MessageKey: Message] = [:]
+
+    private struct MessageKey: Hashable {
+        var conversation: String
+        var id: String
+    }
+
+    /// Roughly a long conversation's worth. Past it the whole thing goes rather
+    /// than the oldest: an exact eviction order costs more bookkeeping than the
+    /// decode it would save.
+    private static let decodeCacheCapacity = 5_000
+
     init(_ file: DatabaseFile) throws {
         self.db = try file.open()
     }
@@ -58,6 +79,7 @@ actor MessageStore {
             if let newest = messages.max(by: { Message.isNewer($1.id, than: $0.id) }) {
                 try ConversationWrites.applyLatest(newest, conversation, in: db)
             }
+            forget(messages.map(\.id), in: key)
             return written
         }
     }
@@ -236,17 +258,46 @@ actor MessageStore {
     /// anchor: the transcript holds one array of everything it draws, so a page
     /// of history is a longer read rather than a second one to splice on.
     func recent(_ conversation: ConversationID, limit: Int = 50) throws -> [Message] {
+        let key = conversation.storageKey
+        // The id comes back beside the payload so a hit can be answered without
+        // decoding the blob it arrived with.
         let rows = try db.query(
             """
-            SELECT payload FROM messages
+            SELECT id, payload FROM messages
              WHERE conversation_key = ?
              ORDER BY sort_key DESC, id DESC
              LIMIT ?
             """,
-            [SQLValue(conversation.storageKey), SQLValue(limit)],
-            decodeMessage
-        )
-        return rows.reversed()
+            [SQLValue(key), SQLValue(limit)]
+        ) { row in (id: row.string(0), payload: row.dataOrNil(1)) }
+
+        var messages: [Message] = []
+        messages.reserveCapacity(rows.count)
+        for row in rows {
+            let cacheKey = MessageKey(conversation: key, id: row.id)
+            if let hit = decoded[cacheKey] {
+                messages.append(hit)
+                continue
+            }
+            guard let payload = row.payload,
+                  let message = try? StoreCoding.decode(Message.self, from: payload)
+            else { continue }
+            remember(message, at: cacheKey)
+            messages.append(message)
+        }
+        return messages.reversed()
+    }
+
+    private func remember(_ message: Message, at key: MessageKey) {
+        if decoded.count >= Self.decodeCacheCapacity { decoded.removeAll(keepingCapacity: true) }
+        decoded[key] = message
+    }
+
+    /// Forget rows that have just been written. Called from the two places that
+    /// write one: the batch upsert and the merge behind every edit, reaction and
+    /// tombstone.
+    private func forget(_ ids: [String], in conversation: String) {
+        for id in ids { decoded.removeValue(forKey: MessageKey(conversation: conversation, id: id)) }
     }
 
     /// Sync heads for every conversation at once, so the list-and-diff step is
@@ -334,6 +385,7 @@ actor MessageStore {
                 SQLValue(StoreCoding.encodeIfPresent(message.reactions)),
             ])
         try ConversationWrites.applyLatest(message, conversation, in: db)
+        forget([message.id], in: conversation.storageKey)
     }
 
     private func loadMessage(id: String, in conversation: ConversationID) throws -> Message? {
