@@ -393,10 +393,23 @@ final class AppModel {
             person.school = body.school
             person.charms = await InterestCatalog.shared.charms(for: body.interests ?? [])
         }
-        person.sharedGroups = (await shared ?? []).compactMap { group in
+        // The server's answer first, then ours underneath it. Ours is every
+        // group whose roster we hold that has them in it — instant, offline,
+        // and a hedge against a legacy route that may not carry the field at
+        // all. Neither is complete on its own: the server knows about groups
+        // this phone has never opened, and we know about ones it declined to
+        // mention.
+        var groups: [SharedGroup] = (await shared ?? []).compactMap { group in
             guard let id = group.id, let name = group.groupName else { return nil }
             return SharedGroup(id: id, name: name, avatarURL: group.groupAvatar)
         }
+        let known = Set(groups.map(\.id))
+        let local = (try? await store.conversations.conversations(with: userID)) ?? []
+        for row in local {
+            guard case .group(let id) = row.id, !known.contains(id) else { continue }
+            groups.append(SharedGroup(id: id, name: row.name, avatarURL: row.avatarURL))
+        }
+        person.sharedGroups = groups
         if let found = await status {
             presence[userID] = found
             person.presence = found

@@ -486,6 +486,32 @@ actor ConversationStore {
         )
     }
 
+    /// The groups this person is in, as far as this device has been told.
+    ///
+    /// A local answer to a question the server also answers, and worth having
+    /// for two reasons. It is instant and works with the radio off, and it is a
+    /// second source for a field on a legacy route whose shape is documented
+    /// nowhere. What it knows is bounded by which rosters have been fetched —
+    /// opening a conversation is what fetches one — so it is a floor rather than
+    /// a truth, and the caller merges it with what the server says.
+    ///
+    /// Groups only. A DM with somebody is not a group you are both in, and a
+    /// topic is its parent wearing a different name.
+    func conversations(with userID: String) throws -> [ConversationRow] {
+        try db.query(
+            """
+            SELECT \(Self.columns) FROM conversations
+              JOIN members ON members.conversation_key = conversations.key
+             WHERE members.user_id = ?
+               AND conversations.kind = 0
+               AND conversations.parent_id IS NULL
+             ORDER BY conversations.last_message_at DESC
+            """,
+            [SQLValue(userID)],
+            Self.decode
+        )
+    }
+
     /// Total unread across every conversation, for the app badge.
     func totalUnread() throws -> Int {
         try db.queryOne("SELECT COALESCE(SUM(unread_count), 0) FROM conversations") { $0.int(0) } ?? 0

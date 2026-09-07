@@ -152,20 +152,29 @@ struct PersonView: View {
     }
 
     private var shared: some View {
-        VStack(spacing: 8) {
-            Text(sharedSummary)
-                .font(.subheadline)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
+        VStack(spacing: 10) {
+            VStack(spacing: 2) {
+                // The name in the sentence, weighted. "You're both in" is the
+                // grammar; the group is the fact, and a line of even weight
+                // makes the reader find it for themselves.
+                (Text("You're both in ") + Text(firstShared).fontWeight(.semibold))
+                    .font(.title3)
+                    .multilineTextAlignment(.center)
+                if let rest = otherShared {
+                    Text(rest)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
             HStack(spacing: 8) {
                 ForEach((person?.sharedGroups ?? []).prefix(Self.facesShown)) { group in
-                    Avatar(url: group.avatarURL, name: group.name, size: 44, isGroup: true)
+                    Avatar(url: group.avatarURL, name: group.name, size: 48, isGroup: true)
                 }
                 if let extra = overflow {
                     Text("+\(extra)")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.secondary)
-                        .frame(width: 44, height: 44)
+                        .frame(width: 48, height: 48)
                         .background(.quaternary, in: .circle)
                 }
             }
@@ -184,15 +193,20 @@ struct PersonView: View {
     /// Named rather than counted, because the name is the useful half: "you are
     /// both in Residents of Rivendell" places somebody, where "6 groups" does
     /// not.
+    private var firstShared: String {
+        person?.sharedGroups.first?.name ?? ""
+    }
+
+    private var otherShared: String? {
+        let others = (person?.sharedGroups.count ?? 0) - 1
+        guard others > 0 else { return nil }
+        return others == 1 ? "and 1 other group" : "and \(others) other groups"
+    }
+
+    /// The whole sentence, for anybody listening rather than looking.
     private var sharedSummary: String {
-        let groups = person?.sharedGroups ?? []
-        guard let first = groups.first else { return "" }
-        let others = groups.count - 1
-        switch others {
-        case 0: return "You're both in \(first.name)"
-        case 1: return "You're both in \(first.name) and 1 other group"
-        default: return "You're both in \(first.name) and \(others) other groups"
-        }
+        guard !firstShared.isEmpty else { return "" }
+        return ["You're both in \(firstShared)", otherShared].compactMap { $0 }.joined(separator: " ")
     }
 
     private func since(_ date: Date) -> some View {

@@ -1601,13 +1601,29 @@ struct ChatView: View {
             }
         }
         ToolbarItem(placement: .principal) {
-            Button { isInfoPresented = true } label: {
+            Button(action: openDetails) {
                 ConversationTitle(conversation: current, presence: model.partnerPresence)
             }
                 .buttonStyle(.plain)
                 .accessibilityLabel(titleAccessibilityLabel)
-                .accessibilityHint("Shows conversation details")
+                .accessibilityHint(
+                    current.isGroup ? "Shows conversation details" : "Shows their profile")
         }
+    }
+
+    /// What the header opens.
+    ///
+    /// A group has a roster, a description and a way out, and that is a screen.
+    /// A DM has one other person in it, so the sheet was a header and a list of
+    /// one — a page about a conversation that is really a page about somebody.
+    /// The profile is the thing being asked for, so it is the thing that opens.
+    private func openDetails() {
+        guard case .direct(let otherUserID) = current.id else {
+            isInfoPresented = true
+            return
+        }
+        viewingPerson = PersonRef(
+            id: otherUserID, name: current.name, avatarURL: current.avatarURL)
     }
 
     private var titleAccessibilityLabel: String {
