@@ -1949,10 +1949,19 @@ final class AppModel {
     /// Indicators die by timeout: there is no "stopped typing" frame on the
     /// wire. Nothing else will wake us once the last event lands, so each event
     /// schedules its own expiry.
+    ///
+    /// Timed from the *oldest* entry rather than from now. Three people typing
+    /// at once used to mean the sweep was rescheduled a full expiry into the
+    /// future every time any of them sent a frame, so somebody who had stopped
+    /// could sit in the list for twice as long as they should — and then leave
+    /// it in the middle of the other two still typing, which is the flicker seen
+    /// from the other end.
     private func scheduleTypingSweep() {
         typingSweep?.cancel()
+        guard let oldest = typingUserIDs.values.min() else { return }
+        let wait = max(PushEvent.Typing.expiry - Date().timeIntervalSince(oldest), 0.05)
         typingSweep = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(PushEvent.Typing.expiry))
+            try? await Task.sleep(for: .seconds(wait))
             guard !Task.isCancelled else { return }
             self?.sweepTyping()
         }
@@ -1960,7 +1969,13 @@ final class AppModel {
 
     private func sweepTyping() {
         let now = Date()
-        typingUserIDs = typingUserIDs.filter { now.timeIntervalSince($0.value) < PushEvent.Typing.expiry }
+        let remaining = typingUserIDs.filter {
+            now.timeIntervalSince($0.value) < PushEvent.Typing.expiry
+        }
+        // Only when it actually changed. Assigning an equal dictionary still
+        // counts as a change to anything observing it, and the indicator would
+        // re-animate on every sweep for as long as anybody was typing.
+        if remaining != typingUserIDs { typingUserIDs = remaining }
         if !typingUserIDs.isEmpty { scheduleTypingSweep() }
     }
 

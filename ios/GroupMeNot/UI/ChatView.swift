@@ -1064,7 +1064,13 @@ struct ChatView: View {
     @ViewBuilder private var typingRow: some View {
         if model.isAnyoneTyping {
             TypingIndicator(people: model.typingPeople, names: model.typingNames)
-                .transition(.opacity)
+                // Quick in, slow out. Somebody starting to type is news and
+                // should arrive promptly; somebody stopping is a guess made by a
+                // timer, and a leisurely fade is both honest about that and much
+                // calmer to sit next to than a row that snaps away.
+                .transition(.asymmetric(
+                    insertion: .opacity.animation(.easeOut(duration: 0.15)),
+                    removal: .opacity.animation(.easeIn(duration: 0.45))))
                 // Scoped to the indicator. An implicit animation on the whole
                 // stack re-animates every row on every typing event, which is
                 // both wasted work and a way to lose a long press mid-flight.

@@ -134,9 +134,20 @@ nonisolated struct PushEvent: Sendable, Hashable {
         /// `InputBarFragment` throttle). Not negotiated, so matching it is how we
         /// look normal to everyone else.
         static let publishThrottle: TimeInterval = 1.0
-        /// Drop a received indicator this long after its last event. Any new event
-        /// for the same user restarts the clock.
-        static let expiry: TimeInterval = 1.5
+        /// Drop a received indicator this long after its last event. Any new
+        /// event for the same user restarts the clock.
+        ///
+        /// Longer than the 1.5s the Android client uses, and deliberately.
+        /// Senders publish at most once a second, so 1.5s leaves half a second
+        /// of margin for the whole round trip — and a socket does not deliver on
+        /// a metronome. One frame arriving late, or a person pausing between two
+        /// words, and the row vanishes and comes back a moment later; do that a
+        /// few times and the transcript is blinking at the reader.
+        ///
+        /// Three seconds is the other side of that trade. An indicator can
+        /// outlive the typing by a second or two, which nobody notices, in
+        /// exchange for one that stays still while somebody is actually writing.
+        static let expiry: TimeInterval = 3.0
     }
 
     /// Literals seen in `FayeService`. Anything else falls through to a message
