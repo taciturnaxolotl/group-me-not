@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Message history on disk.
 ///
@@ -7,6 +8,7 @@ import Foundation
 /// speed whether or not there is a radio.
 actor MessageStore {
     private let db: Database
+    private let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "messages")
 
     /// Messages already decoded, so a reload does not turn the same JSON into
     /// the same values again.
@@ -296,7 +298,15 @@ actor MessageStore {
             }
             guard let payload = row.payload,
                   let message = try? StoreCoding.decode(Message.self, from: payload)
-            else { continue }
+            else {
+                // Skipped rather than thrown, which is a change from what this
+                // read used to do: one unreadable row used to fail the whole
+                // query and blank the transcript. Dropping it keeps the other
+                // two hundred messages on screen, but silently dropping one is
+                // its own kind of wrong, so it says so.
+                log.error("unreadable message \(row.id, privacy: .public) in \(key, privacy: .public); left out of the transcript")
+                continue
+            }
             remember(message, at: cacheKey)
             messages.append(message)
         }
@@ -308,9 +318,18 @@ actor MessageStore {
         decoded[key] = message
     }
 
-    /// Forget rows that have just been written. Called from the two places that
-    /// write one: the batch upsert and the merge behind every edit, reaction and
-    /// tombstone.
+    /// Forget rows that have just been written.
+    ///
+    /// Called from all three writers, and the count is the point: ``upsert``,
+    /// ``writeMerged`` and ``writeReactions`` are every statement in the app
+    /// that changes a stored message. Nothing outside this actor touches the
+    /// table.
+    ///
+    /// Deletion needs no equivalent, and that is worth stating because it looks
+    /// like an omission. Dropping a conversation cascades its messages away, and
+    /// stale entries for them are unreachable: ``recent`` asks the cache only
+    /// about rows the query has already returned, so the cache can substitute a
+    /// value but can never invent a row.
     private func forget(_ ids: [String], in conversation: String) {
         for id in ids { decoded.removeValue(forKey: MessageKey(conversation: conversation, id: id)) }
     }
