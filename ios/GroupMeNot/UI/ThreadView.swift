@@ -59,6 +59,8 @@ struct ThreadView: View {
     var onSend: (String, [PickedMedia]) -> Void = { _, _ in }
     var onDismiss: () -> Void = {}
 
+    @Environment(AppModel.self) private var model
+
     @State private var draft = ""
     @State private var gathered = false
     /// Drives the only thing that animates on the way in: the scrim and the
@@ -331,6 +333,14 @@ struct ThreadView: View {
                     .padding(.vertical, 11)
                     .frame(minHeight: Self.composerHeight)
                     .accessibilityLabel("Reply")
+                    // A chain is not a different conversation, so writing in one
+                    // is writing in it. Without this the dots stopped the moment
+                    // somebody opened a reply, which reads as them having walked
+                    // away mid-sentence.
+                    .onChange(of: draft) { _, text in
+                        guard !text.isEmpty else { return }
+                        Task { await model.userIsTyping() }
+                    }
 
                 sendButton
                     .animation(.snappy(duration: 0.18), value: canSend)

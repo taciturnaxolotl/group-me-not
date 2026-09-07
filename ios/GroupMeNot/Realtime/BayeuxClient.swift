@@ -261,7 +261,6 @@ actor BayeuxClient {
         let now = Date()
         if let last = lastTypingSentAt[channel],
            now.timeIntervalSince(last) < PushEvent.Typing.publishThrottle { return }
-        lastTypingSentAt[channel] = now
 
         var frame: [String: Any] = [
             "channel": channel,
@@ -275,7 +274,17 @@ actor BayeuxClient {
             ] as [String: Any],
         ]
         frame = await authorised(frame)
-        try? await send(frame)
+        do {
+            try await send(frame)
+            // Stamped only once it has gone. Marking the throttle before the
+            // write meant a frame lost to a socket on its way down still bought
+            // a second of silence, and the next keystroke — the one that would
+            // have said "still here" — was dropped as a duplicate of something
+            // nobody received.
+            lastTypingSentAt[channel] = now
+        } catch {
+            log.debug("typing frame for \(channel, privacy: .public) did not go out")
+        }
     }
 
     // MARK: - The supervision loop
