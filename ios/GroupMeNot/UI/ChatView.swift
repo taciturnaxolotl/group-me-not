@@ -372,7 +372,7 @@ struct ChatView: View {
     /// answers "is the reader at the foot", so it needs enough height to be a
     /// tolerance rather than a hairline — but no more than that, because it is
     /// also the whole of the gap between the last bubble and the composer.
-    private static let footHeight: CGFloat = 16
+    private static let footHeight: CGFloat = 12
 
     /// Whether the foot of the transcript is on screen.
     ///
@@ -2071,11 +2071,9 @@ private struct TypingIndicator: View {
         }
         .padding(.horizontal, 2)
         .padding(.top, 4)
-        // Enough clearance that the soft scroll edge does not dissolve a bubble
-        // this small into the composer, and no more: the foot of the transcript
-        // already carries room of its own, and stacking a second gap on top of
-        // it left the dots floating well above the bar they belong under.
-        .padding(.bottom, 4)
+        // None of its own. The foot of the transcript sits directly under this
+        // and carries the whole gap; anything here is a second one on top of it.
+        .padding(.bottom, 0)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(sentence)
     }
