@@ -41,6 +41,7 @@ struct PersonView: View {
     @State private var person: Person?
     @State private var isAddingToGroup = false
     @State private var isShowingShared = false
+    @State private var viewing: PhotoTap?
 
     private var isMe: Bool { userID == model.currentUser?.id }
 
@@ -49,6 +50,7 @@ struct PersonView: View {
             VStack(spacing: 18) {
                 header
                 if !charms.isEmpty { chips }
+                if !(person?.photos.isEmpty ?? true) { photos }
                 if let anthem = person?.anthem { self.anthem(anthem) }
                 if !(person?.sharedGroups.isEmpty ?? true) { shared }
                 actions
@@ -137,6 +139,58 @@ struct PersonView: View {
                 .accessibilityElement(children: .combine)
             }
         }
+    }
+
+    /// The pictures somebody has put on their profile.
+    ///
+    /// A grid rather than a strip: three across is how the official client draws
+    /// them and it is the right call, because a row that scrolls sideways hides
+    /// most of itself, and the whole point of these is that they are a set. Two
+    /// rows of three, and no more — past six the sheet is a gallery with a name
+    /// at the top rather than a profile.
+    ///
+    /// GroupMe shows the block only when there are more than two. That rule is
+    /// not copied: one photo somebody chose to put up is still something they
+    /// chose to put up.
+    private var photos: some View {
+        LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3),
+            spacing: 8
+        ) {
+            ForEach(Array(shownPhotos.enumerated()), id: \.element) { index, url in
+                Button {
+                    viewing = PhotoTap(index: index)
+                } label: {
+                    RemoteImage(url: URL(string: url), maxPixelSize: 360) {
+                        Rectangle().fill(.quaternary)
+                    }
+                    .aspectRatio(1, contentMode: .fill)
+                    .frame(maxWidth: .infinity)
+                    .clipShape(.rect(cornerRadius: 10, style: .continuous))
+                    .contentShape(.rect(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Photo \(index + 1)")
+            }
+        }
+        .fullScreenCover(item: $viewing) { tap in
+            MediaViewer(
+                attachments: shownPhotos.map { Message.Attachment(type: "image", url: $0) },
+                initialIndex: tap.index)
+        }
+    }
+
+    private static let photosShown = 6
+
+    private var shownPhotos: [String] {
+        Array((person?.photos ?? []).prefix(Self.photosShown))
+    }
+
+    /// Which photo is open. A box rather than an index because `fullScreenCover`
+    /// wants something `Identifiable`, and index zero is a perfectly good answer.
+    private struct PhotoTap: Identifiable {
+        var index: Int
+        var id: Int { index }
     }
 
     private func anthem(_ url: URL) -> some View {

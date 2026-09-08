@@ -431,6 +431,7 @@ final class AppModel {
             person.since = body.user?.joined
             person.school = body.school
             person.charms = await InterestCatalog.shared.charms(for: body.interests ?? [])
+            person.photos = (body.photoUrls ?? []).filter { !$0.isEmpty }
         }
         // The server's answer first, then ours underneath it. Ours is every
         // group whose roster we hold that has them in it — instant, offline,

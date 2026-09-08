@@ -20,11 +20,14 @@ nonisolated struct Person: Hashable, Sendable {
     var school: String?
     var charms: [InterestCharm]
     var sharedGroups: [SharedGroup]
+    /// Pictures they have put on their profile, which most people have none of.
+    var photos: [String]
 
     init(id: String) {
         self.id = id
         self.charms = []
         self.sharedGroups = []
+        self.photos = []
     }
 }
 
@@ -67,6 +70,11 @@ nonisolated struct UserProfileBody: Decodable, Sendable {
     var graduationYear: String?
     var directories: [WireDirectory]?
     var sharedGroups: [WireSharedGroup]?
+    /// Inside `user`, not beside it — measured against two accounts that have
+    /// them, both with six. The Android model lists `photo_urls` on the
+    /// response, which is the same shape of mistake `group_id` was; reading both
+    /// levels costs nothing and settles it either way.
+    var photoUrls: [String]?
 
     nonisolated struct WireUser: Decodable, Sendable {
         var id: String?
@@ -125,7 +133,7 @@ nonisolated struct UserProfileBody: Decodable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case user, interests, graduationYear, directories, sharedGroups
+        case user, interests, graduationYear, directories, sharedGroups, photoUrls
     }
 
     /// Read from wherever it is.
@@ -146,6 +154,7 @@ nonisolated struct UserProfileBody: Decodable, Sendable {
         directories = Self.value([WireDirectory].self, .directories, outer, inner)
         sharedGroups = Self.value([WireSharedGroup].self, .sharedGroups, outer, inner)
         graduationYear = Self.text(.graduationYear, outer, inner)
+        photoUrls = Self.value([String].self, .photoUrls, outer, inner)
     }
 
     /// A container's value for a key, from the outer object or the inner one.
