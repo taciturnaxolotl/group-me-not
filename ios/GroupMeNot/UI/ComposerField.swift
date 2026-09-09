@@ -46,13 +46,35 @@ struct ComposerField: View {
             }
     }
 
+    /// A text view that keeps the caret in sight once its box has stopped
+    /// growing.
+    ///
+    /// The chase cannot happen where the words change, because at that moment
+    /// the field is still the height the line before justified: SwiftUI
+    /// measures and resizes afterwards. Scrolling then is scrolling inside
+    /// bounds that are about to change, and it leaves the last line sitting
+    /// under the edge — which is what "it stops moving" looks like from the
+    /// outside. Waiting for the layout that carries the new height is what
+    /// makes the line being typed the line on screen.
+    private final class GrowingTextView: UITextView {
+        /// Set when the text changed, cleared by the layout that answers it.
+        var caretNeedsChasing = false
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard caretNeedsChasing else { return }
+            caretNeedsChasing = false
+            scrollRangeToVisible(selectedRange)
+        }
+    }
+
     private struct Field: UIViewRepresentable {
         @Binding var text: String
         @Binding var isFocused: Bool
         let lineLimit: Int
 
-        func makeUIView(context: Context) -> UITextView {
-            let view = UITextView()
+        func makeUIView(context: Context) -> GrowingTextView {
+            let view = GrowingTextView()
             view.delegate = context.coordinator
             view.font = .preferredFont(forTextStyle: .body)
             view.adjustsFontForContentSizeCategory = true
@@ -62,12 +84,18 @@ struct ComposerField: View {
             // `TextField`, so the view measures as pure text.
             view.textContainerInset = .zero
             view.textContainer.lineFragmentPadding = 0
-            view.isScrollEnabled = false
+            // Always scrollable, and the height comes from `sizeThatFits`
+            // instead. Turning scrolling on only once the words outgrew the box
+            // meant flipping a mode inside a measuring pass, and the view that
+            // came out the other side had a six-line frame it would not scroll:
+            // the text past the sixth line was laid out and unreachable.
+            view.isScrollEnabled = true
+            view.alwaysBounceVertical = false
             view.text = text
             return view
         }
 
-        func updateUIView(_ view: UITextView, context: Context) {
+        func updateUIView(_ view: GrowingTextView, context: Context) {
             context.coordinator.parent = self
 
             if view.text != text {
@@ -80,6 +108,11 @@ struct ComposerField: View {
                 if view.markedTextRange != nil { view.unmarkText() }
                 view.text = text
                 context.coordinator.isApplyingExternalText = false
+                // Text set from outside moves the caret too, and after a send
+                // it moves it to the top of an empty field. A view that keeps
+                // the offset it had while six lines were being written shows a
+                // blank space where the placeholder should be.
+                view.caretNeedsChasing = true
             }
 
             if isFocused, !view.isFirstResponder {
@@ -95,7 +128,7 @@ struct ComposerField: View {
         /// which is why deleting a paragraph collapses the box on the same
         /// frame the words disappear rather than a beat afterwards.
         func sizeThatFits(
-            _ proposal: ProposedViewSize, uiView view: UITextView, context: Context
+            _ proposal: ProposedViewSize, uiView view: GrowingTextView, context: Context
         ) -> CGSize? {
             let width = proposal.width ?? view.bounds.width
             guard width > 0 else { return nil }
@@ -104,12 +137,11 @@ struct ComposerField: View {
                 CGSize(width: width, height: .greatestFiniteMagnitude)
             ).height
             let ceiling = line * CGFloat(lineLimit)
+            // Past the limit the box stops growing and the words move inside
+            // it instead, which is the whole of what this clamp does: the view
+            // scrolls either way, and below the ceiling there is simply never
+            // anything out of sight to scroll to.
             let height = min(max(wanted, line), ceiling)
-            // Past the limit the box stops growing, so the words have to move
-            // instead. A point of slack, because a fitting height and a ceiling
-            // computed the same way still disagree in the last decimal.
-            let scrolls = wanted > ceiling + 1
-            if view.isScrollEnabled != scrolls { view.isScrollEnabled = scrolls }
             return CGSize(width: width, height: ceil(height))
         }
 
@@ -126,8 +158,9 @@ struct ComposerField: View {
             func textViewDidChange(_ view: UITextView) {
                 guard !isApplyingExternalText else { return }
                 parent.text = view.text
-                // Only once it has stopped growing does the caret need chasing.
-                if view.isScrollEnabled { view.scrollRangeToVisible(view.selectedRange) }
+                // Asked for here, done in `layoutSubviews`, once the box is the
+                // height these words justify.
+                (view as? GrowingTextView)?.caretNeedsChasing = true
             }
 
             func textViewDidBeginEditing(_ view: UITextView) {
