@@ -359,16 +359,22 @@ actor GroupMeAPI {
     }
 
     /// Accept or decline a message request from somebody not in your contacts.
+    ///
+    /// Both routes are addressed by *conversation* id — the two user ids joined
+    /// with `+` — and not by the other person's user id, which is the one place
+    /// `/v3/chats/{id}` takes a bare user id and so the easy mistake to make.
+    /// Made here, every answer came back 404 and the request stayed waiting.
     func respondToChatRequest(_ accept: Bool, from otherUserID: String) async throws {
+        let convID = try await restID(for: .direct(otherUserID: otherUserID))
         if accept {
             try await client.postIgnoringResponse(
-                .v3, "/chats/\(otherUserID)/approve",
+                .v3, "/chats/\(convID)/approve",
                 body: Optional<Discard>.none, retry: .interactive)
         } else {
             // Declining is deleting the conversation, which is what the route
             // for it does: there is no "reject" verb.
             try await client.deleteIgnoringResponse(
-                .v3, "/chats/\(otherUserID)", retry: .interactive)
+                .v3, "/chats/\(convID)", retry: .interactive)
         }
     }
 

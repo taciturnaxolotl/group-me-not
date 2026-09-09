@@ -340,6 +340,7 @@ struct ChatView: View {
     var onOpenConversation: (ConversationRow) -> Void = { _ in }
 
     @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
 
     @State private var rows: [TranscriptRow] = []
     @State private var rebuildTask: Task<Void, Never>?
@@ -489,6 +490,9 @@ struct ChatView: View {
 
     @State private var isAttachmentPickerPresented = false
     @State private var isNewPollPresented = false
+    /// True while an answer to a message request is in flight; see
+    /// ``messageRequestBar(_:)``.
+    @State private var answeringRequest = false
     @State private var isNewEventPresented = false
     /// Media the user picked but has not sent yet, shown above the field.
     @State private var staged: [PickedMedia] = []
@@ -556,7 +560,9 @@ struct ChatView: View {
             // there is a *bar*, which is what lets the edge effect dissolve
             // content under it instead of stopping it dead against a slab.
             .safeAreaBar(edge: .bottom, spacing: 0) {
-                if model.canPostInOpenConversation {
+                if let request = model.messageRequest(in: current.id) {
+                    messageRequestBar(request)
+                } else if model.canPostInOpenConversation {
                     composer
                 } else {
                     readOnlyNotice
@@ -1280,6 +1286,50 @@ struct ChatView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
             .accessibilityElement(children: .combine)
+    }
+
+    /// The decision a message request is waiting on, where the messages are.
+    ///
+    /// A request from somebody outside your contacts is readable before it is
+    /// answered, and reading it is how anyone decides — so the answer belongs
+    /// under the transcript rather than only on a separate screen that shows a
+    /// single line of preview. It stands where the composer would, because
+    /// until it is answered there is nothing to say back.
+    private func messageRequestBar(_ request: PendingRequests.DirectRequest) -> some View {
+        VStack(spacing: 10) {
+            Text("\(current.name) is not in your contacts.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                Button("Accept") { answer(request, accept: true) }
+                    .buttonStyle(.borderedProminent)
+                Button("Delete", role: .destructive) { answer(request, accept: false) }
+                    .buttonStyle(.bordered)
+                if answeringRequest { ProgressView() }
+            }
+            .controlSize(.regular)
+            .disabled(answeringRequest)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity)
+        .glassEffect(.regular, in: .rect(cornerRadius: 24, style: .continuous))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+    }
+
+    /// Accepting leaves the conversation open, now with a composer. Declining
+    /// deletes it, so this screen is showing something that no longer exists
+    /// and steps back to the list.
+    private func answer(_ request: PendingRequests.DirectRequest, accept: Bool) {
+        guard let userID = request.otherUser?.id else { return }
+        answeringRequest = true
+        Task {
+            let ok = await model.respondToRequest(accept, from: userID)
+            answeringRequest = false
+            if ok && !accept { dismiss() }
+        }
     }
 
     /// A menu rather than a button, now that there is more than one thing to

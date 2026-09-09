@@ -311,6 +311,7 @@ final class AppModel {
         startHeartbeat()
         publishPresence(.online)
         await sync.sync(reason: .foreground)
+        await refreshRequests()
     }
 
     /// Call when the app leaves the screen. Nothing here needs to keep ticking
@@ -1158,12 +1159,23 @@ final class AppModel {
     }
 
     /// Accept or decline a message request.
+    ///
+    /// Declining deletes the conversation on the server, so the local copy goes
+    /// with it: a row left behind is a chat that reappears at the top of the
+    /// list the moment anything reloads, still asking to be answered.
     @discardableResult
     func respondToRequest(_ accept: Bool, from otherUserID: String) async -> Bool {
+        let conversation = ConversationID.direct(otherUserID: otherUserID)
         do {
             try await api.respondToChatRequest(accept, from: otherUserID)
+            if accept {
+                await sync.sync(reason: .manual)
+            } else {
+                try? await store.conversations.delete(conversation)
+                if openConversationID == conversation { closeConversation() }
+                await reloadConversations()
+            }
             await refreshRequests()
-            if accept { await sync.sync(reason: .manual) }
             return true
         } catch {
             log.notice("could not answer a request: \(diagnosticText(error), privacy: .public)")
@@ -1206,6 +1218,17 @@ final class AppModel {
         guard isSignedIn else { return }
         guard let latest = try? await api.pendingRequests() else { return }
         pendingRequests = latest
+    }
+
+    /// The message request one conversation is waiting on, if it is one.
+    ///
+    /// Read from the account-wide list rather than from the conversation row,
+    /// because `GET /v3/chats` says nothing about which of its rows are still
+    /// held back. It is what lets the transcript offer the same decision the
+    /// requests screen does, in the place somebody actually reads the messages.
+    func messageRequest(in conversation: ConversationID) -> PendingRequests.DirectRequest? {
+        guard case .direct(let otherUserID) = conversation else { return nil }
+        return pendingRequests.dmRequests?.first { $0.otherUser?.id == otherUserID }
     }
 
     /// People asking to join one group.
