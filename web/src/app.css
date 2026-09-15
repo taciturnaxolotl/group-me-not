@@ -1,0 +1,293 @@
+@import "tailwindcss";
+@import "@fontsource-variable/public-sans";
+
+/*
+ * Design tokens.
+ *
+ * The palette is measured against Slack rather than invented, because the
+ * first attempt was invented and read exactly like it. Two things were wrong
+ * and both are visible in the numbers.
+ *
+ * **Chroma.** Slack's chrome sits at oklch chroma 0.002–0.004 — effectively
+ * neutral grey. The first pass here used 0.013–0.018 at hue 268, which is a
+ * blue-violet tint present on every surface at once. A tinted grey reads as a
+ * theme somebody applied; a neutral one disappears and lets the content carry
+ * the colour.
+ *
+ * **Hierarchy.** Slack draws body text at L 0.863 and the sender's name at
+ * 0.979 — the name is brighter than what it says. The first pass had both at
+ * 0.944, so every message was a wall of near-white with nothing leading the
+ * eye, and the timestamp was pushed down to 0.605 to compensate, which put it
+ * below comfortable reading. Matching their three steps (0.863 / 0.979 / 0.742)
+ * is most of the difference between "harsh" and "calm".
+ */
+
+@theme {
+	/* One typeface, varied by weight.
+	 *
+	 * Public Sans carries a true 100–900 range, and the 900 matters: Slack
+	 * sets sender names at weight 900, and a family that stops at 700 simply
+	 * cannot make a name pop off the line the way theirs does. Neutral and
+	 * quiet by design, which is what a dense interface wants — the previous
+	 * choice had personality the interface had no use for. */
+	--font-sans: "Public Sans Variable", ui-sans-serif, sans-serif;
+	--font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+	/* Message text sits at 15px/1.46 — Slack's ratio, and it is right. Dense
+	   enough to scan a day of chat, loose enough to read a paragraph. */
+	--text-msg: 0.9375rem;
+	--text-msg--line-height: 1.46667;
+	--text-meta: 0.8125rem;
+	--text-meta--line-height: 1.38;
+
+	--radius-chip: 0.75rem;
+
+	--ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer base {
+	:root {
+		color-scheme: dark;
+
+		/* Surfaces, darkest to lightest. Near-neutral: the hue is there to
+		   keep the greys from going flat under a warm display profile, not to
+		   be seen. */
+		--c-rail: oklch(0.166 0.004 250);
+		--c-side: oklch(0.196 0.004 250);
+		--c-base: oklch(0.232 0.004 250);
+		--c-raise: oklch(0.272 0.004 250);
+		--c-sunken: oklch(0.19 0.004 250);
+
+		/* Hairlines and dividers. */
+		--c-line: oklch(0.33 0.004 250);
+		--c-line-soft: oklch(0.285 0.004 250);
+		/* The one border meant to be seen, for the composer. Slack draws it at
+		   rgb(129,131,133); a hairline at --c-line vanishes and takes the edge
+		   of the box with it. */
+		--c-edge: oklch(0.6 0.004 250);
+
+		/* Text, in Slack's three steps. The name is brighter than the message,
+		   which is what gives a transcript somewhere to start reading. */
+		--c-text: oklch(0.975 0 0);
+		--c-body: oklch(0.863 0.002 250);
+		--c-text-dim: oklch(0.742 0.003 250);
+		--c-text-faint: oklch(0.62 0.004 250);
+
+		/* Two accents, because they answer different questions.
+		 *
+		 * The peach is selection: which channel am I in. Measured off Slack,
+		 * whose selected row is rgb(237,163,133) with near-black text on it.
+		 * A warm fill against cool grey chrome is unmistakable at a glance and
+		 * needs no border to be found.
+		 *
+		 * The blue is interaction: links and mentions, things you can click.
+		 * Keeping them separate stops a mention inside a selected row from
+		 * disappearing into the fill, and stops a link looking like it is
+		 * selected. */
+		--c-accent: oklch(0.796 0.086 45);
+		--c-accent-soft: oklch(0.42 0.062 45);
+		--c-accent-ink: oklch(0.215 0.042 40);
+		--c-accent-quiet: oklch(0.33 0.045 45);
+		--c-link: oklch(0.73 0.108 236);
+		--c-link-quiet: oklch(0.33 0.05 236);
+		/* Send. Green, like Slack's, because it is the one button in the
+		   interface whose meaning is "go" rather than "open". */
+		--c-send: oklch(0.55 0.12 150);
+
+		--c-unread: oklch(0.62 0.184 22);
+		--c-good: oklch(0.7 0.13 155);
+		--c-warn: oklch(0.78 0.12 78);
+
+		--c-hover: oklch(1 0 0 / 0.04);
+		--c-active: oklch(1 0 0 / 0.07);
+		/* Reaction chips and other quiet fills. Slack uses white at 6% here,
+		   with no border at all; a border makes a row of chips read as a row of
+		   buttons rather than as a tally. */
+		--c-chip: oklch(1 0 0 / 0.07);
+		--c-mention: oklch(0.62 0.13 78 / 0.14);
+		--c-mention-line: oklch(0.72 0.14 78);
+
+		--shadow-pop: 0 12px 32px -10px oklch(0 0 0 / 0.7), 0 2px 6px -2px oklch(0 0 0 / 0.4);
+	}
+
+	:root[data-theme="light"] {
+		color-scheme: light;
+
+		--c-rail: oklch(0.24 0.008 250);
+		--c-side: oklch(0.275 0.009 250);
+		--c-base: oklch(1 0 0);
+		--c-raise: oklch(0.975 0.002 250);
+		--c-sunken: oklch(0.955 0.003 250);
+
+		--c-line: oklch(0.895 0.003 250);
+		--c-line-soft: oklch(0.932 0.002 250);
+		--c-edge: oklch(0.72 0.004 250);
+
+		--c-text: oklch(0.22 0.005 250);
+		--c-body: oklch(0.33 0.005 250);
+		--c-text-dim: oklch(0.5 0.006 250);
+		--c-text-faint: oklch(0.615 0.006 250);
+
+		--c-accent: oklch(0.796 0.086 45);
+		--c-accent-soft: oklch(0.93 0.035 45);
+		--c-accent-ink: oklch(0.215 0.042 40);
+		--c-accent-quiet: oklch(0.95 0.028 45);
+		--c-link: oklch(0.52 0.13 245);
+		--c-link-quiet: oklch(0.94 0.03 245);
+		--c-send: oklch(0.5 0.12 150);
+
+		--c-unread: oklch(0.56 0.19 24);
+		--c-good: oklch(0.55 0.13 155);
+		--c-warn: oklch(0.63 0.13 70);
+
+		--c-hover: oklch(0 0 0 / 0.04);
+		--c-active: oklch(0 0 0 / 0.065);
+		--c-chip: oklch(0 0 0 / 0.055);
+		--c-mention: oklch(0.8 0.12 80 / 0.22);
+		--c-mention-line: oklch(0.62 0.13 68);
+
+		--shadow-pop: 0 12px 28px -12px oklch(0.2 0.01 250 / 0.24),
+			0 2px 6px -2px oklch(0.2 0.01 250 / 0.14);
+	}
+
+	/* The sidebar keeps the dark treatment in both themes, the way Slack's
+	   aubergine rail does. Light mode that bleaches the whole window loses the
+	   depth cue that tells you which column you are in. */
+	:root[data-theme="light"] .on-rail {
+		--c-text: oklch(0.97 0.002 250);
+		--c-body: oklch(0.88 0.004 250);
+		--c-text-dim: oklch(0.775 0.006 250);
+		--c-text-faint: oklch(0.66 0.008 250);
+		--c-line: oklch(0.37 0.01 250);
+		--c-line-soft: oklch(0.33 0.01 250);
+		--c-edge: oklch(0.6 0.008 250);
+		--c-hover: oklch(1 0 0 / 0.07);
+		--c-active: oklch(1 0 0 / 0.12);
+		--c-chip: oklch(1 0 0 / 0.1);
+	}
+
+	* {
+		border-color: var(--c-line);
+	}
+
+	html,
+	body {
+		height: 100%;
+		overflow: hidden;
+	}
+
+	/* The mount point has to carry the height through, or every `h-full`
+	   below it resolves against nothing and the layout collapses to its
+	   content. */
+	#app {
+		height: 100%;
+	}
+
+	body {
+		margin: 0;
+		background: var(--c-base);
+		color: var(--c-body);
+		font-family: var(--font-sans);
+		font-size: var(--text-msg);
+		line-height: var(--text-msg--line-height);
+		-webkit-font-smoothing: antialiased;
+		text-rendering: optimizeLegibility;
+		font-synthesis-weight: none;
+	}
+
+	button {
+		font: inherit;
+		color: inherit;
+		cursor: pointer;
+	}
+
+	input,
+	textarea {
+		font: inherit;
+		color: inherit;
+	}
+
+	:focus-visible {
+		outline: 2px solid var(--c-link);
+		outline-offset: 1px;
+		border-radius: 3px;
+	}
+
+	::selection {
+		background: var(--c-link-quiet);
+		color: var(--c-text);
+	}
+}
+
+@layer utilities {
+	/* A scrollbar that is present without being furniture. */
+	.scroller {
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		scrollbar-width: thin;
+		scrollbar-color: transparent transparent;
+		transition: scrollbar-color 0.24s;
+	}
+	.scroller:hover,
+	.scroller:focus-within {
+		scrollbar-color: var(--c-line) transparent;
+	}
+	.scroller::-webkit-scrollbar {
+		width: 10px;
+		height: 10px;
+	}
+	.scroller::-webkit-scrollbar-thumb {
+		background: transparent;
+		border: 3px solid transparent;
+		border-radius: 6px;
+		background-clip: content-box;
+	}
+	.scroller:hover::-webkit-scrollbar-thumb {
+		background: var(--c-line);
+		background-clip: content-box;
+	}
+
+	.no-scrollbar {
+		scrollbar-width: none;
+	}
+	.no-scrollbar::-webkit-scrollbar {
+		display: none;
+	}
+
+	.tnum {
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* A placeholder for a box whose picture has not arrived. Slow rather than
+	   busy: a fast shimmer reads as a progress bar and promises a speed the
+	   network has not agreed to. */
+	.shimmer {
+		background: linear-gradient(
+			100deg,
+			var(--c-sunken) 30%,
+			var(--c-raise) 50%,
+			var(--c-sunken) 70%
+		);
+		background-size: 220% 100%;
+		animation: shimmer 1.6s ease-in-out infinite;
+	}
+
+	@keyframes shimmer {
+		from {
+			background-position: 140% 0;
+		}
+		to {
+			background-position: -40% 0;
+		}
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+	}
+}
