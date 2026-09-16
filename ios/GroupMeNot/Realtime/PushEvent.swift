@@ -210,12 +210,40 @@ extension PushEvent {
             self.kind = .unliked(Self.like(from: data, coder: coder))
 
         default:
-            if let message: Message = data.subject?.decoded(as: Message.self, using: coder) {
+            let subject = data.subject.map(Self.repairingDeletedAt)
+            if let message: Message = subject?.decoded(as: Message.self, using: coder) {
                 self.kind = .message(message)
             } else {
                 self.kind = .unrecognised(subject: data.subject)
             }
         }
+    }
+
+    /// Put `deleted_at` back into epoch seconds, which is the only type the rest
+    /// of the app reads.
+    ///
+    /// One field, one delivery. Measured against the live API on 2026-09-15 by
+    /// deleting a message and watching every channel it arrives on:
+    ///
+    ///   - REST history:                 `"deleted_at": 1788386851`
+    ///   - `event.data` on the notice:   `"deleted_at": 1789518488`
+    ///   - the tombstone pushed here:    `"deleted_at": "2026-09-16T00:28:08.0039Z"`
+    ///
+    /// Three deliveries of one fact, two of them integers and the third a
+    /// string. `Message.deletedAt` is an `Int?`, so the odd one out throws and
+    /// takes the whole message down with it, losing the frame silently. An
+    /// unparseable string becomes null rather than staying a string, because
+    /// the point is to get something the decoder can swallow.
+    ///
+    /// If another channel ever starts sending the string form, this is the
+    /// function that needs a sibling.
+    nonisolated private static func repairingDeletedAt(_ subject: JSONValue) -> JSONValue {
+        guard case .object(var members) = subject,
+              case .string(let text)? = members["deleted_at"]
+        else { return subject }
+        let seconds = GroupEvent.date(from: text).map { JSONValue.int(Int($0.timeIntervalSince1970)) }
+        members["deleted_at"] = seconds ?? .null
+        return .object(members)
     }
 
     /// Pull the message identity and the new reaction set out of a `favorite`

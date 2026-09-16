@@ -3,61 +3,6 @@ import Foundation
 // Wire models. Field names are GroupMe's, mapped from snake_case by the decoder.
 // Timestamps are epoch *seconds*, not milliseconds.
 
-/// An epoch-seconds timestamp that the server sometimes sends as an ISO 8601
-/// string instead.
-///
-/// Only `deleted_at` needs this, and only on one delivery. Measured against the
-/// live API on 2026-09-15 by deleting a message and watching both channels:
-///
-///   - REST history:                 `"deleted_at": 1788386851`
-///   - `event.data` on the notice:   `"deleted_at": 1789518488`
-///   - the tombstone pushed to `/group/{id}`: `"deleted_at": "2026-09-16T00:28:08.0039Z"`
-///
-/// Three deliveries of one fact, two of them integers and the third a string.
-/// Swift's synthesised decoder throws on the odd one out, which takes the whole
-/// message down and loses a frame silently — so the leniency lives here, in the
-/// type, rather than as a rule every call site has to remember.
-///
-/// It is not the first time: `GroupEvent` carries the same warning about its
-/// own timestamps. Writing is always the integer form, which is what the local
-/// store and the rest of the app expect.
-@propertyWrapper
-nonisolated struct LenientEpoch: Codable, Hashable, Sendable {
-    var wrappedValue: Int?
-
-    init(wrappedValue: Int?) { self.wrappedValue = wrappedValue }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if container.decodeNil() {
-            wrappedValue = nil
-        } else if let seconds = try? container.decode(Int.self) {
-            wrappedValue = seconds
-        } else if let text = try? container.decode(String.self) {
-            wrappedValue = GroupEvent.date(from: text).map { Int($0.timeIntervalSince1970) }
-        } else if let seconds = try? container.decode(Double.self) {
-            wrappedValue = Int(seconds)
-        } else {
-            wrappedValue = nil
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(wrappedValue)
-    }
-}
-
-/// Lets `@LenientEpoch` sit on a field that is simply absent, which it usually
-/// is. Without this the synthesised decoder calls `decode` rather than
-/// `decodeIfPresent` — the wrapper itself is not optional, whatever it wraps —
-/// and a message with no `deleted_at` fails to decode at all.
-extension KeyedDecodingContainer {
-    func decode(_ type: LenientEpoch.Type, forKey key: Key) throws -> LenientEpoch {
-        try decodeIfPresent(type, forKey: key) ?? LenientEpoch(wrappedValue: nil)
-    }
-}
-
 nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
     var id: String
     var sourceGuid: String?
@@ -78,9 +23,13 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
     var parentId: String?
     var pinnedAt: Int?
     var pinnedBy: String?
-    /// When it was deleted, in epoch seconds — but see ``LenientEpoch``, because
-    /// this is the one timestamp the server sends in two different types.
-    @LenientEpoch var deletedAt: Int?
+    /// When it was deleted, in epoch seconds.
+    ///
+    /// Epoch seconds by the time it reaches here, but not on every wire: the
+    /// tombstone pushed to `/group/{id}` sends this one field as an ISO 8601
+    /// string. That is repaired in `PushEvent`, at the only delivery that does
+    /// it, so see ``PushEvent`` before assuming the wire is uniform.
+    var deletedAt: Int?
     /// *What kind of* party deleted it, not which one. This is a small role
     /// enum, not a user id, which is worth stating because the name reads
     /// exactly like an id and treating it as one files "admin" where a user id
