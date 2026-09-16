@@ -363,19 +363,36 @@ struct ConversationListView: View {
     /// same choice on its own page is a page.
     private var entries: [Entry] {
         let rows = matching
-        let topicUnread = Dictionary(grouping: rows.filter(\.isTopic)) { $0.parentID ?? "" }
-            .mapValues { $0.reduce(0) { $0 + $1.unreadCount } }
+        let byParent = Dictionary(grouping: rows.filter(\.isTopic)) { $0.parentID ?? "" }
 
-        return rows
+        let drawn = rows
             .filter { !$0.isTopic && !isPinnedAndShown($0) }
-            .map { row in
-                guard case .group(let id) = row.id, let waiting = topicUnread[id] else {
+            .map { row -> Entry in
+                guard case .group(let id) = row.id, let topics = byParent[id] else {
                     return Entry(row: row)
                 }
                 // The group answers for its topics, which are not on screen to
-                // answer for themselves.
-                return Entry(row: row, badge: row.unreadCount + waiting)
+                // answer for themselves. Their unread is its unread, and by the
+                // same argument their activity is its activity.
+                let waiting = topics.reduce(0) { $0 + $1.unreadCount }
+                return Entry(
+                    row: row,
+                    badge: row.unreadCount + waiting,
+                    latest: Entry.Latest(topics: topics, beating: row)
+                )
             }
+
+        // Sorted here rather than left in the order ``ConversationStore`` gave
+        // them. That order is `last_message_at` per row, and a group's own row
+        // knows nothing about its topics, so a group whose only traffic is in a
+        // busy topic sinks to the bottom of the list wearing a stale preview.
+        // The tiebreak matches the store's, so the two agree everywhere the
+        // rollup changes nothing.
+        return drawn.sorted { a, b in
+            let (l, r) = (a.timestamp ?? .distantPast, b.timestamp ?? .distantPast)
+            if l != r { return l > r }
+            return a.row.id.storageKey > b.row.id.storageKey
+        }
     }
 
     /// A pinned conversation is drawn in the strip instead of in the list, but
@@ -393,10 +410,38 @@ struct ConversationListView: View {
         /// Set where the row has to answer for conversations that are not on
         /// screen: a group's topics.
         var badge: Int?
+        /// Set when the newest thing in this group happened in a topic rather
+        /// than in Main, in which case the row reports the topic's news as its
+        /// own. Nil leaves the row speaking for itself.
+        var latest: Latest?
 
         var id: ConversationID { row.id }
         var name: String { row.name }
         var unread: Int { badge ?? row.unreadCount }
+        /// When this row last had news, wherever that news happened.
+        var timestamp: Date? { latest?.at ?? row.lastMessageAt }
+
+        /// The most recent activity in a group's topics, when it is more recent
+        /// than anything in the group itself.
+        struct Latest: Hashable {
+            var at: Date
+            var preview: String?
+            /// The topic it happened in, which the preview names so the reader
+            /// knows where to go looking.
+            var topic: String
+
+            /// Nil when Main is already the newest thing here, which is both the
+            /// common case and the one where the row was already right.
+            init?(topics: [ConversationRow], beating row: ConversationRow) {
+                guard let newest = topics.compactMap({ t -> (Date, ConversationRow)? in
+                    t.lastMessageAt.map { ($0, t) }
+                }).max(by: { $0.0 < $1.0 }) else { return nil }
+                guard newest.0 > (row.lastMessageAt ?? .distantPast) else { return nil }
+                self.at = newest.0
+                self.preview = newest.1.lastMessagePreview
+                self.topic = newest.1.name
+            }
+        }
     }
 
     private var matching: [ConversationRow] {
@@ -615,7 +660,7 @@ struct ConversationCell: View {
 
                     Spacer(minLength: 4)
 
-                    if let date = row.lastMessageAt {
+                    if let date = entry.timestamp {
                         Text(Formatters.listTimestamp(date))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
@@ -644,6 +689,13 @@ struct ConversationCell: View {
     /// carries as much as "what they said". In a DM it is always the same two
     /// people, so it would be noise.
     private var preview: String {
+        // A group's newest news can be in a topic, and then the topic's name is
+        // half the information: "which of the eight" is the thing the reader
+        // needs before they can decide whether to open it.
+        if let latest = entry.latest {
+            guard let text = latest.preview, !text.isEmpty else { return latest.topic }
+            return "\(latest.topic): \(text)"
+        }
         guard let text = row.lastMessagePreview, !text.isEmpty else {
             return row.isPlaceholder ? "Syncing…" : "No messages yet"
         }
@@ -660,7 +712,7 @@ struct ConversationCell: View {
         }
         if row.isMuted { parts.append("muted") }
         parts.append(preview)
-        if let date = row.lastMessageAt { parts.append(Formatters.spokenTimestamp(date)) }
+        if let date = entry.timestamp { parts.append(Formatters.spokenTimestamp(date)) }
         return parts.joined(separator: ", ")
     }
 }
