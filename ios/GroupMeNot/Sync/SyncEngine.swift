@@ -866,6 +866,7 @@ actor SyncEngine {
                 return
             }
             await applyLikeIconChange(from: message, in: conversation)
+            await applyDeletionNotice(from: message, in: conversation)
             do {
                 let isMine = currentUserID != nil && (message.senderId ?? message.userId) == currentUserID
                 let stored = try await store.messages.message(id: message.id, in: conversation)
@@ -947,6 +948,38 @@ actor SyncEngine {
 
         case .typing, .unrecognised:
             break
+        }
+    }
+
+    /// Turn a deletion notice into a tombstone on the message it names.
+    ///
+    /// The notice is not the deleted message. It is a fresh system message that
+    /// says "that one over there is gone", which is why this cannot ride the
+    /// ordinary upsert path: the id on the envelope belongs to the notice, and
+    /// the id that matters is in `event.data.message_id`.
+    ///
+    /// Without this a remote deletion is invisible. The notice itself is hidden
+    /// from the transcript by ``Message/isMessageNotice`` (drawing both halves
+    /// of a delete gives two grey rows for one event), the original is never
+    /// touched, and no REST catch-up can correct it because `after_id` does not
+    /// revisit. So the text stays on screen until the app is reinstalled.
+    ///
+    /// Deleting something we have never seen is not an error. It happens
+    /// whenever a message arrives and is deleted while we are paged back
+    /// somewhere older, and the tombstone we would write has nothing to mark.
+    private func applyDeletionNotice(from message: Message, in conversation: ConversationID) async {
+        guard let deletion = message.announcedDeletion else { return }
+        do {
+            guard try await store.messages.markDeleted(
+                deletion.messageID,
+                at: deletion.at,
+                by: deletion.actor,
+                in: conversation
+            ) != nil else { return }
+            continuation.yield(.messages(conversation))
+            continuation.yield(.conversations)
+        } catch {
+            log.error("could not apply deletion notice: \(diagnosticText(error), privacy: .public)")
         }
     }
 

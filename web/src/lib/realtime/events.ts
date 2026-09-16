@@ -19,7 +19,13 @@ import type { WireMessage } from "../api/wire";
 export type PushEvent =
 	| { kind: "message"; message: WireMessage; conversationHint: string }
 	| { kind: "messageUpdated"; message: WireMessage }
-	| { kind: "messageDeleted"; messageId: string; groupId: string | null }
+	| {
+			kind: "messageDeleted";
+			messageId: string;
+			groupId: string | null;
+			/** The victim, already tombstoned by the server. Null if it sent only an id. */
+			tombstone: WireMessage | null;
+	  }
 	| { kind: "reaction"; messageId: string; groupId: string | null; subject: WireMessage | null }
 	| { kind: "typing"; conversationId: string; userId: string }
 	| { kind: "membership"; groupId: string | null }
@@ -67,9 +73,34 @@ export function decodePush(channel: string, data: unknown): PushEvent {
 
 		case "message.deleted":
 		case "line.delete": {
+			// The subject here is the *victim itself*, already tombstoned by
+			// the server: same id, `text` replaced with "This message was
+			// deleted", `deleted_at` and `deletion_actor` set. So this is a
+			// message to merge, not merely an id to act on.
+			//
+			// Measured 2026-09-15 by deleting a message and watching both
+			// channels. One delete produces two frames:
+			//
+			//   /group/{id}   type "message.deleted",  subject = the tombstone
+			//   /user/{me}    type "line.create",      subject = a system notice
+			//                                          naming it in event.data
+			//
+			// The group channel is only subscribed while that chat is on
+			// screen, so this frame is the better one and the rarer one. The
+			// notice on `/user/` is the one that always arrives, which is why
+			// both paths have to exist.
 			const id = subject?.id ?? subject?.message_id;
 			if (typeof id !== "string") break;
-			return { kind: "messageDeleted", messageId: id, groupId: strOrNull(subject?.group_id) };
+			const tombstone =
+				subject && typeof subject.id === "string" && subject.deleted_at !== undefined
+					? (subject as unknown as WireMessage)
+					: null;
+			return {
+				kind: "messageDeleted",
+				messageId: id,
+				groupId: strOrNull(subject?.group_id),
+				tombstone,
+			};
 		}
 
 		case "favorite":

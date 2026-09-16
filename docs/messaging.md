@@ -136,7 +136,7 @@ The fields you actually need off a message object, beyond `text`:
 | `favorited_by` | array of user ids who liked it. This is how like counts arrive |
 | `reactions` | array of `{type, code/pack_id, user_ids}` |
 | `pinned_at`, `pinned_by` | pin state rides on the message itself |
-| `deleted_at`, `deletion_actor` | tombstone. The message still arrives, with `text` cleared |
+| `deleted_at`, `deletion_actor` | tombstone. `deletion_actor` is a **role**, not a user id, and `text` is replaced with the server's own sentence rather than emptied. [Measured](verified.md#deletion_actor-is-a-role-and-an-admin-delete-removes-the-row) |
 | `parent_id` | set when the message belongs to a topic (subgroup) |
 
 **`system: true` is the one that surprises people.** Membership changes, name changes, avatar

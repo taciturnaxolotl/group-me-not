@@ -102,6 +102,7 @@ export class Outbox {
 			pinnedAt: null,
 			pinnedBy: null,
 			deletedAt: null,
+			deletionActor: "sender",
 			event: null,
 		};
 

@@ -5,7 +5,7 @@ import { decodePush, messageChannels } from "../realtime/events";
 import { keyOf, parseKey, type ConversationID } from "../model/conversation-id";
 import { cmpId } from "../model/ids";
 import { normalizeCurrentUser, normalizeMember, normalizeMessage } from "../model/normalize";
-import type { Member, Message } from "../model/types";
+import type { DeletionActor, Member, Message } from "../model/types";
 import * as store from "../store/db";
 import { ConversationsState } from "../state/conversations.svelte";
 import { Timeline } from "../state/timeline.svelte";
@@ -341,13 +341,17 @@ export class Engine {
 		if (!conv) return;
 		const t = this.timeline(key);
 		const backup = t.find(messageId);
-		t.remove(messageId);
-		void store.deleteMessage(key, messageId);
+		this.#applyDeletion(key, messageId, Math.floor(Date.now() / 1000), "sender");
 		try {
 			await this.#api.remove(conv, messageId);
 		} catch (err) {
-			// Put it back rather than leaving a hole the server disagrees with.
-			if (backup) t.merge([backup]);
+			// Straight back to what it was. A refusal means the message is
+			// still there for everybody else, and a tombstone over it would be
+			// this client inventing a deletion that never happened.
+			if (backup) {
+				t.replace(messageId, backup);
+				void store.putMessages([backup]);
+			}
 			this.lastError = err instanceof Error ? err.message : String(err);
 		}
 	}
@@ -519,6 +523,17 @@ export class Engine {
 					if (!contiguous && key === this.activeKey) void this.#refreshActive();
 				});
 				this.timeline(key).merge([message]);
+				// A remote deletion travels as one of these: an ordinary system
+				// message that names its victim. It is not an envelope type of
+				// its own, so this is the only place it can be caught.
+				if (message.event?.kind === "messageDeleted") {
+					this.#applyDeletion(
+						key,
+						message.event.messageId,
+						message.event.deletedAt ?? message.createdAt,
+						message.event.actor,
+					);
+				}
 				this.conversations.noteActivity(
 					key,
 					message.id,
@@ -539,12 +554,16 @@ export class Engine {
 			case "messageDeleted": {
 				const key = event.groupId ? this.#keyForHint(event.groupId, null) : null;
 				if (!key) break;
-				this.timeline(key).remove(event.messageId);
-				// Also take it out of the cache. Dropping it from the timeline
-				// alone makes it vanish until the next reload, at which point
-				// `loadCachedTail` reads the row straight back out of
-				// IndexedDB and the message returns from the dead.
-				void store.deleteMessage(key, event.messageId);
+				// Prefer the server's own tombstone when it sent one: it carries
+				// the real `deleted_at` and the role that did it, rather than our
+				// guess at both.
+				if (event.tombstone) {
+					const tomb = normalizeMessage(event.tombstone, key);
+					this.timeline(key).merge([tomb]);
+					void store.putMessages([tomb]);
+				} else {
+					this.#applyDeletion(key, event.messageId, Math.floor(Date.now() / 1000), "sender");
+				}
 				break;
 			}
 
@@ -568,6 +587,44 @@ export class Engine {
 				void this.sync("membership");
 				break;
 		}
+	}
+
+	/**
+	 * Turn a message into a tombstone, on screen and on disk.
+	 *
+	 * A tombstone rather than a removal, for two reasons. The server keeps the
+	 * row and hands it back from REST with `deleted_at` set, so a client that
+	 * dropped it would disagree with the next catch-up and have the message
+	 * rise from the dead. And a reader who watched a conversation happen is
+	 * owed the fact that something was said and taken back; a silent hole in
+	 * the transcript reads as a client that lost a message.
+	 *
+	 * Deleting something we do not hold is not an error. It happens whenever
+	 * the victim is older than the window we have paged in, and there is
+	 * nothing to mark.
+	 */
+	#applyDeletion(
+		key: string,
+		messageId: string,
+		deletedAt: number,
+		actor: DeletionActor,
+	): void {
+		const existing = this.timeline(key).find(messageId);
+		if (!existing || existing.deletedAt) return;
+		// Cleared, not kept-and-hidden. The text is gone from the server and
+		// holding a copy in IndexedDB would be a client keeping a record of
+		// something its author withdrew.
+		const tomb: Message = {
+			...existing,
+			deletedAt,
+			deletionActor: actor,
+			text: "",
+			attachments: [],
+			reactions: [],
+			mentions: [],
+		};
+		this.timeline(key).merge([tomb]);
+		void store.putMessages([tomb]);
 	}
 
 	/**

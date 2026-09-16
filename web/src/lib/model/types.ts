@@ -53,6 +53,8 @@ export interface Message {
 	pinnedBy: string | null;
 	/** Set once the message has been deleted. The row is a tombstone. */
 	deletedAt: number | null;
+	/** Who took it down, as a role. Only meaningful alongside `deletedAt`. */
+	deletionActor: DeletionActor;
 
 	/** Structured system payload, when we recognise it. */
 	event: SystemEvent | null;
@@ -111,10 +113,53 @@ export type SystemEvent =
 	| { kind: "avatarChanged"; actorId: string | null }
 	| { kind: "topicChanged"; topic: string; actorId: string | null }
 	| { kind: "messagePinned"; messageId: string; actorId: string | null }
+	/**
+	 * A deletion, reported beside the message it killed rather than on it.
+	 *
+	 * `messageId` is the *target*, not this notice. The notice is a message in
+	 * its own right with its own fresh id, so this is the only place the dead
+	 * message's id appears — which is why a delete cannot be applied by the
+	 * ordinary "merge this message" path the way an edit can.
+	 */
+	| { kind: "messageDeleted"; messageId: string; deletedAt: number | null; actor: DeletionActor }
 	| { kind: "pollCreated"; pollId: string; subject: string }
 	| { kind: "pollFinished"; pollId: string; subject: string; options: PollOption[] }
 	| { kind: "callStarted"; actorId: string | null }
 	| { kind: "other"; type: string; raw: WireSystemEvent };
+
+/**
+ * Who took a message down, as a role rather than a person.
+ *
+ * `deletion_actor` reads like a user id and is not one. Measured against the
+ * live API across 25 groups — 128 deletion notices, 38 surviving tombstones —
+ * it was only ever one of these three.
+ *
+ * The distinction earns its place because the roles behave differently. A
+ * `sender` delete leaves the row in place as a tombstone, 34 times out of 34.
+ * An `admin` delete usually takes the row away outright: 93 notices against 3
+ * tombstones. So for an admin deletion a client that watched it happen is the
+ * only thing that will ever mark the gap, because a later fetch will not
+ * return the message at all.
+ */
+export type DeletionActor = "sender" | "admin" | "system";
+
+/**
+ * What the transcript says about a deletion.
+ *
+ * GroupMe writes its own sentence into the tombstone's `text` and varies it by
+ * role. Matching that vocabulary keeps a deleted message reading the same here
+ * as it does in every other client.
+ */
+export function deletionSentence(actor: DeletionActor): string {
+	switch (actor) {
+		case "admin":
+			return "An admin deleted this message";
+		case "system":
+			return "This message was removed";
+		default:
+			return "This message was deleted";
+	}
+}
 
 export interface PollOption {
 	id: string;

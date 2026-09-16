@@ -79,13 +79,17 @@ export class Timeline {
 	 * delete leaves two grey rows; delete seven things and the transcript is
 	 * fourteen rows of nothing.
 	 *
-	 * So both halves are dropped. A deleted message is gone, which is what
-	 * every other client does and what the reader expects — the alternative
-	 * is a wall of headstones attributed to people who are still talking.
+	 * So one half is drawn and the other dropped, and which is which matters.
+	 * The tombstone keeps its author, its place in the conversation and its
+	 * time, so it can say "Kieran deleted a message" exactly where the message
+	 * was. The notice knows none of that and would be a grey line from nobody.
+	 * Dropping *both*, which this used to do, leaves a silent hole that reads
+	 * like a client which lost a message rather than a person who took one
+	 * back.
 	 */
 	visible = $derived(
 		this.messages.filter((m) => {
-			if (m.deletedAt) return false;
+			if (m.kind === "system" && m.event?.kind === "messageDeleted") return false;
 			if (m.kind === "system" && m.event?.kind === "other" && m.event.type.startsWith("message."))
 				return false;
 			return true;

@@ -101,6 +101,13 @@ interchangeable:
 
 - `favorite`, `like.delete`, `typing`
 
+That list is what the decompiler recovered, and it is incomplete. Watching a real socket
+([measured](verified.md#a-delete-arrives-twice-on-two-channels)) also produced `line.create`
+and `read_receipt.sync` on `/user/{id}`, and `message.deleted` on `/group/{id}`. So a type
+appearing in vocabulary 2 or 3 does not mean it cannot also arrive as an envelope type;
+`message.deleted` arrives as **both**, on different channels, for one deletion. Treat the
+list above as a floor, not a ceiling, and keep an `unrecognised` branch.
+
 **2. FCM data-message types**, in `GroupMeFcmListenerService`, used when the app is
 backgrounded:
 

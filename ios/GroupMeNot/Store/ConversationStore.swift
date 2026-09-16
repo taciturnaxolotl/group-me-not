@@ -899,7 +899,16 @@ nonisolated enum ConversationWrites {
 
     /// Points the list row at `message`, unless it already points at something
     /// newer. Ordering is by sort key, so an out-of-order push cannot rewind it.
+    ///
+    /// Notices *about* messages are not eligible, and neither are tombstones.
+    /// A deletion produces both: an announcement, and (for a `sender` delete) a
+    /// row whose text the server has replaced with "This message was deleted".
+    /// Either one would become the conversation's headline in the list, which
+    /// is a conversation advertising its own housekeeping. The transcript
+    /// already refuses to draw the notice and draws the tombstone as a marker
+    /// rather than as words; the list has no business quoting either.
     static func applyLatest(_ message: Message, _ conversation: ConversationID, in db: Database) throws {
+        guard !message.isMessageNotice, !message.isDeleted else { return }
         try db.run(
             """
             UPDATE conversations
@@ -917,6 +926,58 @@ nonisolated enum ConversationWrites {
                 SQLValue(message.createdAt),
                 SQLValue(previewText(text: message.visibleText, attachments: message.attachments)),
                 SQLValue(message.name),
+            ]
+        )
+    }
+
+    /// Repoints the list row at the newest message that is still there.
+    ///
+    /// The counterpart to ``applyLatest``, and the one case that has to move
+    /// the pointer *backwards*: deleting the newest message leaves the row
+    /// quoting text that no longer exists, and `applyLatest` cannot fix it
+    /// because its guard exists precisely to stop the pointer rewinding.
+    ///
+    /// Only a few rows are considered. Anything further back than a short burst
+    /// of deletions is not a case worth a full table scan for, and a row that
+    /// finds no survivor there is left alone rather than blanked: an empty
+    /// preview on a group with four thousand messages in it reads as "no
+    /// messages yet", which is a worse lie than a stale line.
+    static func rewindLatest(_ conversation: ConversationID, in db: Database) throws {
+        let candidates = try db.query(
+            """
+            SELECT payload FROM messages
+             WHERE conversation_key = ? AND deleted_at IS NULL
+             ORDER BY sort_key DESC
+             LIMIT 20
+            """,
+            [SQLValue(conversation.storageKey)],
+            { row in row.dataOrNil(0) }
+        )
+        let survivor = candidates
+            .lazy
+            .compactMap { $0.flatMap { try? StoreCoding.decode(Message.self, from: $0) } }
+            // A deletion posts its own notice, so the newest thing in the table
+            // right after a delete is usually the announcement of it. The
+            // transcript hides those; the list has no business quoting them.
+            .first { !$0.isMessageNotice && !$0.isDeleted }
+        guard let survivor else { return }
+        try db.run(
+            """
+            UPDATE conversations
+               SET last_message_id = ?2,
+                   last_message_sort = ?3,
+                   last_message_at = ?4,
+                   last_message_preview = ?5,
+                   last_message_sender = ?6
+             WHERE key = ?1
+            """,
+            [
+                SQLValue(conversation.storageKey),
+                SQLValue(survivor.id),
+                SQLValue(MessageSortKey.value(for: survivor.id)),
+                SQLValue(survivor.createdAt),
+                SQLValue(previewText(text: survivor.visibleText, attachments: survivor.attachments)),
+                SQLValue(survivor.name),
             ]
         )
     }

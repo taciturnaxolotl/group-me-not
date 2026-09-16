@@ -1,11 +1,13 @@
 # Verified against the live API
 
 Everything else in this repo is read out of the APK. This page is different: it was measured
-against `api.groupme.com` and `push.groupme.com` on **2026-08-30**, from an authenticated
-session in the web client, using read-only `GET` requests against my own account.
+against `api.groupme.com` and `push.groupme.com` on **2026-08-30**, and added to on
+**2026-09-15**, from an authenticated session in the web client, using read-only `GET`
+requests against my own account. Each section says which date it belongs to where it matters.
 
-No writes were performed. Nothing here required sending a message, changing a setting, or
-touching another user's data.
+No writes were performed for the 2026-08-30 pass. The 2026-09-15 additions include one that
+did: a message posted to a group of my own and deleted again, with consent, to watch what a
+deletion puts on the wire. Nothing touched another user's data.
 
 Where a finding contradicts what the Android app does, the live behavior wins and the
 contradiction is called out, because those gaps are exactly where a better client lives.
@@ -261,6 +263,112 @@ other app can produce one, which is the point of it.
 So a third-party client can tell people it is here, and cannot see anybody else. Reading is
 not a thing to keep code warm for.
 
+## `deletion_actor` is a role, and an admin delete removes the row
+
+Measured **2026-09-15** across 25 groups, three pages of history each: 128 `message.deleted`
+notices and 38 surviving tombstones.
+
+Two claims in [messaging.md](messaging.md) were wrong, both read out of the APK.
+
+**`deletion_actor` is a small role enum, not a user id.** Only three values appeared:
+
+| Value | Notices | Surviving tombstones | Tombstone `text` |
+| --- | --- | --- | --- |
+| `sender` | 34 | 34 | "This message was deleted" |
+| `admin` | 93 | 3 | "An admin deleted this message" |
+| `system` | 1 | 1 | "This message was removed" |
+
+The name reads exactly like an id, which is the trap: a client that files it where a user id
+belongs ends up with a member called "admin".
+
+**`text` is not cleared, it is rewritten.** The server substitutes its own sentence and
+varies it by role, the way it does for every other system string. A client that renders
+`text` verbatim gets the right words for free; one that writes its own should match the
+vocabulary.
+
+**The 93-against-3 is the finding that changes a design.** A `sender` delete leaves the row
+in place as a tombstone, one for one, every time. An `admin` delete usually takes the row
+away outright, so a later fetch does not return the message at all and there is nothing left
+to mark. A client that was connected when it happened is the only thing that will ever show
+a gap there. That makes the live event the sole source of truth for admin deletions, which
+is a sharper version of the argument in
+[offline.md](offline.md#the-real-gap-faye-has-no-replay): not merely "REST cannot tell you it
+changed", but "REST cannot tell you it was ever there".
+
+## The `message.deleted` notice names its target in `event.data`
+
+Same measurement. The notice is an ordinary message with `system: true` and a fresh id of its
+own. The id of the message it kills appears only in `event.data`:
+
+```json
+{
+  "id": "178838685115412207",
+  "system": true,
+  "text": "A message was deleted.",
+  "event": {
+    "type": "message.deleted",
+    "data": {
+      "message_id": "178838673670894433",
+      "deleted_at": 1788386851,
+      "deletion_actor": "sender"
+    }
+  }
+}
+```
+
+This confirms `Message.Event.data` (`LocalizedData`) in [models.md](models.md). It also means
+a deletion cannot ride the ordinary "merge this message" path the way an edit can: the id on
+the envelope belongs to the announcement, not to the victim.
+
+`message.update` has the same shape, carrying `message_id`, `sender_id`, `updated_at` and the
+new `message: {text, attachments}`.
+
+## A delete arrives twice, on two channels
+
+Measured **2026-09-15**, and this one needed a write: a throwaway message posted to a group of
+my own and then deleted, with a socket open on both channels. `DELETE` answered `204`.
+
+One deletion produced **two frames**, in the same millisecond, carrying the same fact in two
+different shapes:
+
+| Channel | Envelope `type` | `subject` |
+| --- | --- | --- |
+| `/group/{groupId}` | `message.deleted` | the **victim itself**, already tombstoned |
+| `/user/{userId}` | `line.create` | a **system notice** naming it in `event.data` |
+
+The group frame is the better one: same id as the message it replaces, `system: false`, text
+already rewritten, and both `deleted_at` and `deletion_actor` on it.
+
+```json
+{ "type": "message.deleted", "subject": {
+    "id": "178951848400451336", "system": false,
+    "text": "This message was deleted",
+    "deleted_at": "2026-09-16T00:28:08.0039Z", "deletion_actor": "sender" } }
+```
+
+But a client subscribes to `/group/{id}` only while that chat is on screen, and to
+`/user/{id}` always. **So the notice is the frame you can count on and the tombstone is the
+frame you would rather have.** A client that handles only one of them is wrong half the time,
+and which half depends on where the user happens to be looking.
+
+### `deleted_at` is an ISO 8601 string here, and only here
+
+Look again at the tombstone above. Every other delivery of that same timestamp is an integer:
+
+| Where | Value |
+| --- | --- |
+| REST history | `1788386851` |
+| `event.data` on the notice | `1789518488` |
+| the pushed tombstone | `"2026-09-16T00:28:08.0039Z"` |
+
+Both forms of the same deletion parse to the same second, so this is presentation, not
+disagreement. It still matters, because the failure is quiet in both directions. A strict
+decoder throws on the string and drops the whole frame; a permissive one reads `Number(...)`
+as `NaN`, which is falsy, and a message that was deleted looks like a message that was not.
+
+`GroupEvent` carries the same warning about its own timestamps, so this is the second place
+in the API where one field has two types. Assume it will not be the last.
+
 ## Still open
 
 - Which endpoints send `Retry-After` on a 429. Group joins do, per the client source. The
@@ -269,5 +377,9 @@ not a thing to keep code warm for.
   from field counts, not a measurement.
 - Whether `409` on a duplicate `source_guid` returns the original message in its body. Needs
   a write, so it needs your call before I test it.
-- The Faye event-type to payload mapping. Reading it live means holding a subscription open
-  and watching real messages arrive, which is doable but noisy.
+- The Faye event-type to payload mapping. Partly done now: a send, a delete and a read receipt
+  were watched live (above). The rest of the vocabulary in [push.md](push.md) is still read
+  out of the APK and unconfirmed, and the measured types already show the decompiled list is
+  incomplete.
+- Whether an `admin` delete pushes the same two frames a `sender` delete does. Testing it
+  needs a second account with admin rights over a message that is not mine.

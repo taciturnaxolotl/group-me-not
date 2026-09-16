@@ -575,7 +575,7 @@ private struct BubbleRow: View {
             if !hasBubbleContent {
                 EmptyView()
             } else if item.message.isDeleted {
-                Tombstone()
+                Tombstone(sentence: item.message.deletionSentence)
             } else if item.isEmojiOnly {
                 // No tint: a lone emoji is its own bubble.
                 //
@@ -823,11 +823,15 @@ private struct BubbleRow: View {
     }
 }
 
-/// A deleted message. GroupMe keeps delivering the row with its text stripped,
-/// so the gap is real and worth showing rather than hiding.
+/// A deleted message. GroupMe keeps delivering the row with its text replaced
+/// by its own sentence, so the gap is real and worth showing rather than
+/// hiding. That sentence varies by who did the deleting, and matching the
+/// vocabulary keeps a tombstone reading the same here as in every other client.
 private struct Tombstone: View {
+    var sentence: String
+
     var body: some View {
-        Text("Message deleted")
+        Text(sentence)
             .font(.body.italic())
             .foregroundStyle(.secondary)
             .padding(.horizontal, 12)

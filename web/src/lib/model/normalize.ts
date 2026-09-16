@@ -13,6 +13,7 @@ import type {
 	Attachment,
 	Conversation,
 	CurrentUser,
+	DeletionActor,
 	Member,
 	Mention,
 	Message,
@@ -57,7 +58,8 @@ export function normalizeMessage(w: WireMessage, conversationKey: string): Messa
 		mentions: findMentions(w.attachments ?? [], (w.text ?? "").length),
 		pinnedAt: w.pinned_at ?? null,
 		pinnedBy: w.pinned_by || null,
-		deletedAt: w.deleted_at || null,
+		deletedAt: epochSeconds(w.deleted_at),
+		deletionActor: toDeletionActor(w.deletion_actor),
 		event: w.event ? normalizeSystemEvent(w.event) : null,
 	};
 }
@@ -233,6 +235,13 @@ function normalizeSystemEvent(e: WireSystemEvent): SystemEvent {
 			return { kind: "topicChanged", topic: String(d.topic ?? ""), actorId: actor };
 		case "message.pinned":
 			return { kind: "messagePinned", messageId: String(d.message_id ?? ""), actorId: actor };
+		case "message.deleted":
+			return {
+				kind: "messageDeleted",
+				messageId: String(d.message_id ?? ""),
+				deletedAt: numOrNull(d.deleted_at),
+				actor: toDeletionActor(d.deletion_actor),
+			};
 		case "poll.created": {
 			const poll = (d.poll ?? {}) as Record<string, unknown>;
 			return { kind: "pollCreated", pollId: String(poll.id ?? ""), subject: String(poll.subject ?? "") };
@@ -380,6 +389,40 @@ export function normalizeCurrentUser(w: WireUser): CurrentUser {
 }
 
 // MARK: - Small helpers
+
+/**
+ * Epoch seconds, from a server that sends this one field two different ways.
+ *
+ * Measured 2026-09-15 by deleting a message and watching every delivery of the
+ * same fact:
+ *
+ *   REST history                        `"deleted_at": 1788386851`
+ *   `event.data` on the notice          `"deleted_at": 1789518488`
+ *   the tombstone pushed to `/group/`   `"deleted_at": "2026-09-16T00:28:08.0039Z"`
+ *
+ * Two integers and a string. Reading the string as a number gives `NaN`, which
+ * is falsy, which would make the one delivery that carries the real deletion
+ * look like no deletion at all.
+ */
+function epochSeconds(v: unknown): number | null {
+	if (typeof v === "number") return v || null;
+	if (typeof v === "string") {
+		const ms = Date.parse(v);
+		if (Number.isFinite(ms)) return Math.floor(ms / 1000);
+		const n = Number(v);
+		return Number.isFinite(n) ? n || null : null;
+	}
+	return null;
+}
+
+/**
+ * `deletion_actor` is a small role enum, not a user id, whatever the name
+ * suggests. Anything unrecognised is read as `sender`, which is both the
+ * common case and the least presumptuous thing to say about a deletion.
+ */
+function toDeletionActor(v: unknown): DeletionActor {
+	return v === "admin" || v === "system" ? v : "sender";
+}
 
 function numOrNull(v: unknown): number | null {
 	const n = Number(v);

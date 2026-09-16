@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { Message, Reaction } from "$lib/model/types";
+	import { deletionSentence, type Message, type Reaction } from "$lib/model/types";
 	import Avatar from "$lib/ui/Avatar.svelte";
 	import MessageText from "$lib/ui/MessageText.svelte";
 	import Attachments from "$lib/ui/Attachments.svelte";
@@ -96,7 +96,34 @@
 	}
 </script>
 
-{#if message.kind === "system"}
+{#if message.deletedAt}
+	<!-- A tombstone, not a hole. The row keeps its place, its author and its
+	     time, which is the whole reason to draw anything at all: a silent gap
+	     in a transcript reads as a client that lost a message rather than a
+	     person who took one back.
+
+	     Phrased with the server's own wording, which varies by who did it: an
+	     admin removing somebody else's message is a different event from an
+	     author taking back their own, and GroupMe says so. -->
+	<div
+		class="px-5"
+		class:py-0.5={grouped}
+		class:pt-2={!grouped}
+		class:pb-0.5={!grouped}
+		role="listitem"
+	>
+		<div class="flex gap-2.5">
+			<div class="w-9 shrink-0"></div>
+			<div
+				class="flex min-w-0 flex-1 items-center gap-1.5 text-[13px] italic"
+				style:color="var(--c-text-faint)"
+			>
+				<Trash size={12} class="shrink-0 opacity-70" />
+				<span class="truncate">{deletionSentence(message.deletionActor)}</span>
+			</div>
+		</div>
+	</div>
+{:else if message.kind === "system"}
 	<!-- System notices are the server's own sentence, verbatim. Re-deriving
 	     them client-side means guessing at a phrasing that varies by event
 	     type and by locale, and getting it subtly wrong forever. -->

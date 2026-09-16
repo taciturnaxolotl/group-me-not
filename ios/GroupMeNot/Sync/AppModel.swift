@@ -921,17 +921,22 @@ final class AppModel {
     }
 
     private func applyDeletion(to messageID: String, in conversation: ConversationID) async {
-        let me = currentUser?.id
+        // `sender`, not our user id. The field names a role, and this path only
+        // runs for a message we are allowed to delete because we wrote it, so
+        // `sender` is exactly what the server will say when it confirms. Filing
+        // a user id here instead would make the optimistic copy disagree with
+        // the one that comes back.
+        let actor = Message.DeletionActor.sender
         if let index = messages.firstIndex(where: { $0.id == messageID }) {
             var copy = messages[index]
             copy.deletedAt = Int(Date().timeIntervalSince1970)
-            copy.deletionActor = me
+            copy.deletionActor = actor.rawValue
             copy.text = nil
             copy.attachments = nil
             messages[index] = copy
         }
         guard let stored = try? await store.messages.markDeleted(
-            messageID, by: me, in: conversation)
+            messageID, by: actor, in: conversation)
         else { return }
         if let index = messages.firstIndex(where: { $0.id == messageID }) {
             messages[index] = stored

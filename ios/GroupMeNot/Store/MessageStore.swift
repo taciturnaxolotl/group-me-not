@@ -84,7 +84,13 @@ actor MessageStore {
             }
 
             // Keep the conversation list honest without a second round trip.
-            if let newest = messages.max(by: { Message.isNewer($1.id, than: $0.id) }) {
+            // Notices and tombstones are skipped when choosing, not only when
+            // writing: a batch that happens to end on a deletion should advance
+            // the row to the newest surviving message in it rather than leave
+            // the row where it was.
+            if let newest = messages
+                .filter({ !$0.isMessageNotice && !$0.isDeleted })
+                .max(by: { Message.isNewer($1.id, than: $0.id) }) {
                 try ConversationWrites.applyLatest(newest, conversation, in: db)
             }
             forget(messages.map(\.id), in: key)
@@ -137,22 +143,27 @@ actor MessageStore {
     @discardableResult
     /// Mark a message deleted, the way the server does.
     ///
-    /// A tombstone rather than a removal, because that is what comes back: the
-    /// row keeps its id and gains `deleted_at`, so a later catch-up agrees with
-    /// what was drawn instead of resurrecting the text.
+    /// A tombstone rather than a removal, because for a `sender` delete that is
+    /// exactly what comes back: the row keeps its id, gains `deleted_at` and
+    /// has its text replaced with the server's own sentence, so a later
+    /// catch-up agrees with what was drawn instead of resurrecting anything. An
+    /// `admin` delete usually takes the row away instead, and then this local
+    /// tombstone is the only record that a gap belongs there at all.
     func markDeleted(
         _ messageID: String,
         at stamp: Int = Int(Date().timeIntervalSince1970),
-        by actor: String?,
+        by actor: Message.DeletionActor,
         in conversation: ConversationID
     ) throws -> Message? {
         try db.transaction {
             guard var stored = try loadMessage(id: messageID, in: conversation) else { return nil }
             stored.deletedAt = stamp
-            stored.deletionActor = actor
+            stored.deletionActor = actor.rawValue
             stored.text = nil
             stored.attachments = nil
             try writeMerged(stored, in: conversation)
+            // The list row may have been quoting the message that just died.
+            try ConversationWrites.rewindLatest(conversation, in: db)
             return stored
         }
     }

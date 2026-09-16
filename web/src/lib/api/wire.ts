@@ -176,7 +176,17 @@ export interface WireMessage {
 
 	/** Set once the message has been edited. */
 	updated_at?: number;
-	deleted_at?: number | null;
+	/**
+	 * Epoch seconds from REST and from `event.data`, but an ISO 8601 string on
+	 * the tombstone pushed to a group channel. Both are real; the normalizer's
+	 * `epochSeconds` reconciles them.
+	 */
+	deleted_at?: number | string | null;
+	/**
+	 * A role — `sender`, `admin` or `system` — and not a user id, despite the
+	 * name. Measured against the live API; see `DeletionActor`.
+	 */
+	deletion_actor?: string | null;
 }
 
 /**
