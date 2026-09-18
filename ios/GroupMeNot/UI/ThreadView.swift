@@ -328,7 +328,14 @@ struct ThreadView: View {
                 Divider().padding(.leading, 14)
             }
             HStack(alignment: .bottom, spacing: 4) {
-                ComposerField("Reply", text: $draft, isFocused: $isWriting)
+                ComposerField("Reply", text: $draft, isFocused: $isWriting) { images in
+                    Task {
+                        let loaded = await MediaLoader.load(pasted: images)
+                        guard !loaded.isEmpty else { return }
+                        staged.append(contentsOf: loaded)
+                        isWriting = true
+                    }
+                }
                     .padding(.leading, 16)
                     .padding(.vertical, 11)
                     .frame(minHeight: Self.composerHeight)

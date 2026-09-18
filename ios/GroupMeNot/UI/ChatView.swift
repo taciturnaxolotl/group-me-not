@@ -1384,7 +1384,14 @@ struct ChatView: View {
             }
 
             HStack(alignment: .bottom, spacing: 4) {
-                ComposerField("Message", text: $draft, isFocused: $composerFocused)
+                ComposerField("Message", text: $draft, isFocused: $composerFocused) { images in
+                    Task {
+                        let loaded = await MediaLoader.load(pasted: images)
+                        guard !loaded.isEmpty else { return }
+                        staged.append(contentsOf: loaded)
+                        composerFocused = true
+                    }
+                }
                     .padding(.leading, 16)
                     .padding(.vertical, 11)
                     .frame(minHeight: Self.composerHeight)

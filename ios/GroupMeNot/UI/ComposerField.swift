@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The growing text field a message is written in.
 ///
@@ -24,18 +25,24 @@ struct ComposerField: View {
     @Binding var isFocused: Bool
     /// How tall it grows before the words start scrolling inside it.
     var lineLimit: Int = 6
+    /// Called with any images lifted off the pasteboard when the user pastes.
+    /// A `UITextView` drops images on the floor otherwise; routing them here
+    /// lets a pasted screenshot become an attachment instead of nothing.
+    var onPasteImages: ([PastedImage]) -> Void = { _ in }
 
     init(
-        _ placeholder: String, text: Binding<String>, isFocused: Binding<Bool>, lineLimit: Int = 6
+        _ placeholder: String, text: Binding<String>, isFocused: Binding<Bool>, lineLimit: Int = 6,
+        onPasteImages: @escaping ([PastedImage]) -> Void = { _ in }
     ) {
         self.placeholder = placeholder
         self._text = text
         self._isFocused = isFocused
         self.lineLimit = lineLimit
+        self.onPasteImages = onPasteImages
     }
 
     var body: some View {
-        Field(text: $text, isFocused: $isFocused, lineLimit: lineLimit)
+        Field(text: $text, isFocused: $isFocused, lineLimit: lineLimit, onPasteImages: onPasteImages)
             .overlay(alignment: .topLeading) {
                 if text.isEmpty {
                     Text(placeholder)
@@ -59,6 +66,8 @@ struct ComposerField: View {
     private final class GrowingTextView: UITextView {
         /// Set when the text changed, cleared by the layout that answers it.
         var caretNeedsChasing = false
+        /// Handed the images off the pasteboard when the user pastes one.
+        var onPasteImages: ([PastedImage]) -> Void = { _ in }
 
         override func layoutSubviews() {
             super.layoutSubviews()
@@ -66,12 +75,58 @@ struct ComposerField: View {
             caretNeedsChasing = false
             scrollRangeToVisible(selectedRange)
         }
+
+        /// A field of plain text will not offer Paste when the pasteboard holds
+        /// only an image, so it has to be enabled by hand — otherwise there is
+        /// no way to invoke the paste we are about to intercept.
+        override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+            if action == #selector(paste(_:)), UIPasteboard.general.hasImages {
+                return true
+            }
+            return super.canPerformAction(action, withSender: sender)
+        }
+
+        /// Intercept a paste that carries images and route them to attachments
+        /// rather than letting UIKit turn them into text attachments the wire
+        /// format has no place for. Anything else pastes as it always did.
+        override func paste(_ sender: Any?) {
+            let images = Self.pasteboardImages()
+            guard !images.isEmpty else {
+                super.paste(sender)
+                return
+            }
+            onPasteImages(images)
+        }
+
+        /// Every image on the general pasteboard, kept as raw bytes with the
+        /// type it was copied as. Reads `items` directly so a multi-image paste
+        /// and the original encoding both survive.
+        private static func pasteboardImages() -> [PastedImage] {
+            let board = UIPasteboard.general
+            guard board.hasImages else { return [] }
+            var out: [PastedImage] = []
+            for item in board.items {
+                for (identifier, value) in item {
+                    guard let type = UTType(identifier), type.conforms(to: .image) else { continue }
+                    if let data = value as? Data {
+                        out.append(PastedImage(data: data, type: type))
+                        break
+                    }
+                    if let image = value as? UIImage, let data = image.pngData() {
+                        out.append(PastedImage(data: data, type: .png))
+                        break
+                    }
+                }
+            }
+            return out
+        }
     }
 
     private struct Field: UIViewRepresentable {
         @Binding var text: String
         @Binding var isFocused: Bool
         let lineLimit: Int
+        let onPasteImages: ([PastedImage]) -> Void
 
         func makeUIView(context: Context) -> GrowingTextView {
             let view = GrowingTextView()
@@ -91,12 +146,16 @@ struct ComposerField: View {
             // the text past the sixth line was laid out and unreachable.
             view.isScrollEnabled = true
             view.alwaysBounceVertical = false
+            view.onPasteImages = onPasteImages
             view.text = text
             return view
         }
 
         func updateUIView(_ view: GrowingTextView, context: Context) {
             context.coordinator.parent = self
+            // Refreshed every pass: the closure captures the caller's current
+            // state, and a stale one would append to a view that has moved on.
+            view.onPasteImages = onPasteImages
 
             if view.text != text {
                 // Before the assignment, and the whole point of this file. An

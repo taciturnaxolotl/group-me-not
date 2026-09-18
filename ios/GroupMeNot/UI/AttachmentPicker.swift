@@ -90,6 +90,15 @@ private struct AttachmentPickerModifier: ViewModifier {
 
 // MARK: - Loading what the library hands over
 
+/// An image lifted off the pasteboard, kept as its original bytes and declared
+/// type so the media pipeline can decide whether to re-encode it. Preserving
+/// the type is what keeps a pasted GIF animated and a screenshot a PNG rather
+/// than forcing everything through a JPEG re-encode.
+nonisolated struct PastedImage: Sendable {
+    let data: Data
+    let type: UTType
+}
+
 /// Turns `PhotosPickerItem`s into files on disk.
 ///
 /// A namespace of async functions rather than an actor: there is no state to
@@ -120,6 +129,19 @@ nonisolated enum MediaLoader {
         var results: [PickedMedia] = []
         for item in items {
             if let picked = await load(item) { results.append(picked) }
+        }
+        return results
+    }
+
+    /// Turn images pasted into the composer into files on disk, the same way a
+    /// library pick is. Same normalisation, so a pasted photo is resized and a
+    /// HEIC re-encoded exactly as one chosen from the library would be.
+    static func load(pasted images: [PastedImage]) async -> [PickedMedia] {
+        var results: [PickedMedia] = []
+        for image in images {
+            if let picked = try? await normalisedImage(image.data, declaredType: image.type) {
+                results.append(picked)
+            }
         }
         return results
     }
