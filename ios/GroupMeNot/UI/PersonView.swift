@@ -161,13 +161,21 @@ struct PersonView: View {
                 Button {
                     viewing = PhotoTap(index: index)
                 } label: {
-                    RemoteImage(url: URL(string: url), maxPixelSize: 360) {
-                        Rectangle().fill(.quaternary)
-                    }
-                    .aspectRatio(1, contentMode: .fill)
-                    .frame(maxWidth: .infinity)
-                    .clipShape(.rect(cornerRadius: 10, style: .continuous))
-                    .contentShape(.rect(cornerRadius: 10, style: .continuous))
+                    // The shape comes from an empty view rather than from the
+                    // photo. A `RemoteImage` is happy at any size, so asking it
+                    // to fill a fixed ratio grows the box instead of cropping
+                    // the picture, and then there is nothing for `clipShape` to
+                    // cut against. An overlay can only be as big as what it
+                    // covers.
+                    Color.clear
+                        .aspectRatio(Self.photoRatio, contentMode: .fit)
+                        .overlay {
+                            RemoteImage(url: URL(string: url), maxPixelSize: 640) {
+                                Rectangle().fill(.quaternary)
+                            }
+                        }
+                        .clipShape(.rect(cornerRadius: 10, style: .continuous))
+                        .contentShape(.rect(cornerRadius: 10, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Photo \(index + 1)")
@@ -181,6 +189,10 @@ struct PersonView: View {
     }
 
     private static let photosShown = 6
+
+    /// Portrait, 9:16. These are phone photographs, and a square crop of one
+    /// takes the head off as often as not.
+    private static let photoRatio: CGFloat = 9.0 / 16.0
 
     private var shownPhotos: [String] {
         Array((person?.photos ?? []).prefix(Self.photosShown))
