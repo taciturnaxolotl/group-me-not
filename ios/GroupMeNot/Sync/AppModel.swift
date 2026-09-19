@@ -1123,29 +1123,106 @@ final class AppModel {
         }
     }
 
-    /// Join a group from a share link. Answers with the conversation to open,
-    /// or nil if the link has expired or the group is gone.
+    /// What a share link points at, without joining it.
+    ///
+    /// The one thing a client can learn about a group it is not in, so it is
+    /// what turns "Group Invite" into the group's actual name. Cached for the
+    /// session, misses included: a transcript can carry the same link several
+    /// times, rows are rebuilt whenever the list moves, and a link that has
+    /// expired will go on being expired.
+    func invitePreview(_ link: GroupMeLink) async -> Group? {
+        if let known = invitePreviews[link] { return known }
+        if let running = invitePreviewTasks[link] { return await running.value }
+
+        let task = Task<Group?, Never> { [api] in
+            switch link {
+            case .groupInvite(let groupID, let shareToken):
+                try? await api.groupPreview(groupID, shareToken: shareToken)
+            }
+        }
+        invitePreviewTasks[link] = task
+        let preview = await task.value
+        invitePreviewTasks[link] = nil
+        invitePreviews[link] = preview
+        return preview
+    }
+
+    /// Previews already fetched, `nil` for the ones that came back empty.
+    @ObservationIgnored private var invitePreviews: [GroupMeLink: Group?] = [:]
+    @ObservationIgnored private var invitePreviewTasks: [GroupMeLink: Task<Group?, Never>] = [:]
+
+    /// How a tap on an invitation turned out.
+    enum JoinOutcome: Sendable, Hashable {
+        /// In. Here is the conversation to open.
+        case joined(ConversationID)
+        /// Asked, and now waiting on one of the group's admins.
+        case pending
+        /// The group asks a question first, and will refuse until it is
+        /// answered. Carries the question to put to the reader.
+        case needsAnswer(Group.JoinQuestion?)
+        /// The link has expired, or the group is gone, or the server said no.
+        case failed
+    }
+
+    /// The `meta.code` a join comes back with when the answer was refused for
+    /// want of an answer to the group's question.
+    private static let answerRequired = 40016
+
+    /// Join a group from a share link.
     ///
     /// Safe to press twice: the server answers a join it has already granted
     /// with the group, so a double tap lands in the same place a single one
     /// does.
-    func join(_ link: GroupMeLink) async -> ConversationID? {
+    ///
+    /// - Parameter answer: the group's join question, answered. Asked for by a
+    ///   previous call coming back ``JoinOutcome/needsAnswer(_:)``.
+    func join(_ link: GroupMeLink, answer: String? = nil) async -> JoinOutcome {
         switch link {
         case .groupInvite(let groupID, let shareToken):
+            // Asked rather than attempted, when the group has said it will
+            // ask. The refusal is harmless, but a round trip spent to be told
+            // something the preview already said is a round trip the reader
+            // waits through.
+            if answer == nil, await invitePreview(link)?.showJoinQuestion == true {
+                return .needsAnswer(await invitePreview(link)?.joinQuestion)
+            }
             do {
-                guard let group = try await api.joinGroup(groupID, shareToken: shareToken)
-                else { return nil }
+                guard let group = try await api.joinGroup(
+                    groupID, shareToken: shareToken, answer: answer)
+                else { return .failed }
+                // Read the roster rather than the settings. `requires_approval`
+                // looks like it decides this and does not: a group carrying it,
+                // with a join question besides, let a former member straight
+                // back in with nothing answered. What the two answers really
+                // differ in is their shape — a granted join carries the whole
+                // group, a filed request carries the preview — so the roster is
+                // what gets believed.
+                guard isMember(of: group) else { return .pending }
                 try? await store.conversations.upsert(groups: [group])
                 await reloadConversations()
                 // Its history is not ours yet. Fetching now means the chat this
                 // opens onto has something in it.
                 await sync.catchUp(.group(group.id))
-                return .group(group.id)
+                return .joined(.group(group.id))
+            } catch APIError.http(_, let meta, _) where meta?.code == Self.answerRequired {
+                // The backstop for the check above: a group that turned its
+                // question on after the preview was cached lands here.
+                return .needsAnswer(await invitePreview(link)?.joinQuestion)
             } catch {
                 log.notice("could not join a group: \(diagnosticText(error), privacy: .public)")
-                return nil
+                return .failed
             }
         }
+    }
+
+    /// Whether a group the server just handed back has us on its roster.
+    ///
+    /// The one honest reading of a join. A group with no roster at all is a
+    /// request that was filed rather than granted: that answer is
+    /// preview-shaped, and `members` is the field it leaves out.
+    private func isMember(of group: Group) -> Bool {
+        guard let me = currentUser?.id, let roster = group.members else { return false }
+        return roster.contains { $0.userId == me }
     }
 
     @discardableResult
@@ -1221,8 +1298,23 @@ final class AppModel {
 
     func refreshRequests() async {
         guard isSignedIn else { return }
+        if let asked = try? await api.requestedGroups() { requestedGroups = Set(asked) }
         guard let latest = try? await api.pendingRequests() else { return }
         pendingRequests = latest
+    }
+
+    /// Groups asked to join and not yet let into.
+    ///
+    /// The only thing that outlives the tap. An invitation answered with
+    /// "waiting on an admin" is a fact about the account, not about the view
+    /// that happened to be on screen, so a card rebuilt after a relaunch can
+    /// still say so — and stops saying so on the sync after somebody says yes.
+    private(set) var requestedGroups: Set<String> = []
+
+    /// Whether this share link is one we have already knocked on.
+    func hasAsked(toJoin link: GroupMeLink) -> Bool {
+        guard case .group(let groupID) = link.conversation else { return false }
+        return requestedGroups.contains(groupID)
     }
 
     /// The message request one conversation is waiting on, if it is one.

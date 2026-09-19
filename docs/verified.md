@@ -2,12 +2,14 @@
 
 Everything else in this repo is read out of the APK. This page is different: it was measured
 against `api.groupme.com` and `push.groupme.com` on **2026-08-30**, and added to on
-**2026-09-15**, from an authenticated session in the web client, using read-only `GET`
-requests against my own account. Each section says which date it belongs to where it matters.
+**2026-09-15** and **2026-09-18**, from an authenticated session in the web client, mostly
+using read-only `GET` requests against my own account. Each section says which date it
+belongs to where it matters.
 
 No writes were performed for the 2026-08-30 pass. The 2026-09-15 additions include one that
 did: a message posted to a group of my own and deleted again, with consent, to watch what a
-deletion puts on the wire. Nothing touched another user's data.
+deletion puts on the wire. The 2026-09-18 pass posted joins, aimed at a group I was already
+in, where the call has nothing left to change. Nothing touched another user's data.
 
 Where a finding contradicts what the Android app does, the live behavior wins and the
 contradiction is called out, because those gaps are exactly where a better client lives.
@@ -368,6 +370,111 @@ as `NaN`, which is falsy, and a message that was deleted looks like a message th
 
 `GroupEvent` carries the same warning about its own timestamps, so this is the second place
 in the API where one field has two types. Assume it will not be the last.
+
+## Joining a group has two routes, and the obvious one is walled off
+
+Measured **2026-09-18** against a live account, aimed at a group I was already in, so the
+worst a successful call could do was nothing.
+
+A share link reads `https://groupme.com/join_group/{groupId}/{shareToken}`, which makes the
+path-shaped route look like the natural one. That one is the web client's, and it is gated:
+
+```
+POST /v3/groups/{groupId}/join/{shareToken}  -> 401 {"code": 40102, "errors": ["device_verification_failed"]}
+POST /v4/groups/{groupId}/join/{shareToken}  -> 401, the same
+```
+
+The web client passes the gate with an [Arkose](https://www.arkoselabs.com) captcha token:
+
+```
+POST /v4/groups/{groupId}/join/{shareToken}
+X-Verify-Id: webapp
+X-Verify-Token: <token for public key 49D02870-26F8-42F2-8619-0157104B9DEE>
+{"answer": {"response": "…"}, "directory_id": …}
+```
+
+Send a *wrong* token and the error moves from `40102` to `40103`, which is how you tell "you
+sent none" from "yours did not check out". A token minted on an unrelated origin is accepted,
+so unlike the Play Integrity wall in front of presence this one says nothing about which app
+is calling — but it still takes a browser to produce one.
+
+The Android route takes the token in the body instead and asks for nothing but the access
+token:
+
+```
+POST /v3/groups/{groupId}/join
+{"share_token": "unBKVqwD"}
+
+-> 200 {"meta": {"code": 20000}, "response": {"group": {…}}}
+```
+
+**Use the body form.** Both answer with the group under one extra `group` layer, and joining
+something already joined answers with the group rather than an error, which is what makes the
+button safe to press twice. `POST /v4/groups/{groupId}/join` with a body is a `500`: the body
+form lives on `/v3` alone.
+
+Worth having beside it: `GET /v3/groups/{groupId}/preview/{shareToken}` needs no verification
+either, and describes a group before anybody commits to it — name, description,
+`members_count`, `requires_approval`, `show_join_question`, `join_question`.
+
+### `requires_approval` does not decide whether you get in
+
+Measured **2026-09-18**, and these are real joins: an account that was not a member, of
+groups belonging to somebody else, with consent on both sides.
+
+Two groups, identically configured — `requires_approval: true`, `show_join_question: true`,
+`join_question: {"text": "What does ‘ mean?", "type": "join_reason/questions/text"}` — and
+three different outcomes, none of which the settings predict.
+
+**A former member walks straight back in.** On a group whose `memberships/states` said
+`exited`, with no `answer` sent at all:
+
+```
+POST /v3/groups/117618289/join     {"share_token": "BOxv916j"}
+-> 201 {"meta": {"code": 20100}, "response": {"group": {… "members": [… us …] …}}}
+```
+
+`active` immediately, the group readable, no request filed, the question never asked.
+
+**A first-time join without the answer is refused.**
+
+```
+POST /v3/groups/117635788/join     {"share_token": "mDKjydkl"}
+-> 400 {"meta": {"code": 40016, "errors": ["Reason requires answer to groups question"],
+                 "details": {"rejection_reason": "answer_required"}}}
+```
+
+**With the answer, it becomes a request.** The answer is an object, not a string:
+
+```
+POST /v3/groups/117635788/join     {"share_token": "mDKjydkl", "answer": {"response": "an apostrophe"}}
+-> 201 {"meta": {"code": 20101}, "response": {"group": {… no members, no share_url …}}}
+```
+
+So both success cases are `201`, and they differ in two legible ways:
+
+| | granted | filed |
+| --- | --- | --- |
+| `meta.code` | `20100` | `20101` |
+| `response.group` | the whole group, `members` and all | preview-shaped, **no `members`** |
+
+**Read the roster, not the settings.** Whether the group that comes back names you is the one
+reliable account of what happened, and it survives a client that throws `meta` away.
+
+### Watching an approval land
+
+Polled every five seconds across an admin saying yes. Three things flip together, inside one
+five-second window:
+
+| | before | after |
+| --- | --- | --- |
+| `GET /v3/memberships/states` | `"pending"` | `"active"` |
+| `GET /v3/groups/{id}` | `404` | `200` |
+| `GET /v3/groups/pending_memberships` → `requests_sent` | one `requested_pending` row | empty |
+
+`requests_sent` is the durable record of a join still waiting — `{group_id, name, image_url,
+state, updated_at, user_count}` — and the only way a client can redraw "waiting on an admin"
+after a relaunch. There is no push for it, so it rides the ordinary request refresh.
 
 ## Still open
 

@@ -543,10 +543,14 @@ struct ChatView: View {
                 Task {
                     if let row = model.conversations.first(where: { $0.id == link.conversation }) {
                         onOpenConversation(row)
-                    } else if let joined = await model.join(link),
-                              let row = model.conversations.first(where: { $0.id == joined }) {
+                    } else if case .joined(let conversation) = await model.join(link),
+                              let row = model.conversations.first(where: { $0.id == conversation }) {
                         onOpenConversation(row)
                     }
+                    // A join waiting on an admin opens nothing, and says so on
+                    // the card rather than here: the text has no room to
+                    // explain itself, and the card under it is already the
+                    // place this link answers from.
                 }
                 return .handled
             })

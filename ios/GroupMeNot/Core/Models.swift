@@ -978,6 +978,31 @@ nonisolated struct JoinRequest: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
+/// Both directions of "somebody is waiting on a decision about a group".
+///
+/// `GET /v3/groups/pending_memberships`. `requests_received` is what an admin
+/// has to answer; `requests_sent` is what this account has asked for and not
+/// been granted, which is the only durable record that a join is still
+/// waiting. A row leaves `requests_sent` the instant an admin says yes, at the
+/// same moment the group becomes readable and `memberships/states` flips from
+/// `pending` to `active`.
+nonisolated struct GroupMembershipRequests: Codable, Hashable, Sendable {
+    var requestsReceived: [Item]?
+    var requestsSent: [Item]?
+
+    nonisolated struct Item: Codable, Identifiable, Hashable, Sendable {
+        var groupId: String?
+        var name: String?
+        var imageUrl: String?
+        /// `requested_pending` is the only value seen so far.
+        var state: String?
+        var updatedAt: Int?
+        var userCount: Int?
+
+        var id: String { groupId ?? name ?? UUID().uuidString }
+    }
+}
+
 /// Everything waiting on a decision, account-wide.
 ///
 /// `GET /v4/requests`. The counts are reliable; the three arrays were empty

@@ -343,18 +343,76 @@ actor GroupMeAPI {
 
     /// Join a group with a share token, which is what a `join_group` link is.
     ///
-    /// `POST /v3/groups/{id}/join/{token}` answers with the group wrapped in one
-    /// more layer than every other route here: `{"response": {"group": {…}}}`.
+    /// The token goes in the *body*, not the path. Both forms exist and only one
+    /// of them is open to us:
+    ///
+    /// ```
+    /// POST /v3/groups/{id}/join          {"share_token": "…"}
+    /// POST /v4/groups/{id}/join/{token}  X-Verify-Id, X-Verify-Token
+    /// ```
+    ///
+    /// The path form is the web client's and it is gated: without an Arkose
+    /// captcha token in `X-Verify-Token` it answers
+    /// `401 {"code": 40102, "errors": ["device_verification_failed"]}`, the same
+    /// wall that keeps us out of presence. The body form is the Android
+    /// client's and asks for nothing beyond the access token. Measured against a
+    /// live account on 18 September 2026; see `docs/verified.md`.
+    ///
+    /// Either way the answer is the group wrapped in one more layer than every
+    /// other route here: `{"response": {"group": {…}}}`. Two things it can
+    /// mean, and `meta.code` separates them: `20100` is "you are in", `20101`
+    /// is "your request is filed". The group that comes with the first is the
+    /// real one, roster and all; the one that comes with the second is
+    /// preview-shaped and carries no `members`, which is the difference a
+    /// caller can see without reading `meta`.
+    ///
     /// Joining something already joined is not an error, it just answers with
     /// the group again, which is what makes the button safe to press twice.
-    func joinGroup(_ groupID: String, shareToken: String) async throws -> Group? {
-        let joined: Joined = try await client.post(
-            .v3, "/groups/\(groupID)/join/\(shareToken)",
-            body: Optional<Discard>.none, retry: .interactive)
+    ///
+    /// - Parameter answer: what the group asked, for the groups that ask. A
+    ///   first-time join without it is refused outright — `400`, `meta.code`
+    ///   `40016`, `rejection_reason: answer_required` — though somebody who was
+    ///   once a member and left is let straight back in without being asked.
+    func joinGroup(
+        _ groupID: String, shareToken: String, answer: String? = nil
+    ) async throws -> Group? {
+        let joined: Wrapped = try await client.post(
+            .v3, "/groups/\(groupID)/join",
+            body: JoinGroup(shareToken: shareToken, answer: answer.map(Answer.init(response:))),
+            retry: .interactive)
         return joined.group
     }
 
-    private nonisolated struct Joined: Decodable, Sendable {
+    /// What a share link points at, without joining it.
+    ///
+    /// `GET /v3/groups/{id}/preview/{shareToken}` is open to anybody holding the
+    /// token — it is the endpoint behind the web client's join page — and it is
+    /// the only way to learn a group's name before being in it. Sparse compared
+    /// to the real thing: name, description, image, `members_count`, and the
+    /// three fields that say what joining will actually do
+    /// (`requires_approval`, `show_join_question`, `join_question`). No roster,
+    /// no messages, no share url.
+    func groupPreview(_ groupID: String, shareToken: String) async throws -> Group? {
+        let preview: Wrapped = try await client.get(
+            .v3, "/groups/\(groupID)/preview/\(shareToken)")
+        return preview.group
+    }
+
+    /// What the join route wants. `directory_id` belongs here too, for a join
+    /// that came out of the group directory; we have no directory to join from.
+    private nonisolated struct JoinGroup: Encodable, Sendable {
+        var shareToken: String
+        var answer: Answer?
+    }
+
+    /// The answer to a group's join question, which the wire wants as an object
+    /// rather than a bare string.
+    private nonisolated struct Answer: Encodable, Sendable {
+        var response: String
+    }
+
+    /// The extra `group` layer both share-token routes put around their answer.
+    private nonisolated struct Wrapped: Decodable, Sendable {
         var group: Group?
     }
 
@@ -386,6 +444,21 @@ actor GroupMeAPI {
             return try await client.get(.v4, "/requests", retry: .background)
         } catch APIError.noContent {
             return PendingRequests()
+        }
+    }
+
+    /// Groups this account has asked to join and is still waiting on.
+    ///
+    /// `GET /v3/groups/pending_memberships` answers both directions at once;
+    /// this reads the outgoing half. Distinct from ``pendingRequests()``, which
+    /// is `/v4/requests` and counts what is waiting on *us*.
+    func requestedGroups() async throws -> [String] {
+        do {
+            let requests: GroupMembershipRequests = try await client.get(
+                .v3, "/groups/pending_memberships", retry: .background)
+            return (requests.requestsSent ?? []).compactMap(\.groupId)
+        } catch APIError.noContent {
+            return []
         }
     }
 
