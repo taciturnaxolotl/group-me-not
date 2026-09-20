@@ -31,10 +31,11 @@ struct SignInView: View {
             .padding(.horizontal, 28)
             .padding(.bottom, 20)
         }
-        .confirmationDialog("Sign In", isPresented: $isChoosingProvider, titleVisibility: .hidden) {
-            ForEach(OAuth.Provider.allCases.filter { $0 != .apple }, id: \.self) { provider in
+        .confirmationDialog("Sign In", isPresented: $isChoosingProvider, titleVisibility: .visible) {
+            ForEach(OAuth.Provider.allCases, id: \.self) { provider in
                 Button(provider.title) { signIn(with: provider) }
             }
+            Button("Email & Password") { isEmailPresented = true }
         }
         .sheet(isPresented: $isEmailPresented) { EmailSignInView() }
     }
@@ -58,24 +59,24 @@ struct SignInView: View {
         .accessibilityElement(children: .combine)
     }
 
-    /// One button that most people will press, one that opens the rest.
+    /// One button, and the choice behind it.
     ///
-    /// Four equally weighted buttons is not a choice, it is a form: each one
-    /// has to be read before any can be pressed. Apple is the one this app is
-    /// most likely to be reached through, so it goes first and looks like the
-    /// answer; everything else is one tap further away and costs the first
-    /// screen nothing.
+    /// A page of equally weighted buttons is a form: each one has to be read
+    /// before any can be pressed, and the biggest, Apple, gets pressed by
+    /// people who wanted Google and then have to back out of Apple's sheet.
+    /// So the page asks only whether you want in, and every way — the four
+    /// providers and email and password — arrives in one list once you have
+    /// said yes, none of them launching until it is chosen.
     private var actions: some View {
         VStack(spacing: 12) {
             Button {
-                signIn(with: .apple)
+                isChoosingProvider = true
             } label: {
                 HStack(spacing: 8) {
-                    if authorising == .apple {
+                    if isBusy {
                         ProgressView().tint(.white)
                     } else {
-                        Image(systemName: "apple.logo")
-                        Text("Continue with Apple").fontWeight(.semibold)
+                        Text("Sign In").fontWeight(.semibold)
                     }
                 }
                 .frame(maxWidth: .infinity, minHeight: 30)
@@ -84,22 +85,7 @@ struct SignInView: View {
             .controlSize(.large)
             .disabled(isBusy)
 
-            Button {
-                isEmailPresented = true
-            } label: {
-                Text("Email & Password")
-                    .frame(maxWidth: .infinity, minHeight: 30)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-            .disabled(isBusy)
-
-            Button("Other ways to sign in") { isChoosingProvider = true }
-                .font(.subheadline)
-                .padding(.top, 2)
-                .disabled(isBusy)
-
-            if let provider = authorising, provider != .apple {
+            if let provider = authorising {
                 Label("Waiting for \(provider.rawValue.capitalized)…", systemImage: "hourglass")
                     .font(.footnote)
                     .foregroundStyle(.secondary)

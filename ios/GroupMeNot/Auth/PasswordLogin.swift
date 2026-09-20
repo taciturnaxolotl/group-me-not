@@ -82,7 +82,7 @@ nonisolated enum PasswordLogin {
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
         let fields: [String: String] = [
-            "user_name": userName,
+            credentialField(for: userName): userName,
             "password": password,
             "grant_type": "password",
             "app_id": platformID,
@@ -182,6 +182,21 @@ nonisolated enum PasswordLogin {
     }
 
     // MARK: - Identity
+
+    /// Which key the credential goes under.
+    ///
+    /// The APK, and every version of this file before it, sent `user_name`. The
+    /// live server no longer reads it: a post keyed `user_name` comes back
+    /// `400 {"errors": ["No phone number or email given"]}`, no matter how right
+    /// everything else is, which is why email-and-password login had simply
+    /// stopped working. The field it wants now is `email` or `phone_number`, and
+    /// it takes either key for either kind of value — a phone number under
+    /// `email` is accepted — so the split here is for honesty rather than
+    /// because the server insists on it. Measured against the live endpoint on
+    /// 19 September 2026; see `docs/verified.md`.
+    private static func credentialField(for userName: String) -> String {
+        userName.contains("@") ? "email" : "phone_number"
+    }
 
     /// The pre-login token, which is not a token.
     private static func hash(userName: String, deviceID: String) -> String {

@@ -2,17 +2,81 @@
 
 Everything else in this repo is read out of the APK. This page is different: it was measured
 against `api.groupme.com` and `push.groupme.com` on **2026-08-30**, and added to on
-**2026-09-15** and **2026-09-18**, from an authenticated session in the web client, mostly
-using read-only `GET` requests against my own account. Each section says which date it
-belongs to where it matters.
+**2026-09-15** and **2026-09-18**, and again **2026-09-19**, from an authenticated session in
+the web client, mostly using read-only `GET` requests against my own account. Each section
+says which date it belongs to where it matters.
 
 No writes were performed for the 2026-08-30 pass. The 2026-09-15 additions include one that
 did: a message posted to a group of my own and deleted again, with consent, to watch what a
 deletion puts on the wire. The 2026-09-18 pass posted joins, aimed at a group I was already
-in, where the call has nothing left to change. Nothing touched another user's data.
+in, where the call has nothing left to change. Nothing touched another user's data. The
+2026-09-19 password-login probe wrote nothing: a made-up account never authenticates.
 
 Where a finding contradicts what the Android app does, the live behavior wins and the
 contradiction is called out, because those gaps are exactly where a better client lives.
+
+## Password login wants `email`, not `user_name`
+
+Measured **2026-09-19**, no real credentials involved: a made-up account is enough to see
+which field the parser reads, because a missing field and a wrong password fail differently.
+
+The APK posts the login identifier as `user_name` (see [auth.md](auth.md)). The live endpoint
+no longer reads that key. `POST https://v2.groupme.com/access_tokens` keyed `user_name`
+answers, whatever else is right:
+
+```
+400 {"meta": {"code": 400, "errors": ["No phone number or email given"]}}
+```
+
+Rename the one field to `email` (or `phone_number`) and the same request advances to `401` —
+shape accepted, the salted `X-Access-Token` hash and the password now actually checked:
+
+```
+{"email": "you@example.com", "password": "…", "grant_type": "password",
+ "app_id": "Android-262370304", "app_version": "262370304", "device_id": "…"}
+```
+
+The two keys are interchangeable and neither validates the value's shape at this stage: a
+phone number under `email`, or an address under `phone_number`, both pass to the `401`. So a
+client can key on `@` for readability without the server caring. This is a straight
+server-side rename since the APK was captured, and it is why email-and-password login had
+stopped working outright while the OAuth routes were fine.
+
+## The desktop handoff needs a provider, and it launches that provider
+
+Measured **2026-09-19**, logged out, watching what the web client stores and where it
+redirects, at both a desktop and a phone viewport. [auth.md](auth.md) documents the handoff
+with a `provider` in the URL; that provider is not optional, and this is the trap that makes
+it useless for email and password.
+
+The handoff arms only when the launch URL names a provider. `webBootstrap`'s capture is
+`if (!W.get()) return`, and `W.get()` returns nothing unless `desktop_auth=1`, a `state`, and
+a `provider` from `[microsoft, google, facebook, apple]` are all present. With a provider,
+the page stores the nonce in `sessionStorage["desktopAuthHandoffState"]` and its shared
+post-login handler later redirects to
+`groupme://oauth/callback#access_token=<token>&state=<nonce>` — for whatever sign-in
+completed. Confirmed by blocking the provider redirect and reading the value back:
+
+```
+signin?desktop_auth=1&provider=apple&state=ARMTEST7   -> sessionStorage.desktopAuthHandoffState == "ARMTEST7"
+signin?desktop_auth=1&state=ARMTEST7                   -> null
+```
+
+But naming a provider redirects to it *immediately* — `provider=apple` lands on
+`appleid.apple.com` before the page paints. So there is no URL that both shows the
+email-and-password form and arms the redirect: with a provider it launches the provider,
+without one it never arms. A no-provider page shows the form but the token stays on
+GroupMe's side; on a phone viewport the person is then handed the "open in the app / continue
+anyway" panel and never returns to the caller.
+
+The consequences for a client:
+
+- **Providers go through the handoff.** `ASWebAuthenticationSession` on the per-provider URL
+  is the only route Apple- and Google-registered accounts have, and the only route that works
+  at all — both refuse OAuth inside an embedded `WKWebView`.
+- **Email and password cannot use the handoff.** It stays on the native `/access_tokens`
+  POST above. Reading the token out of a `WKWebView`'s `localStorage` would work for a typed
+  login, but not for the providers, so it does not save the second path.
 
 ## Forward pagination works, and the two parameters are not interchangeable
 
