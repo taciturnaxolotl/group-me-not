@@ -190,6 +190,9 @@ final class AppModel {
     /// server never replaces cannot spin the catch-up forever.
     @ObservationIgnored private var attemptedHeals: Set<String> = []
     @ObservationIgnored private var typingSweep: Task<Void, Never>?
+    /// Reaction refreshes started for the open conversation. Kept so leaving it
+    /// can stop them; see ``refreshReactions(in:)``.
+    @ObservationIgnored private var reactionRefreshes: [Task<Void, Never>] = []
     /// When we last told the server we are here, so the heartbeat can run at
     /// GroupMe's three minutes rather than at whatever the sync happens to use.
     @ObservationIgnored private var presencePublishedAt: Date?
@@ -311,6 +314,9 @@ final class AppModel {
         startHeartbeat()
         publishPresence(.online)
         await sync.sync(reason: .foreground)
+        // The foreground moved the line between fresh and stale, and the open
+        // transcript is now on the wrong side of it.
+        if let open = openConversationID { refreshReactions(in: open) }
         await refreshRequests()
     }
 
@@ -490,6 +496,10 @@ final class AppModel {
 
     func openConversation(_ conversation: ConversationID) async {
         openConversationID = conversation
+        // Going straight from one chat to another skips the close that would
+        // otherwise have stopped these.
+        for task in reactionRefreshes { task.cancel() }
+        reactionRefreshes = []
         window = Self.transcriptPage
         typingSweep?.cancel()
         typingUserIDs = [:]
@@ -517,7 +527,12 @@ final class AppModel {
         // caller is a view's `.task`.
         let channels = focusChannels(for: conversation)
         Task { [bayeux] in await bayeux.focus(on: channels) }
-        Task { await self.sync.catchUp(conversation) }
+        Task {
+            await self.sync.catchUp(conversation)
+            // After, not alongside: the refresh's newest page should start
+            // where the caught-up transcript ends.
+            self.refreshReactions(in: conversation)
+        }
     }
 
     /// Leave a conversation. Synchronous, because it runs from `onDisappear` and
@@ -536,6 +551,8 @@ final class AppModel {
         typingSweep?.cancel()
         typingSweep = nil
         openConversationID = nil
+        for task in reactionRefreshes { task.cancel() }
+        reactionRefreshes = []
         messages = []
         outbox = []
         members = []
@@ -595,6 +612,9 @@ final class AppModel {
 
         if let stored = await transcript(conversation), stored.count > messages.count {
             messages = stored
+            // Local history comes up at disk speed, and some of it may predate
+            // the last time the socket dropped.
+            refreshReactions(in: conversation)
             return
         }
 
@@ -604,6 +624,7 @@ final class AppModel {
         }
 
         let page: [Message]
+        let fetchedAt = Date()
         do {
             // No `limit:`. The client's default is the verified server cap,
             // and asking for less than the cap is asking for more round trips.
@@ -623,8 +644,23 @@ final class AppModel {
             reachedBeginning = true
             return
         }
-        _ = try? await store.messages.upsert(page, in: conversation)
+        _ = try? await store.messages.upsert(page, in: conversation, fetchedAt: fetchedAt)
         messages = await transcript(conversation) ?? messages
+    }
+
+    /// Re-ask the server about any of the open transcript stored before the
+    /// socket last dropped, so the reactions on it are current.
+    ///
+    /// Started, never awaited: the transcript is already drawn, and whatever
+    /// the refresh changes comes back through the ordinary reload. The work and
+    /// the reasoning are in ``SyncEngine/refreshStale(_:in:)``.
+    private func refreshReactions(in conversation: ConversationID) {
+        guard conversation == openConversationID else { return }
+        let ids = messages.filter { !$0.isListPreview }.map(\.id)
+        reactionRefreshes.removeAll { $0.isCancelled }
+        reactionRefreshes.append(Task { [sync] in
+            await sync.refreshStale(ids, in: conversation)
+        })
     }
 
     /// Clear the badge locally, then tell the server whenever it is willing to
@@ -2008,6 +2044,11 @@ final class AppModel {
                 realtime.observe(event)
                 await sync.apply(event)
                 self?.handleLocally(event)
+                // A resumed socket has just run a reconnect sync, which moved
+                // the stale line; the open transcript needs checking against it.
+                if case .connectionDidResume = event, let self, let open = self.openConversationID {
+                    self.refreshReactions(in: open)
+                }
             }
         })
 
@@ -2021,6 +2062,7 @@ final class AppModel {
                 await sends.connectivityDidReturn()
                 await self.drainReactions()
                 await sync.sync(reason: .reconnect)
+                if let open = self.openConversationID { self.refreshReactions(in: open) }
             }
         })
     }

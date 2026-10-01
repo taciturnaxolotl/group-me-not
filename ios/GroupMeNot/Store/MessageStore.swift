@@ -52,17 +52,31 @@ actor MessageStore {
     /// transaction, which for a 200-message catch-up page is the difference
     /// between one fsync and two hundred.
     ///
+    /// - Parameter fetchedAt: when the request that produced these went out, for
+    ///   a server copy. It is recorded as the row's `verified_at`, and it guards
+    ///   reactions: a row whose reactions were written after the request left
+    ///   keeps them, because the page cannot have known about them. Nil for a
+    ///   copy that came from this device, which leaves `verified_at` alone.
     /// - Returns: the number of rows inserted or updated.
     @discardableResult
-    func upsert(_ messages: [Message], in conversation: ConversationID) throws -> Int {
+    func upsert(
+        _ messages: [Message], in conversation: ConversationID, fetchedAt: Date? = nil
+    ) throws -> Int {
         guard !messages.isEmpty else { return 0 }
         let key = conversation.storageKey
+        let verifiedAt = fetchedAt.map(Self.millis) ?? 0
 
         return try db.transaction {
             try ConversationWrites.ensureExists(conversation, in: db)
 
+            let newer = fetchedAt == nil ? [:] : try reactionsWritten(after: verifiedAt, in: conversation)
+
             var written = 0
-            for message in messages {
+            for var message in messages {
+                if let kept = newer[message.id] {
+                    message.reactions = kept.reactions
+                    message.favoritedBy = kept.favoritedBy
+                }
                 let payload = try StoreCoding.encode(message)
                 try db.run(Self.upsertSQL, [
                     SQLValue(key),
@@ -79,6 +93,7 @@ actor MessageStore {
                     SQLValue(message.parentId),
                     SQLValue(payload),
                     SQLValue(StoreCoding.encodeIfPresent(message.reactions)),
+                    SQLValue(verifiedAt),
                 ])
                 written += db.changes
             }
@@ -100,8 +115,66 @@ actor MessageStore {
 
     /// Convenience for the single message a push event delivers.
     @discardableResult
-    func upsert(_ message: Message, in conversation: ConversationID) throws -> Int {
-        try upsert([message], in: conversation)
+    func upsert(
+        _ message: Message, in conversation: ConversationID, fetchedAt: Date? = nil
+    ) throws -> Int {
+        try upsert([message], in: conversation, fetchedAt: fetchedAt)
+    }
+
+    /// Stored messages whose reactions changed here after `millis`, keyed by
+    /// id. Almost always empty: it is the handful of rows a live reaction or a
+    /// tap touched while a page was in flight.
+    private func reactionsWritten(
+        after millis: Int64, in conversation: ConversationID
+    ) throws -> [String: Message] {
+        let rows = try db.query(
+            "SELECT payload FROM messages WHERE conversation_key = ? AND reactions_at > ?",
+            [SQLValue(conversation.storageKey), SQLValue(millis)]
+        ) { try? decodeMessage($0) }
+        return Dictionary(rows.compactMap { $0.map { ($0.id, $0) } }, uniquingKeysWith: { first, _ in first })
+    }
+
+    // MARK: - Freshness
+
+    /// Which of `ids` the server has not vouched for since `cutoff`.
+    ///
+    /// A row fetched before the socket last came back may be missing anything
+    /// that happened while it was down, reactions above all. Ids we do not hold
+    /// are not returned: there is nothing stored to be stale.
+    func staleIDs(
+        _ ids: [String], in conversation: ConversationID, verifiedBefore cutoff: Date
+    ) throws -> Set<String> {
+        guard !ids.isEmpty else { return [] }
+        let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
+        let rows = try db.query(
+            """
+            SELECT id FROM messages
+             WHERE conversation_key = ? AND verified_at < ? AND id IN (\(placeholders))
+            """,
+            [SQLValue(conversation.storageKey), SQLValue(Self.millis(cutoff))] + ids.map { SQLValue($0) }
+        ) { $0.string(0) }
+        return Set(rows)
+    }
+
+    /// Record that the server has answered for these rows as of `fetchedAt`.
+    ///
+    /// For the rows a refresh page covered but did not return, which is what a
+    /// message deleted on the server looks like from here. Without this they
+    /// would read as stale forever and be asked for on every open. Touches no
+    /// payload, so the decode cache has nothing to forget.
+    func markVerified(_ ids: [String], in conversation: ConversationID, at fetchedAt: Date) throws {
+        guard !ids.isEmpty else { return }
+        let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
+        try db.run(
+            """
+            UPDATE messages SET verified_at = MAX(verified_at, ?)
+             WHERE conversation_key = ? AND id IN (\(placeholders))
+            """,
+            [SQLValue(Self.millis(fetchedAt)), SQLValue(conversation.storageKey)] + ids.map { SQLValue($0) })
+    }
+
+    nonisolated private static func millis(_ date: Date) -> Int64 {
+        Int64((date.timeIntervalSince1970 * 1000).rounded())
     }
 
     /// Folds a revision of a message we already hold into the stored copy.
@@ -265,12 +338,13 @@ actor MessageStore {
     ) throws {
         try db.run(
             """
-            UPDATE messages SET payload = ?, reactions = ?
+            UPDATE messages SET payload = ?, reactions = ?, reactions_at = ?
              WHERE conversation_key = ? AND id = ?
             """,
             [
                 SQLValue(try StoreCoding.encode(message)),
                 SQLValue(StoreCoding.encodeIfPresent(message.reactions)),
+                SQLValue(Self.millis(Date())),
                 SQLValue(conversation.storageKey),
                 SQLValue(id),
             ])
@@ -455,8 +529,9 @@ actor MessageStore {
     nonisolated private static let upsertSQL = """
     INSERT INTO messages
         (conversation_key, id, sort_key, source_guid, created_at, updated_at,
-         sender_id, text, system, deleted_at, pinned_at, parent_id, payload, reactions)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         sender_id, text, system, deleted_at, pinned_at, parent_id, payload, reactions,
+         verified_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(conversation_key, id) DO UPDATE SET
         source_guid = COALESCE(excluded.source_guid, messages.source_guid),
         updated_at  = excluded.updated_at,
@@ -467,7 +542,8 @@ actor MessageStore {
         pinned_at   = excluded.pinned_at,
         parent_id   = excluded.parent_id,
         payload     = excluded.payload,
-        reactions   = excluded.reactions
+        reactions   = excluded.reactions,
+        verified_at = MAX(messages.verified_at, excluded.verified_at)
      WHERE COALESCE(excluded.updated_at, 0) >= COALESCE(messages.updated_at, 0)
     """
 }

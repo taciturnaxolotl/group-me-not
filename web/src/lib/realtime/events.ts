@@ -1,4 +1,4 @@
-import type { WireMessage } from "../api/wire";
+import type { WireMessage, WireReaction } from "../api/wire";
 
 /**
  * Decoding what arrives on a Bayeux channel.
@@ -26,7 +26,20 @@ export type PushEvent =
 			/** The victim, already tombstoned by the server. Null if it sent only an id. */
 			tombstone: WireMessage | null;
 	  }
-	| { kind: "reaction"; messageId: string; groupId: string | null; subject: WireMessage | null }
+	| {
+			kind: "reaction";
+			messageId: string;
+			/** A group or topic id, or a DM's `a+b` chat id. Null if the frame named neither. */
+			conversationHint: string | null;
+			/**
+			 * The message's whole reaction set afterwards. Null when the frame
+			 * carried none, which is not the same as empty: empty says the last
+			 * reaction came off, null says nothing at all.
+			 */
+			reactions: WireReaction[] | null;
+			/** A full message, for the older shape that sent one. Usually null. */
+			subject: WireMessage | null;
+	  }
 	| { kind: "typing"; conversationId: string; userId: string }
 	| { kind: "membership"; groupId: string | null }
 	| { kind: "ping" }
@@ -107,13 +120,40 @@ export function decodePush(channel: string, data: unknown): PushEvent {
 		case "like.create":
 		case "like.delete":
 		case "reaction": {
-			// The subject is the whole message with its reactions already
-			// recalculated, which is convenient: there is no need to apply a
-			// delta, just replace what we hold.
-			const msg = subject && typeof subject.id === "string" ? (subject as unknown as WireMessage) : null;
-			const id = msg?.id ?? strOrNull(subject?.message_id) ?? "";
+			// The subject is *not* a message, though it was long read as one.
+			// It is a stub naming one, with the reaction set beside it:
+			//
+			//   group  { line: { id, group_id }, reactions: [...] }
+			//   DM     { direct_message: { id, chat_id }, reactions: [...] }
+			//
+			// (`ReactionsPayload` and `DMReactionsPayload` in the official
+			// client.) The old reading looked for `subject.id`, found nothing,
+			// and dropped every frame, so the only reactions this client ever
+			// drew were the ones a REST page happened to carry. The array is
+			// the whole set afterwards rather than a delta, so it replaces what
+			// we hold. The flat shape is still read in case a frame does carry
+			// a whole message.
+			const line = objOrNull(subject?.line);
+			const dm = objOrNull(subject?.direct_message);
+			const whole =
+				!line && !dm && subject && typeof subject.id === "string"
+					? (subject as unknown as WireMessage)
+					: null;
+			const id =
+				strOrNull(line?.id) ??
+				strOrNull(dm?.id) ??
+				strOrNull(subject?.message_id) ??
+				whole?.id ??
+				"";
 			if (!id) break;
-			return { kind: "reaction", messageId: id, groupId: strOrNull(subject?.group_id), subject: msg };
+			return {
+				kind: "reaction",
+				messageId: id,
+				conversationHint:
+					strOrNull(line?.group_id) ?? strOrNull(dm?.chat_id) ?? strOrNull(subject?.group_id),
+				reactions: Array.isArray(subject?.reactions) ? (subject.reactions as WireReaction[]) : null,
+				subject: whole,
+			};
 		}
 
 		case "typing": {
@@ -138,6 +178,10 @@ export function decodePush(channel: string, data: unknown): PushEvent {
 
 function strOrNull(v: unknown): string | null {
 	return typeof v === "string" || typeof v === "number" ? String(v) : null;
+}
+
+function objOrNull(v: unknown): Record<string, unknown> | null {
+	return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 }
 
 /**

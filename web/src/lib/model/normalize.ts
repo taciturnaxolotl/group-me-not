@@ -208,6 +208,17 @@ function normalizeReactions(wire: WireReaction[] | undefined, favoritedBy: strin
 	return [];
 }
 
+/**
+ * A bare reaction set, as a realtime reaction frame carries it alongside a
+ * stub of the message rather than inside it.
+ *
+ * Empty is a real answer here and not a missing one: it is how the last
+ * reaction coming off a message is announced.
+ */
+export function normalizeReactionList(wire: WireReaction[]): Reaction[] {
+	return normalizeReactions(wire, []);
+}
+
 // MARK: - System events
 
 function normalizeSystemEvent(e: WireSystemEvent): SystemEvent {

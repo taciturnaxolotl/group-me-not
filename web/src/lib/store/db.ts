@@ -112,12 +112,101 @@ export function db(): Promise<IDBPDatabase<GmnDB>> {
 
 // MARK: - Messages
 
+/**
+ * Write messages, without letting an old page undo a newer reaction.
+ *
+ * Each write reads the row it replaces first, in the same transaction, so the
+ * check and the write cannot be split by another tab or another callback.
+ * Two things are carried across from the old row:
+ *
+ *   - Reactions written by a live frame or a local toggle *after* this page's
+ *     request went out. The page cannot have seen them, and taking its
+ *     reaction set would quietly erase a heart somebody just added. This only
+ *     applies to server pages, which are the ones carrying `verifiedAt`; a
+ *     local write such as a tombstone means exactly what it says.
+ *   - The two timestamps themselves, when the incoming copy has none. A
+ *     tombstone or a settled send is built from what was on screen and knows
+ *     nothing about freshness, and dropping the old stamp would make the row
+ *     look stale for no reason and send a refresh after it.
+ *
+ * No schema version bump: rows are plain objects, neither field is indexed,
+ * and a row written before they existed simply reads as never verified,
+ * which is the right answer for it.
+ */
 export async function putMessages(msgs: Message[]): Promise<void> {
 	if (!msgs.length) return;
 	const d = await db();
 	const tx = d.transaction("messages", "readwrite");
 	await Promise.all([
-		...msgs.map((m) => tx.store.put({ ...m, sortKey: padId(m.id) })),
+		...msgs.map(async (m) => {
+			const sortKey = padId(m.id);
+			const prior = await tx.store.get([m.conversationKey, sortKey]);
+			await tx.store.put(reconcile({ ...m, sortKey }, prior));
+		}),
+		tx.done,
+	]);
+}
+
+function reconcile(next: StoredMessage, prior: StoredMessage | undefined): StoredMessage {
+	if (!prior) return next;
+	const priorAt = prior.reactionsAt ?? 0;
+	if (
+		next.verifiedAt !== undefined &&
+		priorAt > next.verifiedAt &&
+		priorAt > (next.reactionsAt ?? 0)
+	) {
+		next = { ...next, reactions: prior.reactions, reactionsAt: prior.reactionsAt };
+	}
+	return {
+		...next,
+		verifiedAt: next.verifiedAt ?? prior.verifiedAt,
+		reactionsAt: next.reactionsAt ?? prior.reactionsAt,
+	};
+}
+
+/**
+ * Replace one message's reactions, if we hold it.
+ *
+ * A row is never created from this. A reaction frame names a message and
+ * nothing else about it, and a row with reactions and no text would draw as
+ * an empty bubble the next time the conversation opened.
+ */
+export async function putReactions(
+	conversationKey: string,
+	id: string,
+	reactions: Message["reactions"],
+	at: number,
+): Promise<boolean> {
+	const d = await db();
+	const tx = d.transaction("messages", "readwrite");
+	const prior = await tx.store.get([conversationKey, padId(id)]);
+	if (prior && (prior.reactionsAt ?? 0) <= at) {
+		await tx.store.put({ ...prior, reactions, reactionsAt: at });
+	}
+	await tx.done;
+	return Boolean(prior);
+}
+
+/**
+ * Stamp messages as verified without rewriting them.
+ *
+ * For the ones a refresh covered but the server did not return, which is
+ * what a message deleted on the server looks like from here. Without the
+ * stamp it would stay stale forever and every refresh would ask for it again.
+ */
+export async function markVerified(
+	conversationKey: string,
+	ids: string[],
+	at: number,
+): Promise<void> {
+	if (!ids.length) return;
+	const d = await db();
+	const tx = d.transaction("messages", "readwrite");
+	await Promise.all([
+		...ids.map(async (id) => {
+			const prior = await tx.store.get([conversationKey, padId(id)]);
+			if (prior && (prior.verifiedAt ?? 0) < at) await tx.store.put({ ...prior, verifiedAt: at });
+		}),
 		tx.done,
 	]);
 }

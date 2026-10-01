@@ -130,6 +130,28 @@ actor SyncEngine {
     /// about when to come back. An hour, which is what the official client uses.
     private static let readCursorPause: TimeInterval = 3_600
 
+    /// When the socket last came back after a gap it may have missed things in.
+    ///
+    /// Faye replays nothing, so a message stored before this moment can be
+    /// wrong in ways no later event will mention: a reaction made while the app
+    /// was suspended is simply never delivered. A message stored after it has
+    /// had the socket watching it the whole time. That makes "fetched before
+    /// `liveSince`" an exact test for which stored copies are worth asking the
+    /// server about again, rather than a guessed expiry. In memory on purpose:
+    /// a cold start is itself a gap, so launch sets it to now.
+    private var liveSince = Date()
+
+    /// Conversations with a reaction refresh in flight. See
+    /// ``refreshStale(_:in:)``.
+    private var refreshing: Set<ConversationID> = []
+    /// The newest refresh asked for while one was already running.
+    private var queuedRefresh: [ConversationID: [String]] = [:]
+
+    /// How many pages one refresh may spend. A transcript window is two pages
+    /// at most; anything past that is somebody scrolling, and the next scroll
+    /// asks again.
+    static let maxRefreshPages = 5
+
     /// What the last list fetch said about each conversation's newest message.
     /// In memory only: after a cold start the shortcut simply does not fire, and
     /// the loop falls back to a normal `after_id` page.
@@ -166,6 +188,15 @@ actor SyncEngine {
     /// Run the whole catch-up. Two syncs never overlap: a caller arriving while
     /// one is in flight waits for that one and returns.
     func sync(reason: SyncReason = .manual) async {
+        // Each of these follows a stretch in which the socket was down or may
+        // have been. Moved before joining a sync in flight, not after: the gap
+        // happened whether or not this caller is the one that runs the loop.
+        switch reason {
+        case .launch, .foreground, .reconnect, .signIn:
+            liveSince = Date()
+        case .manual, .push, .heartbeat:
+            break
+        }
         // Join a sync already in flight rather than starting a second one. The
         // handle is cleared inside the task rather than after awaiting it,
         // because a caller that goes away mid-await would otherwise leave a
@@ -314,6 +345,124 @@ actor SyncEngine {
             log.error("catch-up for \(conversation.storageKey, privacy: .public) failed: \(diagnosticText(error), privacy: .public)")
         }
         await roster
+    }
+
+    // MARK: - Reaction freshness
+
+    /// Ask the server again about any of `ids` stored before the socket last
+    /// came back.
+    ///
+    /// This is the only thing that ever revisits a message. `after_id` walks
+    /// past it once and the socket only reports what happens while it is up, so
+    /// a reaction made while the app was suspended would otherwise never reach
+    /// a message we already hold. Scoped to what is on screen, because the
+    /// staleness only matters where somebody can see it, and refreshing the
+    /// whole database would cost a request per hundred messages ever stored.
+    ///
+    /// Pages backwards with `before_id`, newest stale message first. The
+    /// anchor is the message just after it, so it heads the page, and every
+    /// stale id the page reaches is settled whether or not the server sent it
+    /// back: a message missing from its own range has been deleted there, and
+    /// asking again would only get the same answer.
+    ///
+    /// Callers start this and walk away. Nothing waits on it; a page that lands
+    /// shows up through the ordinary ``SyncChange/messages(_:)`` reload. Checks
+    /// for cancellation between pages, so leaving the conversation stops it.
+    ///
+    /// - Parameter ids: the transcript, oldest first, without list-preview
+    ///   placeholders.
+    func refreshStale(_ ids: [String], in conversation: ConversationID) async {
+        guard !ids.isEmpty else { return }
+        // One refresh per conversation at a time. A second request while one
+        // runs is usually a scroll that widened the window, so it is kept and
+        // run when the first is done rather than dropped; only the newest such
+        // request is worth keeping, because its window contains the others.
+        guard refreshing.insert(conversation).inserted else {
+            queuedRefresh[conversation] = ids
+            return
+        }
+        defer {
+            refreshing.remove(conversation)
+            queuedRefresh[conversation] = nil
+        }
+        var next: [String]? = ids
+        while let current = next, !Task.isCancelled {
+            await refreshOnce(current, in: conversation)
+            next = queuedRefresh.removeValue(forKey: conversation)
+        }
+    }
+
+    private func refreshOnce(_ ids: [String], in conversation: ConversationID) async {
+        let cutoff = liveSince
+        var stale: Set<String>
+        do {
+            stale = try await store.messages.staleIDs(ids, in: conversation, verifiedBefore: cutoff)
+        } catch {
+            log.error("could not read freshness for \(conversation.storageKey, privacy: .public): \(diagnosticText(error), privacy: .public)")
+            return
+        }
+        guard !stale.isEmpty else { return }
+        log.debug("refreshing \(stale.count) stale messages in \(conversation.storageKey, privacy: .public)")
+
+        for _ in 0..<Self.maxRefreshPages {
+            guard !Task.isCancelled,
+                  let newest = ids.lastIndex(where: stale.contains)
+            else { break }
+            // No anchor when the newest stale message is the newest we hold,
+            // which asks for the newest page. The open conversation has just
+            // been caught up, so that page starts where this transcript ends.
+            let anchor = newest + 1 < ids.count ? ids[newest + 1] : nil
+            let fetchedAt = Date()
+            let page: [Message]
+            do {
+                page = try await api.messages(in: conversation, before: anchor, retry: .background)
+                try await store.messages.upsert(page, in: conversation, fetchedAt: fetchedAt)
+            } catch {
+                log.notice("reaction refresh for \(conversation.storageKey, privacy: .public) stopped: \(diagnosticText(error), privacy: .public)")
+                break
+            }
+
+            let reached = ids[...newest].filter(stale.contains)
+            let covered: [String]
+            if page.count < Self.historyPageSize {
+                // A short page is the beginning of the conversation, so it has
+                // answered for everything older than its anchor.
+                covered = reached
+            } else if let floor = page.min(by: { Message.isNewer($1.id, than: $0.id) })?.id {
+                covered = reached.filter { !Message.isNewer(floor, than: $0) }
+            } else {
+                covered = []
+            }
+            // Nothing settled means the page did not reach the message it was
+            // aimed at, which only happens when there is more new history than
+            // a page holds. Catch-up owns that; asking again would loop.
+            guard !covered.isEmpty else { break }
+            do {
+                try await store.messages.markVerified(covered, in: conversation, at: fetchedAt)
+            } catch {
+                log.error("could not record freshness: \(diagnosticText(error), privacy: .public)")
+                break
+            }
+            stale.subtract(covered)
+            if !page.isEmpty { continuation.yield(.messages(conversation)) }
+        }
+    }
+
+    /// Replace one stored message with the server's copy.
+    ///
+    /// For a reaction frame that named a message and left out what happened to
+    /// it. Only worth a request when we hold the message: anything we do not
+    /// hold will arrive whole, reactions and all, whenever history reaches it.
+    private func refetch(_ messageID: String, in conversation: ConversationID) async {
+        do {
+            guard try await store.messages.message(id: messageID, in: conversation) != nil else { return }
+            let fetchedAt = Date()
+            guard let message = try await api.message(id: messageID, in: conversation) else { return }
+            try await store.messages.upsert(message, in: conversation, fetchedAt: fetchedAt)
+            continuation.yield(.messages(conversation))
+        } catch {
+            log.notice("could not refetch \(messageID, privacy: .public): \(diagnosticText(error), privacy: .public)")
+        }
     }
 
     /// The topics inside every group that has any.
@@ -625,7 +774,7 @@ actor SyncEngine {
     private func execute(_ plan: Plan) async {
         do {
             if let embedded = plan.embedded {
-                try await store.messages.upsert(embedded, in: plan.conversation)
+                try await store.messages.upsert(embedded, in: plan.conversation, fetchedAt: Date())
                 // `advancedByOne` proved this message is the only one we were
                 // missing, so history really is contiguous through it. Saying so
                 // is what stops the next sync from planning this conversation
@@ -659,12 +808,13 @@ actor SyncEngine {
         var exhaustedPages = true
 
         for _ in 0..<Self.maxHistoryPages {
+            let fetchedAt = Date()
             let page = try await api.messages(
                 in: conversation, after: anchor,
                 limit: Self.historyPageSize, retry: retry)
             guard !page.isEmpty else { exhaustedPages = false; break }
 
-            try await store.messages.upsert(page, in: conversation)
+            try await store.messages.upsert(page, in: conversation, fetchedAt: fetchedAt)
             stored += page.count
             // The page is ascending and was fetched from `anchor`, so history is
             // now contiguous through its last message. Recording that after every
@@ -886,7 +1036,9 @@ actor SyncEngine {
                     return
                 }
 
-                try await store.messages.upsert(message, in: conversation)
+                // A message the socket just handed us is as current as it gets,
+                // and the socket is plainly up to tell us what happens to it next.
+                try await store.messages.upsert(message, in: conversation, fetchedAt: Date())
                 // Deliberately *not* an advance of `history_synced_id`. A push
                 // proves this message exists; it proves nothing about the
                 // messages between it and the last page we fetched, and after a
@@ -931,10 +1083,14 @@ actor SyncEngine {
                 return
             }
             guard let reactions = like.reactions else {
+                // The frame says something changed and not what. Ignoring it
+                // used to be final, since nothing else would ever look at this
+                // message again, so the server's own copy is asked instead.
                 log.notice("""
                     reaction push for \(messageID, privacy: .public) carried no reaction set; \
-                    leaving the stored copy alone
+                    fetching the message
                     """)
+                await refetch(messageID, in: conversation)
                 return
             }
             do {
