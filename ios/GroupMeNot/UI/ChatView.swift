@@ -588,7 +588,7 @@ struct ChatView: View {
             // inside this view's navigation bar and safe-area bar while
             // ignoring the safe area across both, and what it did to the layout
             // outlived its own dismissal.
-            .fullScreenCover(item: $thread) { focus in
+            .fullScreenCover(item: $thread, onDismiss: leaveIfAsked) { focus in
                 ThreadView(
                     items: threadItems(rootedAt: focus.rootID),
                     anchorY: focus.anchorY,
@@ -604,8 +604,12 @@ struct ChatView: View {
                     actions: { actions(for: $0) },
                     onRetry: { retry($0) },
                     onDiscard: { discard($0) },
-                    onOpenConversation: onOpenConversation,
-                    onOpenPerson: { viewingPerson = $0 },
+                    onOpenConversation: { row in
+                        leavingFor = row
+                        var instant = Transaction()
+                        instant.disablesAnimations = true
+                        withTransaction(instant) { thread = nil }
+                    },
                     onSend: { text, media in reply(text, media: media, into: focus.rootID) },
                     onDismiss: {
                         var instant = Transaction()

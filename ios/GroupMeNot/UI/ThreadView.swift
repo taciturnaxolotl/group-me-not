@@ -52,9 +52,6 @@ struct ThreadView: View {
     var onRetry: (MessageDisplay) -> Void = { _ in }
     var onDiscard: (MessageDisplay) -> Void = { _ in }
     var onOpenConversation: (ConversationRow) -> Void = { _ in }
-    /// A tap on a face in the chain. The chain cannot present over itself, so
-    /// the chat is the one that opens the profile.
-    var onOpenPerson: (PersonRef) -> Void = { _ in }
     /// Called with the text and any attachments of a reply into this chain.
     var onSend: (String, [PickedMedia]) -> Void = { _, _ in }
     var onDismiss: () -> Void = {}
@@ -76,6 +73,11 @@ struct ThreadView: View {
     @State private var isAttachmentPickerPresented = false
     @State private var isInfoPresented = false
     @State private var isWriting = false
+    /// Whose profile is open. Raised here for the same reason the roster is:
+    /// a sheet from the chat cannot appear over a chain.
+    @State private var viewingPerson: PersonRef?
+    /// A conversation picked on that profile, opened once its sheet is gone.
+    @State private var leavingFor: ConversationRow?
 
     /// How far each reply starts above where it belongs, per step of distance
     /// from the root. Small: this is a gathering, not a fountain.
@@ -114,6 +116,11 @@ struct ThreadView: View {
                 }
                 .sheet(item: $rosterTarget) { item in
                     ReactionRoster(summaries: item.reactions, members: members, meID: meID)
+                }
+                .sheet(item: $viewingPerson, onDismiss: leaveIfAsked) { person in
+                    PersonView(
+                        userID: person.id, name: person.name, avatarURL: person.avatarURL,
+                        onOpenDirect: { leavingFor = $0 }, openedFrom: conversation?.id)
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
@@ -229,7 +236,13 @@ struct ThreadView: View {
             onReply: { isWriting = true },
             onOpenThread: { _ in },
             onInspectReaction: { _ in rosterTarget = item },
-            onOpenPerson: onOpenPerson)
+            onOpenPerson: { viewingPerson = $0 })
+    }
+
+    private func leaveIfAsked() {
+        guard let row = leavingFor else { return }
+        leavingFor = nil
+        onOpenConversation(row)
     }
 
     /// The press menu, raised here rather than by the chat. A chain is
