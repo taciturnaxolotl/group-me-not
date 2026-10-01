@@ -59,7 +59,11 @@ struct ConversationListView: View {
                         // than to the list, and left two transcripts alive at
                         // once, each telling the model to open a different
                         // conversation.
+                        // Keyed by conversation so a replacement at the same
+                        // depth is a new screen, not the old one handed a new
+                        // row with its state and tasks still pointed at the last.
                         ChatView(conversation: row) { path = [.chat($0)] }
+                            .id(row.id)
                     case .topics(let group):
                         TopicChooserView(group: group) { path.append(.chat($0)) }
                     }

@@ -360,6 +360,10 @@ struct ChatView: View {
     @State private var composerFocused = false
     /// Whose profile is open, if anybody's.
     @State private var viewingPerson: PersonRef?
+    /// A conversation chosen from inside a sheet, held until the sheet is gone.
+    /// Replacing the navigation path while a sheet this view presents is still
+    /// on its way down is dropped by UIKit, so the button looked dead.
+    @State private var leavingFor: ConversationRow?
     /// Parsed text, kept across rebuilds. Lives as long as this view does,
     /// which is as long as the conversation is open.
     @State private var styling = StyledTextCache()
@@ -671,16 +675,22 @@ struct ChatView: View {
                         Task { await model.setPinned(false, message: message) }
                     })
             }
-            .sheet(isPresented: $isInfoPresented) {
+            .sheet(isPresented: $isInfoPresented, onDismiss: leaveIfAsked) {
                 ConversationInfoView(
                     conversation: current, members: model.members,
-                    onOpenDirect: onOpenConversation)
+                    onOpenDirect: { leavingFor = $0 })
             }
-            .sheet(item: $viewingPerson) { person in
+            .sheet(item: $viewingPerson, onDismiss: leaveIfAsked) { person in
                 PersonView(
                     userID: person.id, name: person.name, avatarURL: person.avatarURL,
-                    onOpenDirect: onOpenConversation, openedFrom: current.id)
+                    onOpenDirect: { leavingFor = $0 }, openedFrom: current.id)
             }
+    }
+
+    private func leaveIfAsked() {
+        guard let row = leavingFor else { return }
+        leavingFor = nil
+        onOpenConversation(row)
     }
 
     /// Scroll to a message, waiting for its row if the rebuild has not caught
