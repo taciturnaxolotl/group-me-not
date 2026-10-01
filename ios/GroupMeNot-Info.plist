@@ -2,26 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Everything else is generated; this file exists only to claim the OAuth
-	     callback scheme. Keep it in sync with OAuth.callbackScheme. -->
-	<!-- Add-only, for the Save to Photos action in the media viewer. The
-	     narrowest permission that can write a picture: it never reads back. -->
-	<!-- Answers the export compliance question at upload instead of in App
-	     Store Connect. False is the true answer: the only cryptography here is
-	     HTTPS to GroupMe's own servers, which is exempt. -->
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
-	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Save photos from your conversations to your library.</string>
-	<!-- Not optional in the way the others are. Presenting a camera without
-	     this key does not fail politely: iOS terminates the process the moment
-	     the picker touches the hardware, which is what "taking a photo crashes
-	     the app" was. The microphone key is here for the same reason, because
-	     the picker offers video and video records sound. -->
-	<key>NSCameraUsageDescription</key>
-	<string>Take a photo or video to send in a conversation.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Record sound with the videos you send.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
