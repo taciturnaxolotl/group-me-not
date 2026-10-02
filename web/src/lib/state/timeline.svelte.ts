@@ -1,5 +1,6 @@
 import type { Message } from "../model/types";
 import { cmpId } from "../model/ids";
+import { keepNewerReactions } from "../model/reactions";
 
 /**
  * One conversation's transcript, and the rows a renderer draws.
@@ -47,6 +48,12 @@ export class Timeline {
 	 * captured when the conversation opens and stays put until it is left.
 	 */
 	unreadFrom = $state<string | null>(null);
+
+	/**
+	 * Every loaded message from `floor` (or the beginning) to the newest was fetched at `at`.
+	 * Not reactive; only the reaction refresh reads it.
+	 */
+	verified: { floor: string | "beginning"; at: number } | null = null;
 
 	/** Somebody is typing, by user id, with an expiry. */
 	typing = $state<Map<string, number>>(new Map());
@@ -151,8 +158,10 @@ export class Timeline {
 	 * Dedupes on id, and — importantly — on `source_guid`, because a message
 	 * we sent optimistically is already in the list under a synthetic id when
 	 * the server's copy of it arrives. Matching only on id would show it twice.
+	 *
+	 * `asOf` is when the server request was sent; reactions set after it are kept.
 	 */
-	merge(incoming: Message[]): void {
+	merge(incoming: Message[], opts: { asOf?: number } = {}): void {
 		if (!incoming.length) return;
 
 		const byId = new Map(this.messages.map((m) => [m.id, m]));
@@ -169,7 +178,7 @@ export class Timeline {
 				byGuid.delete(shadow.sourceGuid);
 			}
 			const existing = byId.get(m.id);
-			byId.set(m.id, existing ? mergeOne(existing, m) : m);
+			byId.set(m.id, existing ? keepNewerReactions(existing, { ...existing, ...m }, opts.asOf) : m);
 			if (m.sourceGuid) byGuid.set(m.sourceGuid, m);
 		}
 
@@ -185,23 +194,6 @@ export class Timeline {
 		// a pending send is acknowledged and swaps its synthetic id for a real
 		// one that sorts earlier than the next optimistic message.
 		this.messages = id === next.id ? copy : copy.sort((a, b) => cmpId(a.id, b.id));
-	}
-
-	/**
-	 * Stamp messages as verified, in one reassignment rather than one per id.
-	 *
-	 * Used for messages a refresh covered without the server returning them,
-	 * so the next pass does not go looking for them again.
-	 */
-	markVerified(ids: ReadonlySet<string>, at: number): void {
-		if (!ids.size) return;
-		let changed = false;
-		const next = this.messages.map((m) => {
-			if (!ids.has(m.id) || (m.verifiedAt ?? 0) >= at) return m;
-			changed = true;
-			return { ...m, verifiedAt: at };
-		});
-		if (changed) this.messages = next;
 	}
 
 	remove(id: string): void {
@@ -252,24 +244,6 @@ export class Timeline {
 		if (this.#expiry) clearTimeout(this.#expiry);
 		this.#expiry = null;
 	}
-}
-
-function mergeOne(existing: Message, incoming: Message): Message {
-	const merged = { ...existing, ...incoming };
-	// A page of history must not take back a reaction that arrived, or was
-	// made here, after the page was asked for. The page is older news than
-	// what is on screen, however recently it landed. Only server pages carry
-	// `verifiedAt`, so a local write is never second-guessed.
-	const heldAt = existing.reactionsAt ?? 0;
-	if (
-		incoming.verifiedAt !== undefined &&
-		heldAt > incoming.verifiedAt &&
-		heldAt > (incoming.reactionsAt ?? 0)
-	) {
-		merged.reactions = existing.reactions;
-		merged.reactionsAt = existing.reactionsAt;
-	}
-	return merged;
 }
 
 function canGroup(prev: Message | null, m: Message): boolean {

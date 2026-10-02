@@ -59,24 +59,7 @@ export interface Message {
 	/** Structured system payload, when we recognise it. */
 	event: SystemEvent | null;
 
-	/**
-	 * When a server response last vouched for this copy, in epoch ms.
-	 *
-	 * Stamped with the moment the request was *sent*, not when it landed,
-	 * because anything that happened while the response was in flight may or
-	 * may not be in it, and the honest assumption is that it is not. Absent
-	 * means no response ever has, which reads as stale.
-	 *
-	 * Optional because its absence is the meaningful case: a copy that came
-	 * off an older cache, or a placeholder the server has never seen.
-	 */
-	verifiedAt?: number;
-	/**
-	 * When `reactions` was last written by something newer than a page of
-	 * history: a live reaction frame, or this user's own toggle. A page whose
-	 * request went out before this moment cannot know about that write, so it
-	 * is not allowed to overwrite it. See `Timeline.merge` and `putMessages`.
-	 */
+	/** When a live frame or local toggle last set `reactions` (ms); older pages may not overwrite them. */
 	reactionsAt?: number;
 }
 

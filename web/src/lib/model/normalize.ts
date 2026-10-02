@@ -182,7 +182,10 @@ function findMentions(attachments: WireAttachment[], textLength: number): Mentio
  * `favorited_by` and no `reactions` at all, which is why the fallback below
  * is not dead code: without it, likes from those clients are invisible.
  */
-function normalizeReactions(wire: WireReaction[] | undefined, favoritedBy: string[]): Reaction[] {
+export function normalizeReactions(
+	wire: WireReaction[] | undefined,
+	favoritedBy: string[] = [],
+): Reaction[] {
 	if (wire?.length) {
 		return wire
 			.filter((r) => r.user_ids?.length)
@@ -206,17 +209,6 @@ function normalizeReactions(wire: WireReaction[] | undefined, favoritedBy: strin
 		return [{ code: "\u2665\uFE0F", kind: "unicode", userIds: favoritedBy, packId: null, packIndex: null }];
 	}
 	return [];
-}
-
-/**
- * A bare reaction set, as a realtime reaction frame carries it alongside a
- * stub of the message rather than inside it.
- *
- * Empty is a real answer here and not a missing one: it is how the last
- * reaction coming off a message is announced.
- */
-export function normalizeReactionList(wire: WireReaction[]): Reaction[] {
-	return normalizeReactions(wire, []);
 }
 
 // MARK: - System events

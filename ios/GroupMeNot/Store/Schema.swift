@@ -58,7 +58,7 @@ nonisolated enum Schema {
         case 9: try db.execute(addShareURL)
         case 10: try db.execute(addGroupProfile)
         case 11: try db.execute(addReadCursorSync)
-        case 12: try db.execute(addMessageFreshness)
+        case 12: try db.execute(addReactionsAt)
         default:
             throw SQLError(code: 1, message: "no migration defined for schema \(step)", sql: nil)
         }
@@ -153,25 +153,9 @@ nonisolated enum Schema {
 
     // MARK: - Version 12
 
-    /// When the server last vouched for a message, and when its reactions last
-    /// changed here.
-    ///
-    /// A stored message is only as current as the socket was live after it was
-    /// fetched. `after_id` never goes back for it, so a reaction made while the
-    /// app was suspended reaches this row by no route at all, and the copy
-    /// stays wrong indefinitely. `verified_at` is what lets the sync engine tell
-    /// which rows were fetched before the socket last dropped, and so might have
-    /// missed something, without guessing at an expiry time.
-    ///
-    /// `reactions_at` is the other half of refreshing safely. A page requested
-    /// before a live reaction arrived must not land on top of it, and the only
-    /// way to know is to compare when the request went out with when the
-    /// reaction was written.
-    ///
-    /// Both are milliseconds since 1970, and both start at zero, which reads as
-    /// "stale" and "never touched". That is right for every row already on disk.
-    private static let addMessageFreshness = """
-    ALTER TABLE messages ADD COLUMN verified_at INTEGER NOT NULL DEFAULT 0;
+    /// When a message's reactions last changed here, in milliseconds since 1970.
+    /// A server page requested before then must not overwrite them.
+    private static let addReactionsAt = """
     ALTER TABLE messages ADD COLUMN reactions_at INTEGER NOT NULL DEFAULT 0;
     """
 

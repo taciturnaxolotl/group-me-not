@@ -1,5 +1,4 @@
 import type { GroupMeAPI } from "../api/groupme";
-import type { WireMessage } from "../api/wire";
 import type { ConversationID } from "../model/conversation-id";
 import { cmpId } from "../model/ids";
 import { normalizeMessage } from "../model/normalize";
@@ -15,19 +14,8 @@ import { addRange, newestHeld } from "../store/ranges";
  * two look identical at the top of a scroll view and mean opposite things.
  */
 
-/** The server's page cap, exported so a caller can tell a short page. */
+/** The server's page cap; a shorter page reached the beginning. */
 export const PAGE = 100;
-
-/**
- * Normalize a page and stamp it with when it was asked for.
- *
- * The stamp is the send time on purpose. A reaction made while the request
- * was in flight may or may not be in the answer, so the page only vouches
- * for the moment it left; see `Message.verifiedAt`.
- */
-function stamped(wire: WireMessage[], key: string, sentAt: number): Message[] {
-	return wire.map((w) => ({ ...normalizeMessage(w, key), verifiedAt: sentAt }));
-}
 
 /** The newest page. Used on open and after a reconnect. */
 export async function fetchHead(
@@ -38,7 +26,9 @@ export async function fetchHead(
 ): Promise<Message[]> {
 	const sentAt = Date.now();
 	const page = await api.messages(conversation, { limit: PAGE, signal });
-	const msgs = stamped(page.messages, key, sentAt);
+	// A page that lands after its caller gave up must not write, or it outlives a sign-out.
+	signal?.throwIfAborted();
+	const msgs = page.messages.map((w) => normalizeMessage(w, key));
 	if (!msgs.length) return [];
 
 	msgs.sort((a, b) => cmpId(a.id, b.id));
@@ -48,7 +38,7 @@ export async function fetchHead(
 		floorReached: msgs.length < PAGE,
 		floorId: msgs.length < PAGE ? msgs[0]!.id : null,
 	});
-	await store.putMessages(msgs);
+	await store.putMessages(msgs, { asOf: sentAt });
 	return msgs;
 }
 
@@ -62,7 +52,8 @@ export async function fetchOlder(
 ): Promise<Message[]> {
 	const sentAt = Date.now();
 	const page = await api.messages(conversation, { beforeId, limit: PAGE, signal });
-	const msgs = stamped(page.messages, key, sentAt);
+	signal?.throwIfAborted();
+	const msgs = page.messages.map((w) => normalizeMessage(w, key));
 	if (!msgs.length) {
 		// An empty answer to `before_id` is the server saying there is nothing
 		// older. Record it so the scroller stops asking.
@@ -79,7 +70,7 @@ export async function fetchOlder(
 		floorReached: msgs.length < PAGE,
 		floorId: msgs.length < PAGE ? msgs[0]!.id : null,
 	});
-	await store.putMessages(msgs);
+	await store.putMessages(msgs, { asOf: sentAt });
 	return msgs;
 }
 
@@ -121,10 +112,11 @@ export async function catchUp(
 	for (let page = 0; page < 10; page++) {
 		const sentAt = Date.now();
 		const res = await api.messages(conversation, { afterId: anchor, limit: PAGE, signal });
-		const msgs = stamped(res.messages, key, sentAt).sort((a, b) => cmpId(a.id, b.id));
+		signal?.throwIfAborted();
+		const msgs = res.messages.map((w) => normalizeMessage(w, key)).sort((a, b) => cmpId(a.id, b.id));
 		if (!msgs.length) break;
 
-		await store.putMessages(msgs);
+		await store.putMessages(msgs, { asOf: sentAt });
 		await recordSpan(key, anchor, msgs[msgs.length - 1]!.id, {});
 		collected.push(...msgs);
 		anchor = msgs[msgs.length - 1]!.id;
@@ -134,29 +126,21 @@ export async function catchUp(
 	return collected;
 }
 
-/**
- * One message, fresh from the server, saved and returned.
- *
- * Its reactions are stamped as current as of the request too, not just the
- * row. This is only ever called because a live frame said the reactions
- * changed, so the answer is as recent as a live write and should be guarded
- * like one against an older page that lands after it.
- */
+/** One group or topic message, saved with its reactions guarded as of the request, like a live write. */
 export async function fetchMessage(
 	api: GroupMeAPI,
 	conversation: ConversationID,
 	key: string,
 	messageId: string,
+	signal?: AbortSignal,
 ): Promise<Message | null> {
+	if (conversation.kind === "dm") return null;
 	const sentAt = Date.now();
-	const wire = await api.message(conversation, messageId);
+	const wire = await api.groupMessage(conversation.id, messageId, signal);
+	signal?.throwIfAborted();
 	if (!wire) return null;
-	const message: Message = {
-		...normalizeMessage(wire, key),
-		verifiedAt: sentAt,
-		reactionsAt: sentAt,
-	};
-	await store.putMessages([message]);
+	const message: Message = { ...normalizeMessage(wire, key), reactionsAt: sentAt };
+	await store.putMessages([message], { asOf: sentAt });
 	return message;
 }
 

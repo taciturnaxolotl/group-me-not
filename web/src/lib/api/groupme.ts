@@ -203,33 +203,17 @@ export class GroupMeAPI {
 		return { messages: res?.messages ?? [], count: res?.count ?? null };
 	}
 
-	/**
-	 * One message by id.
-	 *
-	 * The two halves are on different versions: group (and topic) reads moved
-	 * to v4, the DM read stayed on v3 and takes the other user as a query
-	 * parameter rather than in the path. The envelope key is read both ways
-	 * because the DM answer has not been measured, and guessing wrong would
-	 * look like the message had vanished.
-	 */
-	async message(
-		conversation: ConversationID,
+	/** One group or topic message. On v4, unlike the page route. DMs are left out: their single read is unmeasured. */
+	async groupMessage(
+		groupId: string,
 		messageId: string,
 		signal?: AbortSignal,
 	): Promise<WireMessage | null> {
-		type Single = { message?: WireMessage; direct_message?: WireMessage };
-		const res =
-			conversation.kind === "dm"
-				? await this.#c.get<Single>(`/direct_messages/${messageId}`, {
-						query: { other_user_id: conversation.id, acceptFiles: 1 },
-						signal,
-					})
-				: await this.#c.get<Single>(`/groups/${conversation.id}/messages/${messageId}`, {
-						version: "v4",
-						query: { acceptFiles: 1 },
-						signal,
-					});
-		return res?.message ?? res?.direct_message ?? null;
+		const res = await this.#c.get<{ message?: WireMessage }>(
+			`/groups/${groupId}/messages/${messageId}`,
+			{ version: "v4", query: { acceptFiles: 1 }, signal },
+		);
+		return res?.message ?? null;
 	}
 
 	/**

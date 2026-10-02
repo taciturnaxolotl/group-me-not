@@ -3,43 +3,17 @@ import { GroupMeAPI } from "../api/groupme";
 import { BayeuxClient, dmChannel, groupChannel, type BayeuxState } from "../realtime/bayeux";
 import { decodePush, messageChannels } from "../realtime/events";
 import { keyOf, parseKey, type ConversationID } from "../model/conversation-id";
-import { cmpId, isPendingId } from "../model/ids";
-import {
-	normalizeCurrentUser,
-	normalizeMember,
-	normalizeMessage,
-	normalizeReactionList,
-} from "../model/normalize";
+import { cmpId } from "../model/ids";
+import { normalizeCurrentUser, normalizeMember, normalizeMessage } from "../model/normalize";
 import type { DeletionActor, Member, Message } from "../model/types";
 import * as store from "../store/db";
 import { ConversationsState } from "../state/conversations.svelte";
 import { Timeline } from "../state/timeline.svelte";
 import { clearSession, readIdentity, readToken, saveSession } from "../auth/session";
 import { fetchConversationList, linkTopics, loadCachedList } from "./conversations";
-import {
-	acceptPushed,
-	catchUp,
-	fetchHead,
-	fetchMessage,
-	fetchOlder,
-	loadCachedTail,
-	PAGE,
-} from "./history";
+import { acceptPushed, catchUp, fetchHead, fetchOlder, loadCachedTail } from "./history";
 import { Outbox } from "./outbox";
-
-/** Pages one stale-reaction refresh may spend before it stops. */
-const REFRESH_PAGES = 5;
-
-/**
- * Whether a held copy may be missing reactions made while nobody listened.
- *
- * Tombstones are left out. Their reactions were cleared with their text, and
- * re-reading one to confirm it is still deleted would be a request spent on
- * nothing.
- */
-function isStale(m: Message, liveSince: number): boolean {
-	return !m.deletedAt && (m.verifiedAt ?? 0) < liveSince;
-}
+import { ReactionSync } from "./reactions.svelte";
 
 /**
  * The engine.
@@ -88,35 +62,7 @@ export class Engine {
 	 */
 	#openGeneration = 0;
 
-	/**
-	 * Since when the socket has been listening without a break, in epoch ms.
-	 *
-	 * A cached message can only be trusted as far as the last moment
-	 * something could have told us it changed. While the socket is up, a
-	 * reaction arrives as a frame and is written straight through; while it
-	 * is down, nothing arrives, and `after_id` catch-up never looks back at a
-	 * message it already holds. So any copy verified before the socket last
-	 * came up may be missing reactions made in the dark, and any copy
-	 * verified after it has been kept current since.
-	 *
-	 * Starts at page load, because nothing was listening before then, and is
-	 * moved forward every time the socket becomes live, which covers a dropped
-	 * network, a laptop lid, and a background tab whose socket the browser or
-	 * the watchdog killed. Memory only: a reload starts the clock again,
-	 * which is exactly right.
-	 */
-	#liveSince = Date.now();
-	/** Conversations with a stale-reaction refresh running, and those owed another. */
-	#refreshing = new Set<string>();
-	#refreshAgain = new Set<string>();
-	/** Single-message refetches in flight, by `${key}:${id}`, and those owed another. */
-	#refetching = new Set<string>();
-	#refetchAgain = new Set<string>();
-	/**
-	 * The latest local reaction toggle per message, by `${key}:${id}`, so a
-	 * slow answer to an earlier toggle cannot act on a later one.
-	 */
-	#reactionSeq = new Map<string, number>();
+	#reactions: ReactionSync;
 
 	constructor() {
 		this.#client = new ApiClient(
@@ -124,16 +70,22 @@ export class Engine {
 			() => this.signOut(),
 		);
 		this.#api = new GroupMeAPI(this.#client);
+		this.#reactions = new ReactionSync({
+			api: this.#api,
+			timeline: (key) => this.timelines.get(key),
+			resolve: (key) => this.#resolve(key),
+			activeKey: () => this.activeKey,
+			selfId: () => this.#api.selfId,
+		});
 		this.#push = new BayeuxClient(
 			() => this.token,
 			{
 				onEvent: (channel, data) => this.#onPush(channel, data),
 				onState: (s) => {
-					// Every arrival at live, the first included. The socket opens
-					// a beat after page load, and a reaction made in that beat
-					// reached nobody.
-					if (s === "live" && this.connection !== "live") this.#liveSince = Date.now();
+					const wasLive = this.connection === "live";
 					this.connection = s;
+					// Every arrival at live, the first included: reactions made while dark never arrive.
+					if (s === "live" && !wasLive) this.#reactions.wentLive();
 				},
 				// The socket has no replay. Anything published while we were
 				// dark simply did not arrive, so the only honest response to
@@ -206,6 +158,7 @@ export class Engine {
 
 	signOut(): void {
 		this.#push.stop();
+		this.#reactions.cancel();
 		clearSession();
 		void store.wipe();
 		this.token = null;
@@ -267,113 +220,9 @@ export class Engine {
 		if (!key) return;
 		const conv = this.#resolve(key);
 		if (!conv) return;
+		const asOf = Date.now();
 		const fresh = await catchUp(this.#api, conv, key);
-		if (fresh.length) this.timeline(key).merge(fresh);
-		// Catch-up only walks forward, so it brings the new messages and
-		// says nothing about the ones already on screen. Those are what a
-		// reconnect actually leaves wrong, and this is the first moment the
-		// gap is closed and the timeline settled enough to judge them.
-		this.#refreshStale(key);
-	}
-
-	// MARK: - Stale reactions
-
-	/**
-	 * Re-read the loaded messages whose reactions may have changed unseen.
-	 *
-	 * Fire and forget, always. The timeline is already drawn from what we
-	 * hold, and a reaction count that corrects itself a second later is far
-	 * better than a transcript that waits for one.
-	 *
-	 * One run per conversation at a time. A second request while one is
-	 * going is folded into a single rerun afterwards rather than dropped,
-	 * because it usually means the socket came back mid-run and moved
-	 * `#liveSince`, which the running pass captured too early to see.
-	 */
-	#refreshStale(key: string): void {
-		if (this.#refreshing.has(key)) {
-			this.#refreshAgain.add(key);
-			return;
-		}
-		this.#refreshing.add(key);
-		void this.#runRefresh(key)
-			.catch(() => {
-				// Nothing to tell the user. The stale copies stay stale and
-				// the next open or reconnect tries again.
-			})
-			.finally(() => {
-				this.#refreshing.delete(key);
-				if (this.#refreshAgain.delete(key) && key === this.activeKey) this.#refreshStale(key);
-			});
-	}
-
-	/**
-	 * Walk the stale messages newest to oldest, a page at a time.
-	 *
-	 * Each page is anchored just above the newest stale message still
-	 * uncovered, using the loaded message immediately newer as `before_id`,
-	 * so the page starts exactly where the staleness does. When the newest
-	 * stale message is the newest message, there is nothing to anchor on and
-	 * the head page is the same thing.
-	 *
-	 * A page vouches for every id from its oldest message up to the anchor,
-	 * whether or not each one came back: a message missing from that span
-	 * was deleted on the server, and if it were left stale every later run
-	 * would ask for it again, forever. A short page vouches for everything
-	 * older too, because it reached the beginning of the conversation.
-	 *
-	 * Capped at a few pages. A conversation scrolled back a long way can hold
-	 * thousands of messages, and the ones that matter are the ones near where
-	 * the user is reading, which is near the bottom.
-	 */
-	async #runRefresh(key: string): Promise<void> {
-		const conv = this.#resolve(key);
-		if (!conv) return;
-		const t = this.timeline(key);
-		const since = this.#liveSince;
-		/** Everything at or above this id has been covered by this run. */
-		let ceiling: string | null = null;
-
-		for (let page = 0; page < REFRESH_PAGES; page++) {
-			// Checked between pages, not only at the start. Leaving the chat
-			// abandons the rest; it will be stale again when it is reopened,
-			// and refreshed then.
-			if (key !== this.activeKey || !this.token) return;
-
-			const loaded = t.messages.filter((m) => m.delivery === "sent" && !isPendingId(m.id));
-			let newest = -1;
-			for (let i = loaded.length - 1; i >= 0; i--) {
-				const m = loaded[i]!;
-				if (ceiling && cmpId(m.id, ceiling) >= 0) continue;
-				if (isStale(m, since)) {
-					newest = i;
-					break;
-				}
-			}
-			if (newest < 0) return;
-
-			const anchor = loaded[newest + 1]?.id ?? null;
-			const startedAt = Date.now();
-			const fresh = anchor
-				? await fetchOlder(this.#api, conv, key, anchor)
-				: await fetchHead(this.#api, conv, key);
-			// Merged even if the user has left. The timeline belongs to this
-			// conversation, not to the screen, and the rows are already on disk.
-			t.merge(fresh);
-
-			const floor = fresh.length < PAGE ? null : (fresh[0]?.id ?? null);
-			const covered = new Set<string>();
-			for (const m of loaded) {
-				if (anchor && cmpId(m.id, anchor) >= 0) continue;
-				if (floor && cmpId(m.id, floor) < 0) continue;
-				if (isStale(m, since)) covered.add(m.id);
-			}
-			t.markVerified(covered, startedAt);
-			await store.markVerified(key, [...covered], startedAt);
-
-			if (!floor) return;
-			ceiling = floor;
-		}
+		if (fresh.length) this.timeline(key).merge(fresh, { asOf });
 	}
 
 	// MARK: - Conversations
@@ -391,6 +240,7 @@ export class Engine {
 
 	async open(key: string): Promise<void> {
 		const generation = ++this.#openGeneration;
+		if (this.activeKey && this.activeKey !== key) this.#reactions.cancel(this.activeKey);
 		this.activeKey = key;
 		const conv = this.#resolve(key);
 		if (!conv) return;
@@ -418,9 +268,11 @@ export class Engine {
 			void this.#loadMembers(conv);
 
 			t.loadingNewer = true;
+			const asOf = Date.now();
 			const fresh = await fetchHead(this.#api, conv, key);
 			if (generation !== this.#openGeneration) return;
-			t.merge(fresh);
+			t.merge(fresh, { asOf });
+			this.#reactions.notePage(key, null, fresh, asOf);
 
 			const state = await store.getState(key);
 			if (generation !== this.#openGeneration) return;
@@ -429,12 +281,8 @@ export class Engine {
 			// numeric one the moment two ids differ in length.
 			t.atFloor = Boolean(state.floorId && t.oldestId && cmpId(state.floorId, t.oldestId) >= 0);
 
-			// After the head fetch, not alongside it. The head page is itself
-			// a refresh of the newest hundred messages, so starting before it
-			// lands would ask for the same page twice; starting after means
-			// the refresh only goes looking for what the head did not cover,
-			// which on most opens is nothing at all.
-			this.#refreshStale(key);
+			// After the head fetch, which already re-read the newest page.
+			this.#reactions.refreshStale(key);
 		} catch (err) {
 			if (generation === this.#openGeneration) {
 				this.lastError = err instanceof Error ? err.message : String(err);
@@ -456,9 +304,12 @@ export class Engine {
 
 		t.loadingOlder = true;
 		try {
-			const older = await fetchOlder(this.#api, conv, key, t.oldestId);
+			const before = t.oldestId;
+			const asOf = Date.now();
+			const older = await fetchOlder(this.#api, conv, key, before);
 			if (!older.length) t.atFloor = true;
-			else t.merge(older);
+			else t.merge(older, { asOf });
+			this.#reactions.notePage(key, before, older, asOf);
 		} catch {
 			// Leave it failed rather than retrying on every scroll tick; the
 			// user can nudge it by scrolling again.
@@ -598,71 +449,9 @@ export class Engine {
 
 	// MARK: - Reactions
 
-	/**
-	 * Set or clear this user's reaction, optimistically.
-	 *
-	 * Drawn first, sent second, rolled back only if the server refuses. A
-	 * reaction is the one interaction where the round trip is plainly longer
-	 * than the gesture, so waiting for it feels broken.
-	 */
-	async react(key: string, messageId: string, glyph: string | null): Promise<void> {
-		const t = this.timeline(key);
-		const message = t.find(messageId);
-		const me = this.conversations.me;
-		const conv = this.#resolve(key);
-		if (!message || !me || !conv) return;
-
-		const before = message.reactions;
-		const mine = before.find((r) => r.userIds.includes(me.id));
-		const seqKey = `${key}:${messageId}`;
-		const seq = (this.#reactionSeq.get(seqKey) ?? 0) + 1;
-		this.#reactionSeq.set(seqKey, seq);
-		// Stamped and written through to disk, so a page of history that was
-		// asked for before this tap cannot land afterwards and take it back.
-		this.#setReactions(key, messageId, applyReaction(before, me.id, glyph), Date.now());
-
-		try {
-			await this.#api.setReaction(conv, messageId, glyph, Boolean(mine));
-		} catch {
-			// A later tap on the same message owns the row now, and putting
-			// this one's `before` back would undo it.
-			if (this.#reactionSeq.get(seqKey) === seq) {
-				this.#setReactions(key, messageId, before, Date.now());
-			}
-			return;
-		}
-
-		// Applied once more, against whatever is there now, and stamped
-		// again. The stamp above only guards against pages requested after
-		// the tap, and a page requested after the tap but served before the
-		// server took the like would come back without it and win. From this
-		// moment the server has it, so every later page agrees, and putting it
-		// back here closes the window in between. `applyReaction` strips this
-		// user first, so doing it twice is harmless.
-		if (this.#reactionSeq.get(seqKey) !== seq) return;
-		this.#reactionSeq.delete(seqKey);
-		const current = t.find(messageId);
-		if (current) {
-			this.#setReactions(
-				key,
-				messageId,
-				applyReaction(current.reactions, me.id, glyph),
-				Date.now(),
-			);
-		}
-	}
-
-	/**
-	 * Replace a held message's reactions, on screen and on disk, as a write
-	 * newer than any page of history requested before `at`.
-	 */
-	#setReactions(key: string, messageId: string, reactions: Message["reactions"], at: number): void {
-		const t = this.timelines.get(key);
-		const current = t?.find(messageId);
-		if (t && current && (current.reactionsAt ?? 0) <= at) {
-			t.replace(messageId, { ...current, reactions, reactionsAt: at });
-		}
-		void store.putReactions(key, messageId, reactions, at).catch(() => {});
+	/** Set or clear this user's reaction, optimistically. */
+	react(key: string, messageId: string, glyph: string | null): Promise<void> {
+		return this.#reactions.toggle(key, messageId, glyph);
 	}
 
 	// MARK: - Read state
@@ -730,13 +519,7 @@ export class Engine {
 			case "message": {
 				const key = this.#keyForHint(event.conversationHint, event.message);
 				if (!key) return;
-				// Stamped as verified now. It was published a moment ago and the
-				// socket is up, so anything that happens to it from here arrives
-				// as a frame of its own.
-				const message: Message = {
-					...normalizeMessage(event.message, key),
-					verifiedAt: Date.now(),
-				};
+				const message = normalizeMessage(event.message, key);
 				const mine = message.senderId === selfId;
 				void acceptPushed(key, message).then((contiguous) => {
 					if (!contiguous && key === this.activeKey) void this.#refreshActive();
@@ -766,7 +549,8 @@ export class Engine {
 			case "messageUpdated": {
 				const key = this.#keyForHint(String(event.message.group_id ?? ""), event.message);
 				if (!key) return;
-				this.timeline(key).merge([normalizeMessage(event.message, key)]);
+				// A server copy as of now, so reactions set after now survive it.
+				this.timeline(key).merge([normalizeMessage(event.message, key)], { asOf: Date.now() });
 				break;
 			}
 
@@ -787,28 +571,13 @@ export class Engine {
 			}
 
 			case "reaction": {
+				// The hint can name a conversation whose loaded timeline lacks the message.
+				const hinted = this.#keyForHint(event.conversationHint ?? "", null);
 				const key =
-					this.#keyForHint(event.conversationHint ?? "", event.subject) ??
-					this.#keyHolding(event.messageId);
-				if (!key) return;
-				const at = Date.now();
-				if (event.subject) {
-					this.#setReactions(
-						key,
-						event.messageId,
-						normalizeMessage(event.subject, key).reactions,
-						at,
-					);
-				} else if (event.reactions) {
-					// The whole set afterwards, so a replace and not a delta.
-					this.#setReactions(key, event.messageId, normalizeReactionList(event.reactions), at);
-				} else {
-					// Named a message and said nothing about it. Reading a missing
-					// set as empty would wipe every reaction on it, and ignoring
-					// the frame leaves us wrong until something happens to refetch
-					// the message, which for an old one is never. Ask.
-					this.#refetchReactions(key, event.messageId);
-				}
+					hinted && this.timelines.get(hinted)?.find(event.messageId)
+						? hinted
+						: (this.#keyHolding(event.messageId) ?? hinted);
+				if (key) this.#reactions.applyFrame(key, event.messageId, event.reactions);
 				break;
 			}
 
@@ -862,44 +631,6 @@ export class Engine {
 		void store.putMessages([tomb]);
 	}
 
-	/**
-	 * Re-read one message after a reaction frame that carried no reaction set.
-	 *
-	 * Only for messages we hold. A frame about a message we have never paged
-	 * in changes nothing on screen or on disk, and fetching it would be a
-	 * request per reaction in every busy group this account is in.
-	 *
-	 * A burst of frames for one message, which is what a popular message
-	 * produces, becomes one request and at most one follow-up rather than
-	 * one each. The follow-up is not dropped, because a frame that arrived
-	 * after the first request went out may describe a reaction it missed.
-	 */
-	#refetchReactions(key: string, messageId: string): void {
-		const id = `${key}:${messageId}`;
-		if (this.#refetching.has(id)) {
-			this.#refetchAgain.add(id);
-			return;
-		}
-		this.#refetching.add(id);
-		void (async () => {
-			const held =
-				this.timelines.get(key)?.find(messageId) ?? (await store.getMessage(key, messageId));
-			const conv = this.#resolve(key);
-			if (!held || !conv) return;
-			const fresh = await fetchMessage(this.#api, conv, key, messageId);
-			// Merged only where it is already drawn. Dropping one old message
-			// into a timeline that does not reach back that far would float
-			// it above a gap with nothing to say one is there.
-			const t = this.timelines.get(key);
-			if (fresh && t?.find(messageId)) t.merge([fresh]);
-		})()
-			.catch(() => {})
-			.finally(() => {
-				this.#refetching.delete(id);
-				if (this.#refetchAgain.delete(id)) this.#refetchReactions(key, messageId);
-			});
-	}
-
 	/** The conversation whose loaded timeline holds a message, if any does. */
 	#keyHolding(messageId: string): string | null {
 		for (const [key, t] of this.timelines) if (t.find(messageId)) return key;
@@ -938,35 +669,4 @@ export class Engine {
 		}
 		return null;
 	}
-}
-
-/** Move this user's reaction to `glyph`, or remove it when null. */
-function applyReaction(
-	reactions: Message["reactions"],
-	userId: string,
-	glyph: string | null,
-): Message["reactions"] {
-	const stripped = reactions
-		.map((r) => ({ ...r, userIds: r.userIds.filter((u) => u !== userId) }))
-		.filter((r) => r.userIds.length);
-	if (!glyph) return stripped;
-
-	const existing = stripped.find((r) => r.code === glyph);
-	if (existing) {
-		return stripped.map((r) => (r.code === glyph ? { ...r, userIds: [...r.userIds, userId] } : r));
-	}
-
-	// A powerup token carries its pack in the code, so an optimistic chip can
-	// draw the right sprite before the server has confirmed anything.
-	const pack = /^gm:(\d+):(\d+)$/.exec(glyph);
-	return [
-		...stripped,
-		{
-			code: glyph,
-			kind: pack ? "powerup" : "unicode",
-			userIds: [userId],
-			packId: pack ? Number(pack[1]) : null,
-			packIndex: pack ? Number(pack[2]) : null,
-		},
-	];
 }
