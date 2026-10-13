@@ -92,8 +92,6 @@ struct ConversationListView: View {
     @ViewBuilder private var content: some View {
         if model.conversations.isEmpty {
             emptyState
-        } else if visibleRows.isEmpty {
-            ContentUnavailableView.search(text: query)
         } else {
             list
         }
@@ -131,6 +129,7 @@ struct ConversationListView: View {
                     pinButton(for: entry.row).tint(.orange)
                 }
             }
+            if entries.isEmpty, !query.isEmpty { noMatches }
         }
         .listStyle(.plain)
         // The list is small and entirely local, so the animation is honest:
@@ -144,7 +143,19 @@ struct ConversationListView: View {
     /// Deliberately not a database query. The list tops out in the low
     /// hundreds, so filtering it in memory is a fraction of a millisecond and
     /// spares us a round trip to an actor on every keystroke.
-    private var visibleRows: [ConversationRow] { matching }
+    /// A search that found nothing, drawn *inside* the list rather than instead
+    /// of it.
+    ///
+    /// The title and the search field are rows of this list, and they are the
+    /// only way back out of a search: the field holds the text to clear and the
+    /// button that clears it. Replacing the list on a miss took both off screen
+    /// and left the reader on a page with no exits.
+    private var noMatches: some View {
+        ContentUnavailableView.search(text: query)
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+    }
+
 
     /// Only when there is something in it.
     ///
