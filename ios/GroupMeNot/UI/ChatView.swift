@@ -504,8 +504,11 @@ struct ChatView: View {
     ///
     /// Kept rather than re-derived, because a name in the text is not enough to
     /// find a person: two members can share one, and the draft only carries what
-    /// was typed. Locating them in the text happens once, at send.
+    /// was typed.
     @State private var named: [MentionDraft.Named] = []
+    /// Where the caret is, reported by the field. A mention can only be
+    /// completed in the middle of a draft if this is known.
+    @State private var selection = NSRange(location: 0, length: 0)
 
     // MARK: Unread
 
@@ -1402,7 +1405,10 @@ struct ChatView: View {
             }
 
             HStack(alignment: .bottom, spacing: 4) {
-                ComposerField("Message", text: $draft, isFocused: $composerFocused) { images in
+                ComposerField(
+                    "Message", text: $draft, isFocused: $composerFocused, mentions: draftMentions,
+                    selection: $selection
+                ) { images in
                     Task {
                         let loaded = await MediaLoader.load(pasted: images)
                         guard !loaded.isEmpty else { return }
@@ -1443,12 +1449,22 @@ struct ChatView: View {
         .glassEffect(.regular, in: .rect(cornerRadius: 24, style: .continuous))
     }
 
+    /// Where the mentions in the draft currently sit, for the composer to paint.
+    /// Resolved by the same function that builds the attachment, so a name
+    /// edited into something else loses its tint at the keystroke that breaks
+    /// the mention.
+    private var draftMentions: [NSRange] {
+        MentionDraft.located(in: draft, naming: named).map(\.range)
+    }
+
     /// Members matching the name being typed after an `@`.
     ///
     /// Capped, because this sits above the keyboard and a list that grows past a
     /// few rows pushes the message it belongs to off the screen.
     private var mentionMatches: [Member] {
-        guard current.isGroup, let query = MentionDraft.query(in: draft) else { return [] }
+        guard current.isGroup, selection.length == 0,
+            let query = MentionDraft.query(in: draft, caret: selection.location)
+        else { return [] }
         let me = model.currentUser?.id
         let people = model.members.filter { $0.identity != me }
         guard !query.isEmpty else { return Array(people.prefix(Self.mentionLimit)) }
@@ -1493,7 +1509,9 @@ struct ChatView: View {
     /// Finish the name being typed, and remember who it was.
     private func complete(with member: Member) {
         let display = name(of: member)
-        draft = MentionDraft.completing(draft, with: display)
+        let done = MentionDraft.completing(draft, at: selection.location, with: display)
+        draft = done.text
+        selection = NSRange(location: done.caret, length: 0)
         named.append(MentionDraft.Named(userID: member.identity, name: display))
     }
 
@@ -1696,6 +1714,7 @@ struct ChatView: View {
         staged = []
         replyingTo = nil
         named = []
+        selection = NSRange(location: 0, length: 0)
         bottomRequest += 1
         Task {
             await model.send(text, media: media, replyingTo: parent, mentioning: mentions)

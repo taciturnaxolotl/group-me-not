@@ -15,31 +15,61 @@ nonisolated enum MentionDraft {
         var name: String
     }
 
-    /// The attachment for a finished draft, or nil when nobody survives.
+    /// One mention as the draft currently stands: who, and where their name sits.
+    struct Located: Hashable, Sendable {
+        var userID: String
+        /// Offset and length in UTF-16 units, covering the `@` and the name.
+        var range: NSRange
+    }
+
+    /// A finished completion: the draft it produced, and where the caret goes.
+    struct Completion: Hashable, Sendable {
+        var text: String
+        /// A UTF-16 offset, ready to hand back to UIKit.
+        var caret: Int
+    }
+
+    /// Where each remembered name still sits in the draft, in text order.
     ///
-    /// Each name is located by searching the text for `@name`, in order, never
-    /// looking at the same stretch twice. That handles the same person named
-    /// twice, and it drops a mention whose text the user has since edited away
-    /// rather than sending a locus pointing at whatever now sits there.
-    static func attachment(for text: String, naming people: [Named]) -> Message.Attachment? {
-        guard !people.isEmpty, !text.isEmpty else { return nil }
+    /// Each person claims the earliest `@name` nobody has claimed yet, so a
+    /// mention typed in front of an older one still finds its own words and
+    /// naming the same person twice finds both. A name the user has since
+    /// edited away claims nothing and is dropped, rather than sending a locus
+    /// pointing at whatever now sits there.
+    ///
+    /// The composer paints the result as it types, so what is highlighted and
+    /// what is sent are resolved the same way.
+    static func located(in text: String, naming people: [Named]) -> [Located] {
+        guard !people.isEmpty, !text.isEmpty else { return [] }
         let utf16 = Array(text.utf16)
 
-        var ids: [String] = []
-        var loci: [[Int]] = []
-        var searched = 0
-
+        var found: [Located] = []
         for person in people {
             let needle = Array("@\(person.name)".utf16)
-            guard !needle.isEmpty, let start = index(of: needle, in: utf16, from: searched)
-            else { continue }
-            ids.append(person.userID)
-            loci.append([start, needle.count])
-            searched = start + needle.count
+            guard !needle.isEmpty else { continue }
+            var from = 0
+            while let start = index(of: needle, in: utf16, from: from) {
+                let range = NSRange(location: start, length: needle.count)
+                guard found.allSatisfy({ NSIntersectionRange($0.range, range).length == 0 }) else {
+                    from = start + 1
+                    continue
+                }
+                found.append(Located(userID: person.userID, range: range))
+                break
+            }
         }
 
-        guard !ids.isEmpty else { return nil }
-        return Message.Attachment(type: "mentions", userIds: ids, loci: loci)
+        return found.sorted { $0.range.location < $1.range.location }
+    }
+
+    /// The attachment for a finished draft, or nil when nobody survives.
+    static func attachment(for text: String, naming people: [Named]) -> Message.Attachment? {
+        let found = located(in: text, naming: people)
+        guard !found.isEmpty else { return nil }
+        return Message.Attachment(
+            type: "mentions",
+            userIds: found.map(\.userID),
+            loci: found.map { [$0.range.location, $0.range.length] })
     }
 
     /// Plain substring search over UTF-16 units, which is what the offsets are
@@ -60,25 +90,44 @@ nonisolated enum MentionDraft {
 
     /// The partial name being typed at the caret, if the caret sits in one.
     ///
-    /// Returns nil the moment the run contains whitespace, so "@Kieran " stops
-    /// offering completions once the name is finished, and a lone "@" in the
-    /// middle of an email address never starts one.
-    static func query(in text: String) -> String? {
-        guard let at = text.lastIndex(of: "@") else { return nil }
+    /// Keyed off the caret rather than the last `@` in the draft, so a mention
+    /// can be added in front of words that are already written. Returns nil the
+    /// moment the run contains whitespace, so "@Kieran " stops offering
+    /// completions once the name is finished, and a lone "@" in the middle of
+    /// an email address never starts one.
+    static func query(in text: String, caret: Int) -> String? {
+        guard let end = position(in: text, at: caret) else { return nil }
+        let head = text[..<end]
+        guard let at = head.lastIndex(of: "@") else { return nil }
         // An `@` immediately after a word character is an address, not a
         // mention: `me@example.com` should suggest nothing.
-        if at > text.startIndex {
-            let before = text[text.index(before: at)]
+        if at > head.startIndex {
+            let before = head[head.index(before: at)]
             guard before.isWhitespace || before.isNewline else { return nil }
         }
-        let run = text[text.index(after: at)...]
+        let run = head[head.index(after: at)...]
         guard !run.contains(where: { $0.isWhitespace || $0.isNewline }) else { return nil }
         return String(run)
     }
 
     /// The draft with the partial name at the caret replaced by a full one.
-    static func completing(_ text: String, with name: String) -> String {
-        guard let at = text.lastIndex(of: "@") else { return text }
-        return String(text[..<at]) + "@\(name) "
+    static func completing(_ text: String, at caret: Int, with name: String) -> Completion {
+        guard let end = position(in: text, at: caret),
+            let at = text[..<end].lastIndex(of: "@")
+        else { return Completion(text: text, caret: caret) }
+        let inserted = "@\(name) "
+        var out = text
+        out.replaceSubrange(at..<end, with: inserted)
+        return Completion(text: out, caret: at.utf16Offset(in: text) + inserted.utf16.count)
+    }
+
+    /// The index at a UTF-16 offset, which is what UIKit reports a caret as.
+    /// Nil when the offset is out of bounds or lands inside a character.
+    private static func position(in text: String, at caret: Int) -> String.Index? {
+        guard caret >= 0 else { return nil }
+        let units = text.utf16
+        guard let unit = units.index(units.startIndex, offsetBy: caret, limitedBy: units.endIndex)
+        else { return nil }
+        return String.Index(unit, within: text)
     }
 }
