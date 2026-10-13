@@ -399,9 +399,33 @@ struct ChatView: View {
     @State private var replyHoverHeight: CGFloat = 0
 
     /// Past this a hovering reply scrolls instead of climbing the screen. The
-    /// point is recognising what was tapped, and a paragraph and a half does
-    /// that.
-    private static let replyHoverLimit: CGFloat = 190
+    /// point is recognising what was tapped, and a third of the view is about
+    /// what the keyboard leaves free for it.
+    ///
+    /// Measured off the whole view rather than off the room above the composer,
+    /// because the hover is *part* of that room: sized against what is left it
+    /// would shrink the very thing it was measured from, and settle somewhere
+    /// smaller than either answer.
+    private var replyHoverLimit: CGFloat {
+        viewHeight > 0 ? viewHeight * 0.34 : Self.replyHoverBeforeMeasuring
+    }
+
+    /// What the slot is worth for the frame before the view has been measured.
+    /// Not a floor: a landscape phone has a third of very little, and holding
+    /// the portrait number there would stand the hover over the conversation it
+    /// came from.
+    private static let replyHoverBeforeMeasuring: CGFloat = 190
+
+    /// And the photograph inside it, leaving room for a name above and a
+    /// caption below. A picture drawn at transcript height is most of a screen,
+    /// and the slot would show the reader half of it.
+    ///
+    /// Floored, because a slot too short to hold a picture and its chrome is
+    /// better scrolled than filled with a stamp.
+    private var replyHoverPicture: CGFloat { max(80, replyHoverLimit - 90) }
+
+    /// The height of the whole view, which the hover is measured against.
+    @State private var viewHeight: CGFloat = 0
 
     /// How much of the window the first frames draw.
     ///
@@ -846,6 +870,11 @@ struct ChatView: View {
                 .background(TranscriptScrollTuning().allowsHitTesting(false))
             }
             .defaultScrollAnchor(.bottom, for: .initialOffset)
+            // The whole view's height, which is what a hovering reply is sized
+            // against. Taken here because the transcript keeps its full frame
+            // whatever the bars inset into it, so the number does not move when
+            // the composer grows.
+            .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { viewHeight = $0 }
             // Deliberately optional, and `nil` nearly all the time. See
             // `sizeChangeAnchor`.
             .defaultScrollAnchor(contentAnchor, for: .sizeChanges)
@@ -1576,6 +1605,11 @@ struct ChatView: View {
                         // A picture of the message, not the message. Every
                         // gesture it carries belongs to the transcript.
                         .allowsHitTesting(false)
+                        // Small enough that the whole message fits the slot
+                        // below. At transcript height a photo is twice what the
+                        // hover can show, so the reader answers the top half of
+                        // a picture with the rest of it cut off.
+                        .environment(\.quotedPictureHeight, replyHoverPicture)
                         .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) {
                             replyHoverHeight = $0
                         }
@@ -1584,7 +1618,7 @@ struct ChatView: View {
                 // Exactly as tall as the bubble, up to the cap. A scroll view
                 // takes every point it is offered, so left to itself it stood
                 // the message a screenful above the field it belongs to.
-                .frame(height: min(max(replyHoverHeight, 1), Self.replyHoverLimit))
+                .frame(height: min(max(replyHoverHeight, 1), replyHoverLimit))
             }
             .padding(.horizontal, 2)
             // Close, but not touching. The bubble and the field it is about to

@@ -845,6 +845,17 @@ private struct Tombstone: View {
 
 // MARK: - Attachments
 
+/// How tall one photograph may draw where a message is being shown out of the
+/// transcript.
+///
+/// Nil there, where a picture *is* the message and gets real room. The reply
+/// hover sets it, because there the message is a label on the field underneath
+/// it, and a photo drawn at transcript height is a photo with its bottom half
+/// cut off by the slot.
+extension EnvironmentValues {
+    @Entry var quotedPictureHeight: CGFloat? = nil
+}
+
 /// The photographs a message carried, drawn bare.
 ///
 /// No tint, no padding, no bubble. Photos draw at their real shape and still
@@ -854,6 +865,8 @@ struct PhotoCascade: View {
     let pictures: [Message.Attachment]
     /// Which edge the message hangs off, which decides which way the pile leans.
     let isTrailing: Bool
+
+    @Environment(\.quotedPictureHeight) private var quotedHeight
 
     /// The one the user tapped, if any. Wrapped rather than used directly
     /// because `Message.Attachment` has no identity of its own and a message can
@@ -914,8 +927,11 @@ struct PhotoCascade: View {
     /// A lone portrait shot is allowed real height; a message carrying three of
     /// them is not, or the reader has to scroll past one message to reach the
     /// next. Fixed off the count rather than measured, so it is known before
-    /// anything loads.
-    private var heightCap: CGFloat { pictures.count > 1 ? 240 : 360 }
+    /// anything loads, and overridden wherever the message is being shown in a
+    /// slot of somebody else's choosing.
+    private var heightCap: CGFloat {
+        quotedHeight ?? (pictures.count > 1 ? 240 : 360)
+    }
 
     /// Every picture's box, worked out once so the cascade can place them.
     private var boxes: [CGSize] {
