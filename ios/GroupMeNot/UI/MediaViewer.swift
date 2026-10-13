@@ -158,9 +158,11 @@ struct MediaViewer: View {
         DragGesture(minimumDistance: 8)
             .onChanged { value in
                 guard !isZoomed else {
-                    pan = CGSize(
-                        width: committedPan.width + value.translation.width,
-                        height: committedPan.height + value.translation.height)
+                    pan = clamped(
+                        CGSize(
+                            width: committedPan.width + value.translation.width,
+                            height: committedPan.height + value.translation.height),
+                        at: scale)
                     return
                 }
                 if axis == nil {
@@ -261,11 +263,33 @@ struct MediaViewer: View {
                 // Clamped rather than free: an unbounded pinch leaves the user
                 // looking at four grey pixels with no way back.
                 scale = min(max(committedScale * value.magnification, 1), 6)
+                // Zooming out gives back the room the picture was using, so the
+                // pan comes back in with it rather than leaving the photo
+                // parked off to one side at life size.
+                pan = clamped(pan, at: scale)
             }
             .onEnded { _ in
                 committedScale = scale
+                committedPan = pan
                 if scale <= 1 { withAnimation(.snappy(duration: 0.2)) { resetZoom() } }
             }
+    }
+
+    /// A pan held inside the picture's own edges.
+    ///
+    /// The room to move is however much of the photo the canvas cannot show at
+    /// this zoom, halved because the overflow is shared between the two sides.
+    /// Zero on an axis that does not overflow, which is what keeps a letterboxed
+    /// photo centred however hard it is shoved, and what stops a zoomed one from
+    /// being flung somewhere there is no gesture to bring it back from.
+    private func clamped(_ pan: CGSize, at scale: CGFloat) -> CGSize {
+        let drawn = drawnSize ?? canvas
+        let room = CGSize(
+            width: max(0, (drawn.width * scale - canvas.width) / 2),
+            height: max(0, (drawn.height * scale - canvas.height) / 2))
+        return CGSize(
+            width: min(max(pan.width, -room.width), room.width),
+            height: min(max(pan.height, -room.height), room.height))
     }
 
     private func toggleZoom() {
@@ -406,20 +430,24 @@ struct MediaViewer: View {
 
     /// Whether the top bar actually covers any of the photo.
     ///
-    /// The picture is drawn to fit, so its height on screen follows from its
-    /// aspect ratio and the canvas. If the top of that rectangle falls below the
-    /// bottom of the bar, the bar is over letterbox and needs no ground.
-    ///
     /// Unknown shapes answer true, because a bar that is occasionally redundant
     /// is a much smaller fault than a close button nobody can see.
     private var barOverlapsPicture: Bool {
-        guard canvas.width > 0, canvas.height > 0, topBarHeight > 0 else { return true }
-        guard let size = MediaDimensions.declared(in: mediaURL) ?? image?.size,
-              size.width > 0, size.height > 0
-        else { return true }
-        let drawnHeight = min(canvas.height, canvas.width * size.height / size.width)
-        let pictureTop = (canvas.height - drawnHeight) / 2
-        return pictureTop < topBarHeight
+        guard topBarHeight > 0, let drawn = drawnSize else { return true }
+        return (canvas.height - drawn.height) / 2 < topBarHeight
+    }
+
+    /// The picture's rectangle at life size, which is what both the bar's ground
+    /// and the pan's bounds are measured against. Nil while the shape is unknown:
+    /// the dimensions come out of the URL, and a photo that has not arrived yet
+    /// has none to declare.
+    private var drawnSize: CGSize? {
+        guard canvas.width > 0, canvas.height > 0,
+            let size = MediaDimensions.declared(in: mediaURL) ?? image?.size,
+            size.width > 0, size.height > 0
+        else { return nil }
+        let fit = min(canvas.width / size.width, canvas.height / size.height)
+        return CGSize(width: size.width * fit, height: size.height * fit)
     }
 
     private func toggleChrome() {
