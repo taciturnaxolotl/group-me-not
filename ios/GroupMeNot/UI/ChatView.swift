@@ -424,6 +424,18 @@ struct ChatView: View {
     /// Nothing may move the content out from under either one.
     @State private var isUserScrolling = false
 
+    /// Whether the reader has driven the scroll view since this conversation
+    /// opened.
+    ///
+    /// Paging backwards is work somebody asks for by scrolling up, and the row
+    /// index alone cannot tell the difference between that and a conversation
+    /// that merely *opened* near the top of its loaded history. One with more
+    /// unread than a page opens on a divider sitting at the very top row, which
+    /// is a standing request for the page above it, and for the page above
+    /// that: every splice leaves another unbuilt row near the head to ask
+    /// again, and the transcript walks backwards through the history on its own.
+    @State private var hasScrolled = false
+
     /// A follow that arrived while the finger was down. Held, not dropped: the
     /// message did land at the foot, and the reader is standing there. It runs
     /// the moment the scroll view goes quiet.
@@ -853,6 +865,9 @@ struct ChatView: View {
                 isUserScrolling = phase == .tracking
                     || phase == .interacting
                     || phase == .decelerating
+                // A gesture, so backwards paging is now something the reader
+                // has asked for.
+                if isUserScrolling { hasScrolled = true }
                 guard !isUserScrolling, followWhenStill else { return }
                 followWhenStill = false
                 if isNearBottom { bottomRequest += 1 }
@@ -1212,7 +1227,7 @@ struct ChatView: View {
         // The first frames draw a slice, so its first row is not the top of
         // anything and asking for older history off the back of it would page
         // the conversation on every open.
-        guard isSettled, index < Self.prefetchDistance else { return }
+        guard isSettled, hasScrolled, index < Self.prefetchDistance else { return }
         requestOlder()
     }
 
@@ -1986,8 +2001,13 @@ struct ChatView: View {
         // badge is a number from the server about a range we cannot see, and
         // using it would place the divider in the middle of messages we know
         // are unread.
+        //
+        // It is the right *label* though, and only here. Everything loaded is
+        // unread and the boundary is further back still, so the badge is the
+        // one number that is not an undercount.
         if current.lastReadMessageID != nil {
-            unread = UnreadMark(firstUnreadID: messages[0].id, count: messages.count)
+            unread = UnreadMark(
+                firstUnreadID: messages[0].id, count: max(count, messages.count))
             return
         }
 
