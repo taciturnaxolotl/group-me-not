@@ -1130,6 +1130,18 @@ actor GroupMeAPI {
             .v4, "/read_receipts", body: BatchReadCursorBody(receipts: receipts), retry: retry)
     }
 
+    /// `POST /v3/conversations/{id}/read_receipt`, no body. The DM receipt
+    /// the other person sees as "Read", separate from this account's own
+    /// cursor. The official web client sends it after every cursor post to a
+    /// DM, unless its "Send read receipts" setting is off.
+    func markDirectMessageSeen(_ conversation: ConversationID) async throws {
+        guard case .direct = conversation else { return }
+        let convID = try await restID(for: conversation)
+        try await client.postIgnoringResponse(
+            .v3, "/conversations/\(convID)/read_receipt",
+            body: Optional<Empty>.none, retry: .none)
+    }
+
     /// `GET /v4/read_receipts`. Every conversation's read cursor in one call,
     /// which is how a cold start learns what is unread without touching each
     /// conversation.

@@ -812,40 +812,47 @@ actor SyncEngine {
 
     private func syncReadReceipts() async {
         do {
-            let receipts = try await api.readReceipts()
-            for receipt in receipts {
-                guard let conversation = conversation(forRESTID: receipt.conversationId),
-                      let readID = receipt.lastReadMessageId
-                else { continue }
-                guard var row = try await store.conversations.conversation(conversation) else { continue }
-
-                // A cursor at or past our newest message means the conversation
-                // is read, whatever the list said. Otherwise keep the list's
-                // unread count and just record where the cursor is.
-                if let head = row.lastMessageID, !Message.isNewer(head, than: readID) {
-                    try await store.conversations.markRead(
-                        conversation, upTo: readID, reportedByServer: true)
-                } else if row.lastReadMessageID != readID {
-                    // We are ahead: something was read on this device and the
-                    // receipt did not reach the server. Flagged rather than
-                    // posted from here, so it goes out batched with everything
-                    // else owed on the next pass. Without this, every other
-                    // device keeps showing a badge for a conversation that was
-                    // read here days ago.
-                    if let local = row.lastReadMessageID, Message.isNewer(local, than: readID) {
-                        try await store.conversations.markReadCursorPending(conversation)
-                    } else {
-                        row.lastReadMessageID = readID
-                        try await store.conversations.upsert(row: row)
-                        // The cursor moved, so the badge may legitimately come
-                        // down: these are messages somebody read elsewhere.
-                        await recountUnread(in: conversation, lowering: true)
-                    }
-                }
-            }
+            try await applyReadReceipts(try await api.readReceipts())
             continuation.yield(.conversations)
         } catch {
             log.notice("read receipts unavailable: \(diagnosticText(error), privacy: .public)")
+        }
+    }
+
+    /// Fold server read cursors into the store, from the receipts listing or
+    /// from a `read_receipt.sync` push. The push is what makes reading on
+    /// another device clear the badge here within a second rather than at the
+    /// next sync, which could be five minutes away.
+    private func applyReadReceipts(_ receipts: [GroupMeAPI.ReadReceipt]) async throws {
+        for receipt in receipts {
+            guard let conversation = conversation(forRESTID: receipt.conversationId),
+                  let readID = receipt.lastReadMessageId
+            else { continue }
+            guard var row = try await store.conversations.conversation(conversation) else { continue }
+
+            // A cursor at or past our newest message means the conversation
+            // is read, whatever the list said. Otherwise keep the list's
+            // unread count and just record where the cursor is.
+            if let head = row.lastMessageID, !Message.isNewer(head, than: readID) {
+                try await store.conversations.markRead(
+                    conversation, upTo: readID, reportedByServer: true)
+            } else if row.lastReadMessageID != readID {
+                // We are ahead: something was read on this device and the
+                // receipt did not reach the server. Flagged rather than
+                // posted from here, so it goes out batched with everything
+                // else owed on the next pass. Without this, every other
+                // device keeps showing a badge for a conversation that was
+                // read here days ago.
+                if let local = row.lastReadMessageID, Message.isNewer(local, than: readID) {
+                    try await store.conversations.markReadCursorPending(conversation)
+                } else {
+                    row.lastReadMessageID = readID
+                    try await store.conversations.upsert(row: row)
+                    // The cursor moved, so the badge may legitimately come
+                    // down: these are messages somebody read elsewhere.
+                    await recountUnread(in: conversation, lowering: true)
+                }
+            }
         }
     }
 
@@ -924,6 +931,14 @@ actor SyncEngine {
                 if !isMine, !known, !message.isSystem {
                     await recountUnread(in: conversation)
                 }
+                // Sending a message means having read up to it. The official
+                // web client advances the cursor to its own sends and posts
+                // it, and without the same here the other apps went on
+                // counting the messages above our reply as unread.
+                if isMine, !known {
+                    try await store.conversations.markRead(conversation, upTo: message.id)
+                    await flushReadCursors()
+                }
                 continuation.yield(.messages(conversation))
                 continuation.yield(.conversations)
             } catch {
@@ -956,6 +971,14 @@ actor SyncEngine {
                 continuation.yield(.messages(conversation))
             } catch {
                 log.error("could not store reaction: \(diagnosticText(error), privacy: .public)")
+            }
+
+        case .readReceipts(let receipts):
+            do {
+                try await applyReadReceipts(receipts)
+                continuation.yield(.conversations)
+            } catch {
+                log.error("could not apply read receipts: \(diagnosticText(error), privacy: .public)")
             }
 
         case .typing, .unrecognised:

@@ -665,7 +665,11 @@ final class AppModel {
         if row?.unreadCount == 0, row?.lastReadMessageID == head { return }
         try? await store.conversations.markRead(conversation, upTo: head)
         await reloadConversations()
+        // Only a cursor that moved forward is news. A transcript still showing
+        // an older page than another device has read must not post that older
+        // id: the server takes it, and every other app puts the badge back.
         guard let head else { return }
+        if let previous = row?.lastReadMessageID, !Message.isNewer(head, than: previous) { return }
         Task { [api, store] in
             // One shot, still: a read cursor that misses is worth nothing next
             // to the rate limit a retry storm would earn. What is new is that
@@ -677,6 +681,13 @@ final class AppModel {
                 try await api.markRead(conversation: conversation, messageId: head)
                 try await store.conversations.markReadCursorSynced(conversation, at: head)
             } catch {}
+            // The cursor is ours; this is the other person's. A DM's "Read"
+            // under the last message is a separate receipt the official
+            // clients send alongside the cursor, and without it a DM read here
+            // still looked unread from the other side.
+            if case .direct = conversation {
+                try? await api.markDirectMessageSeen(conversation)
+            }
         }
     }
 

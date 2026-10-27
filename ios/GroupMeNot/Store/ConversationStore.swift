@@ -248,6 +248,11 @@ actor ConversationStore {
     /// from, so sending it back is a request that can only tell it what it
     /// already said.
     ///
+    /// The cursor only ever moves forward. A transcript opened on a stale page
+    /// used to mark it read "up to" a message older than one already read
+    /// elsewhere, and that older cursor was then posted, putting messages back
+    /// to unread in every other app. The official clients refuse the same way.
+    ///
     /// Every SET expression reads the row as it was before the statement, which
     /// is what lets the flag be decided by comparing against the cursor the same
     /// statement is replacing.
@@ -268,7 +273,12 @@ actor ConversationStore {
                                 > CAST(COALESCE(last_read_message_id, '0') AS INTEGER)
                        THEN 0
                        ELSE read_cursor_synced END,
-                   last_read_message_id = COALESCE(?1, last_read_message_id)
+                   last_read_message_id = CASE
+                       WHEN ?1 IS NOT NULL
+                            AND CAST(?1 AS INTEGER)
+                                > CAST(COALESCE(last_read_message_id, '0') AS INTEGER)
+                       THEN ?1
+                       ELSE last_read_message_id END
              WHERE key = ?2
             """,
             [SQLValue(target), SQLValue(conversation.storageKey), SQLValue(reportedByServer)]

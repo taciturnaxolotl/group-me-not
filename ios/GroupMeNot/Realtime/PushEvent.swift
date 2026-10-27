@@ -90,6 +90,12 @@ nonisolated struct PushEvent: Sendable, Hashable {
         case unliked(Like)
         /// `typing`. There is no "stopped typing"; indicators die by timeout.
         case typing(Typing)
+        /// `read_receipt.sync` on `/user/{id}`: this account's read cursor moved,
+        /// usually because a conversation was read on another device. The
+        /// subject is `{receipts: [{conversation_id, last_read_message_id}]}`,
+        /// the same rows `GET /v4/read_receipts` returns, which is how the
+        /// official web client reads it.
+        case readReceipts([GroupMeAPI.ReadReceipt])
         /// A type we do not model. The subject is kept verbatim so a consumer can
         /// inspect it, and so nothing is silently dropped.
         case unrecognised(subject: JSONValue?)
@@ -156,6 +162,7 @@ nonisolated struct PushEvent: Sendable, Hashable {
         static let favorite = "favorite"
         static let likeDelete = "like.delete"
         static let typing = "typing"
+        static let readReceiptSync = "read_receipt.sync"
     }
 
     /// The third vocabulary: `event.type`, which rides *inside* a message rather
@@ -208,6 +215,14 @@ extension PushEvent {
 
         case PushEvent.WireType.likeDelete:
             self.kind = .unliked(Self.like(from: data, coder: coder))
+
+        case PushEvent.WireType.readReceiptSync:
+            if let receipts = data.subject?["receipts"]?
+                .decodedArray(of: GroupMeAPI.ReadReceipt.self, using: coder) {
+                self.kind = .readReceipts(receipts)
+            } else {
+                self.kind = .unrecognised(subject: data.subject)
+            }
 
         default:
             let subject = data.subject.map(Self.repairingDeletedAt)
