@@ -73,19 +73,22 @@ nonisolated struct ReactionCatalog: Sendable, Hashable {
     /// `Message.reactionSummaries(currentUserID:)`.
     static let plainLike = Message.ReactionSummary.heart
 
-    /// What to send for a glyph.
+    /// What to send for a glyph. Always an explicit icon, the heart included.
     ///
-    /// The heart is deliberately a plain like rather than a `unicode` reaction:
-    /// that is what the official composer does, and it keeps the message's
-    /// `favorited_by` list, which older clients and the likes endpoints still
-    /// read, in agreement with what we drew.
+    /// The heart used to go out as a plain, bodyless like, on the theory that a
+    /// plain like *is* a heart. It is not: the server stamps a bodyless like
+    /// with the group's own like icon, so in a group that has one, tapping ❤️
+    /// drew a heart for a moment and then the push arrived and swapped it for
+    /// the group's sticker. Naming the heart says what was actually chosen.
+    /// `favorited_by` still lists the reactor either way; it lists everyone
+    /// who reacted with anything.
     ///
     /// A pack token goes back out as the `emoji` shape it came in as, which is
     /// what makes reacting with a group's own like icon work at all.
-    static func icon(for glyph: String) -> GroupMeAPI.LikeIcon? {
+    static func icon(for glyph: String) -> GroupMeAPI.LikeIcon {
         if let pack = Message.PackGlyph(token: glyph) {
             return .emoji(packId: pack.packID, packIndex: pack.index)
         }
-        return glyph == plainLike ? nil : .unicode(glyph)
+        return .unicode(glyph)
     }
 }
