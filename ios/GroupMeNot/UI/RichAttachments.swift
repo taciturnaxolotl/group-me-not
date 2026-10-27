@@ -181,6 +181,7 @@ struct PollCard: View {
     let isOwn: Bool
 
     @Environment(AppModel.self) private var model
+    @State private var isShowingVoters = false
 
     private var box: PollBox? {
         attachment.pollId.flatMap { model.polls[$0] }
@@ -202,70 +203,125 @@ struct PollCard: View {
         }
     }
 
+    /// The question, a line saying what kind of poll it is, the options, and
+    /// one button for the full breakdown. Everything else that used to sit in
+    /// a dotted footnote either moved into those or was not earning its line.
     private func card(_ poll: Poll) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let subject = poll.subject, !subject.isEmpty {
-                Text(subject)
-                    .font(.headline)
-                    .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                if let subject = poll.subject, !subject.isEmpty {
+                    Text(subject)
+                        .font(.headline)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text(kind(of: poll))
+                    .font(.subheadline)
+                    .foregroundStyle(ink.opacity(0.75))
             }
 
-            ForEach(poll.options ?? [], id: \.identity) { option in
-                optionRow(option, in: poll)
+            VStack(spacing: 4) {
+                ForEach(poll.options ?? [], id: \.identity) { option in
+                    optionRow(option, in: poll)
+                }
             }
 
-            Text(footnote(for: poll))
+            if showsVoters(poll) {
+                Button { isShowingVoters = true } label: {
+                    Text("Full Results")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 40)
+                        .background(ink.opacity(0.12), in: .rect(cornerRadius: 12, style: .continuous))
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text(status(of: poll))
                 .font(.caption)
-                .foregroundStyle(ink.opacity(0.8))
+                .foregroundStyle(ink.opacity(0.75))
+                .frame(maxWidth: .infinity)
         }
-        .padding(12)
+        .sheet(isPresented: $isShowingVoters) {
+            PollVoters(poll: poll, members: model.members, meID: model.currentUser?.id)
+        }
+        .padding(14)
         .frame(minWidth: cardMinWidth, maxWidth: .infinity, alignment: .leading)
         .background(
             isOwn ? AnyShapeStyle(.white.opacity(0.15)) : AnyShapeStyle(.quaternary),
-            in: .rect(cornerRadius: 14, style: .continuous))
+            in: .rect(cornerRadius: 18, style: .continuous))
         .foregroundStyle(ink)
     }
 
+    /// One option: its title, who picked it (or how many, when the poll will
+    /// not say who), and a thin bar for its share.
+    ///
+    /// Never `.disabled`, even once the poll has closed. Disabling a button
+    /// dims everything inside it, so an ended poll turned grey and its results,
+    /// the only thing left worth reading, became the hardest thing to read.
+    /// `choose` declines a vote on a closed poll instead.
     private func optionRow(_ option: Poll.Option, in poll: Poll) -> some View {
         let mine = isMine(option)
         let votes = option.tally
         let share = poll.totalVotes > 0 ? Double(votes) / Double(poll.totalVotes) : 0
+        let winner = isWinner(option, in: poll)
         return Button {
             choose(option, in: poll)
         } label: {
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    Image(systemName: mine ? "checkmark.circle.fill" : "circle")
-                        .font(.body)
                     Text(option.title ?? "Option")
-                        .font(.subheadline)
+                        .font(.body)
                         .lineLimit(2)
+                    if mine {
+                        Image(systemName: "checkmark.circle.fill")
+                            .imageScale(.small)
+                            .accessibilityHidden(true)
+                    }
+                    if winner {
+                        Image(systemName: "crown.fill")
+                            .imageScale(.small)
+                            .foregroundStyle(.yellow)
+                            .accessibilityHidden(true)
+                    }
                     Spacer(minLength: 4)
-                    Text("\(votes)")
-                        .font(.subheadline.monospacedDigit())
+                    if !poll.isAnonymous, let voters = option.voterIds, !voters.isEmpty {
+                        VoterFaces(ids: voters, members: model.members, ring: ring)
+                    } else if votes > 0 {
+                        Text("\(votes)")
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(ink.opacity(0.8))
+                    }
                 }
                 // A bar rather than a percentage. The question a poll answers is
                 // which one is winning, and a row of numbers makes the reader
                 // work that out for themselves.
                 GeometryReader { geo in
-                    Capsule()
-                        .fill(ink.opacity(mine ? 0.55 : 0.25))
-                        .frame(width: max(3, geo.size.width * share))
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(ink.opacity(0.18))
+                        Capsule()
+                            .fill(ink.opacity(mine || winner ? 0.95 : 0.6))
+                            .frame(width: geo.size.width * share)
+                    }
                 }
-                .frame(height: 7)
+                .frame(height: 5)
             }
             // Every option is a tap target, so every option gets the room a tap
-            // target needs. At caption size with four points of padding these
-            // were half the height a finger expects.
+            // target needs.
             .padding(.vertical, 6)
             .frame(minHeight: 44, alignment: .center)
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .disabled(!poll.isOpen)
         .accessibilityLabel(option.title ?? "Option")
-        .accessibilityValue("\(votes) vote\(votes == 1 ? "" : "s")")
+        .accessibilityValue("\(votes) vote\(votes == 1 ? "" : "s")\(winner ? ", winner" : "")")
         .accessibilityAddTraits(mine ? [.isButton, .isSelected] : .isButton)
+    }
+
+    /// The most-voted option once the poll has closed. A tie crowns everyone
+    /// tied, because picking one of them would be a result nobody voted for.
+    private func isWinner(_ option: Poll.Option, in poll: Poll) -> Bool {
+        guard !poll.isOpen, option.tally > 0 else { return false }
+        return option.tally == (poll.options ?? []).map(\.tally).max()
     }
 
     /// Whether this option is one of ours.
@@ -285,19 +341,29 @@ struct PollCard: View {
         return box?.chosen.contains(id) ?? false
     }
 
-    private func footnote(for poll: Poll) -> String {
+    /// What separates overlapping faces: the card's own ground, near enough.
+    private var ring: Color { isOwn ? Color.accentColor : Color(.secondarySystemBackground) }
+
+    /// Only a public poll names its voters, and only once somebody has voted.
+    private func showsVoters(_ poll: Poll) -> Bool {
+        !poll.isAnonymous && (poll.options ?? []).contains { !($0.voterIds ?? []).isEmpty }
+    }
+
+    /// What kind of poll this is, which changes what a vote means to the
+    /// person casting it.
+    private func kind(of poll: Poll) -> String {
+        let choice = poll.allowsMultiple ? "Multiple choice" : "Single choice"
+        return poll.isAnonymous ? "\(choice) · Anonymous" : choice
+    }
+
+    private func status(of poll: Poll) -> String {
         let total = poll.totalVotes
         var parts = [total == 1 ? "1 vote" : "\(total) votes"]
-        // Worth saying, because it changes what a vote means to the person
-        // casting it. It does not change what is shown: anonymous hides who
-        // voted, never how many did.
-        if poll.isAnonymous { parts.append("Anonymous") }
         if !poll.isOpen {
-            parts.append("Closed")
+            parts.append("Poll ended")
         } else if let closes = poll.closesAt, closes > .now {
             parts.append("Ends \(closes.formatted(.relative(presentation: .named)))")
         }
-        if poll.allowsMultiple { parts.append("Pick several") }
         return parts.joined(separator: " · ")
     }
 
@@ -307,7 +373,7 @@ struct PollCard: View {
     /// option, and unticking the last leaves an empty list, which is how the
     /// route says "no vote at all".
     private func choose(_ option: Poll.Option, in poll: Poll) {
-        guard let pollID = attachment.pollId, let optionID = option.id else { return }
+        guard poll.isOpen, let pollID = attachment.pollId, let optionID = option.id else { return }
         var chosen: [String]
         if poll.allowsMultiple {
             chosen = (poll.options ?? [])
@@ -322,6 +388,131 @@ struct PollCard: View {
             chosen = isMine(option) ? [] : [optionID]
         }
         Task { await model.vote(chosen, in: pollID) }
+    }
+}
+
+/// The first few people who picked an option, overlapped the way the official
+/// clients draw them. A face says more than a count at a glance, and three is
+/// enough to recognise somebody without the row turning into a crowd.
+private struct VoterFaces: View {
+    let ids: [String]
+    let members: [Member]
+    let ring: Color
+
+    private static let size: CGFloat = 26
+    private static let shown = 3
+
+    var body: some View {
+        let byID = Dictionary(members.map { ($0.identity, $0) }, uniquingKeysWith: { first, _ in first })
+        let extra = ids.count - Self.shown
+        HStack(spacing: -8) {
+            ForEach(Array(ids.prefix(Self.shown).enumerated()), id: \.offset) { _, id in
+                let member = byID[id]
+                Avatar(url: member?.imageUrl, name: member?.nickname ?? member?.name ?? "?", size: Self.size)
+                    .overlay(Circle().strokeBorder(ring, lineWidth: 1.5))
+            }
+            // The rest as a count in a face-sized chip, so the row keeps its
+            // width however popular an option turns out to be.
+            if extra > 0 {
+                Text("+\(extra)")
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .minimumScaleFactor(0.7)
+                    .frame(width: Self.size, height: Self.size)
+                    .background(Color(.tertiarySystemFill), in: .circle)
+                    .background(Color(.systemBackground), in: .circle)
+                    .overlay(Circle().strokeBorder(ring, lineWidth: 1.5))
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// Who voted for what, on a public poll.
+///
+/// A grouped list, one card per option in the poll's own order, so the sheet
+/// reads the same way the bubble does. Rows are keyed by option *and* person:
+/// on a pick-several poll the same person sits under more than one option, and
+/// keying by person alone handed the list duplicate identities, which it
+/// answered by drawing those rows blank until they were scrolled past.
+private struct PollVoters: View {
+    let poll: Poll
+    let members: [Member]
+    let meID: String?
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(poll.options ?? [], id: \.identity) { option in
+                    Section {
+                        let voters = option.voterIds ?? []
+                        if voters.isEmpty {
+                            Text("No votes")
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(voters, id: \.self) { id in row(id) }
+                    } header: {
+                        header(option)
+                    }
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle(poll.subject ?? "Votes")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done", systemImage: "checkmark") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func header(_ option: Poll.Option) -> some View {
+        let isLeading = option.tally > 0 && option.tally == leadingTally
+        return HStack(spacing: 6) {
+            Text(option.title ?? "Option")
+                .textCase(nil)
+                .lineLimit(2)
+            if isLeading {
+                Image(systemName: poll.isOpen ? "chart.bar.fill" : "crown.fill")
+                    .foregroundStyle(.yellow)
+                    .imageScale(.small)
+                    .accessibilityLabel(poll.isOpen ? "Leading" : "Winner")
+            }
+            Spacer(minLength: 8)
+            Text(option.tally == 1 ? "1 vote" : "\(option.tally) votes")
+                .textCase(nil)
+                .monospacedDigit()
+        }
+        .font(.subheadline.weight(.semibold))
+    }
+
+    private var leadingTally: Int { (poll.options ?? []).map(\.tally).max() ?? 0 }
+
+    private func row(_ id: String) -> some View {
+        let member = byID[id]
+        // Somebody who has since left is still a vote; they are listed rather
+        // than dropped, so the list agrees with the count above it.
+        let name = member?.nickname ?? member?.name ?? "Former member"
+        return HStack(spacing: 12) {
+            Avatar(url: member?.imageUrl, name: name, size: 32)
+            Text(name)
+                .lineLimit(1)
+                .foregroundStyle(member == nil ? .secondary : .primary)
+            Spacer(minLength: 0)
+            if id == meID {
+                Text("You")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var byID: [String: Member] {
+        Dictionary(members.map { ($0.identity, $0) }, uniquingKeysWith: { first, _ in first })
     }
 }
 
