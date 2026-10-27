@@ -485,7 +485,9 @@ private struct BubbleRow: View {
             // every image on screen sit inside a box it does not need. Messages
             // draws them bare, and a caption underneath becomes its own bubble.
             if !pictureAttachments.isEmpty, !item.message.isDeleted {
-                PhotoCascade(pictures: pictureAttachments, isTrailing: isTrailing)
+                PhotoCascade(pictures: pictureAttachments, isTrailing: isTrailing,
+                             allowsDownload: !item.isPending,
+                             onReply: item.isPending ? nil : onReply)
                     .opacity(item.isPending ? 0.55 : 1)
                     .animation(.easeOut(duration: 0.2), value: item.isPending)
                     // Over the pile rather than over each photo. One ring for
@@ -863,8 +865,14 @@ extension EnvironmentValues {
 /// out of the pixels. See `MediaDimensions`.
 struct PhotoCascade: View {
     let pictures: [Message.Attachment]
-    /// Which edge the message hangs off, which decides which way the pile leans.
+    /// Which edge the message hangs off, which decides which way the pile fans.
     let isTrailing: Bool
+    /// Whether the pile offers to save itself. Off for a message still on its
+    /// way out, whose pictures are only on this phone anyway.
+    var allowsDownload = true
+    /// Starts a reply to the message these came in. Nil where replying makes
+    /// no sense, and the viewer leaves the button out.
+    var onReply: (() -> Void)?
 
     @Environment(\.quotedPictureHeight) private var quotedHeight
 
@@ -882,87 +890,207 @@ struct PhotoCascade: View {
             .fullScreenCover(item: $viewing) { item in
                 // The whole run, not the one that was tapped, so a swipe inside
                 // the viewer reaches the others.
-                MediaViewer(attachments: pictures, initialIndex: item.id)
+                MediaViewer(attachments: pictures, initialIndex: item.id, onReply: onReply)
             }
     }
 
-    /// Several photos are stacked and staggered rather than listed.
+    /// Several photos are piled and fanned rather than listed.
     ///
-    /// This is what Messages does with a burst of pictures, and the reason is
-    /// not decoration: four photos in a plain column is most of a screen of
-    /// scrolling for one message, and it reads as four separate things rather
-    /// than as one thing somebody sent. Overlapping them says "these arrived
-    /// together" in a way vertical spacing cannot, and the alternating offset is
-    /// what keeps the one underneath legible instead of merely hidden.
+    /// This is what Messages does with a burst of pictures. A column of twelve
+    /// photos is several screens of scrolling for one message, and it reads as
+    /// twelve things rather than one thing somebody sent. So the first photo is
+    /// drawn whole, at most two more peek out from behind it like cards held in
+    /// a hand, and a count above the pile says how many there really are.
     @ViewBuilder private var content: some View {
         if pictures.count == 1 {
-            MediaThumbnail(attachment: pictures[0], heightCap: heightCap)
-                .onTapGesture { viewing = ViewableMedia(id: 0, attachment: pictures[0]) }
+            HStack(spacing: 10) {
+                if !fansRight { downloadButton }
+                MediaThumbnail(attachment: pictures[0], heightCap: heightCap)
+                    .onTapGesture { viewing = ViewableMedia(id: 0, attachment: pictures[0]) }
+                if fansRight { downloadButton }
+            }
         } else if !pictures.isEmpty {
-            // Placed by hand, and sized by hand, because both halves of that
-            // matter. A `VStack` with negative spacing and `.offset` children
-            // leaves the container describing a different rectangle from the one
-            // its contents actually occupy, and whatever lays it out believes
-            // the description. Here the frame is the arithmetic.
-            ZStack(alignment: .topLeading) {
-                ForEach(Array(pictures.enumerated()), id: \.offset) { index, attachment in
-                    MediaThumbnail(
-                        attachment: attachment,
-                        heightCap: heightCap,
-                        reserved: boxes[index])
-                        .shadow(color: .black.opacity(0.22), radius: 5, y: 2)
-                        .offset(x: lean(at: index), y: top(of: index))
-                        // Later photos sit on top, so the cascade reads front to
-                        // back in the order they were sent.
-                        .zIndex(Double(index))
-                        .onTapGesture { viewing = ViewableMedia(id: index, attachment: attachment) }
+            VStack(alignment: isTrailing ? .trailing : .leading, spacing: 6) {
+                if quotedHeight == nil { countLabel }
+                // Inside the layout rather than offset beside it. The row
+                // limits hit testing to its own rectangle, so a button pushed
+                // past the pile's frame drew fine and could not be tapped.
+                HStack(spacing: 10) {
+                    if !fansRight { downloadButton }
+                    pile
+                    if fansRight { downloadButton }
                 }
             }
-            .frame(width: stackSize.width, height: stackSize.height, alignment: .topLeading)
         }
     }
 
-    /// How tall any one photo here may draw.
-    ///
-    /// A lone portrait shot is allowed real height; a message carrying three of
-    /// them is not, or the reader has to scroll past one message to reach the
-    /// next. Fixed off the count rather than measured, so it is known before
-    /// anything loads, and overridden wherever the message is being shown in a
-    /// slot of somebody else's choosing.
+    /// The fan itself. Placed by hand and sized by hand: every card's rotated
+    /// corners are worked out below, and the frame is exactly the rectangle
+    /// they cover, so whatever lays this out is told the truth about its size.
+    private var pile: some View {
+        let layout = fan
+        return ZStack(alignment: .topLeading) {
+            ForEach(Array(visible.enumerated()).reversed(), id: \.offset) { depth, attachment in
+                MediaThumbnail(attachment: attachment, heightCap: heightCap, reserved: front)
+                    .shadow(color: .black.opacity(depth == 0 ? 0.22 : 0.3), radius: 5, y: 2)
+                    .rotationEffect(angle(at: depth), anchor: pivot)
+                    .offset(x: layout.origin.x + shift(at: depth), y: layout.origin.y)
+                    .onTapGesture { viewing = ViewableMedia(id: depth, attachment: attachment) }
+            }
+        }
+        .frame(width: layout.size.width, height: layout.size.height, alignment: .topLeading)
+    }
+
+    @ViewBuilder private var downloadButton: some View {
+        if allowsDownload, quotedHeight == nil {
+            StackDownloadButton(pictures: pictures)
+        }
+    }
+
+    private var countLabel: some View {
+        Button {
+            viewing = ViewableMedia(id: 0, attachment: pictures[0])
+        } label: {
+            Label("\(pictures.count) Photos", systemImage: "square.grid.2x2.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.tint)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The photos actually drawn. The rest are reached through the viewer.
+    private var visible: ArraySlice<Message.Attachment> { pictures.prefix(Self.visibleLimit) }
+
+    /// Every card shares the front photo's box, so the ones behind read as
+    /// the same pile rather than as a scatter of differently shaped prints.
+    private var front: CGSize { MediaThumbnail.reservedBox(for: pictures[0], heightCap: heightCap) }
+
+    /// Fan away from the edge the message hangs off, into the open side of
+    /// the transcript.
+    private var fansRight: Bool { !isTrailing }
+
+    /// The bottom corner on the side away from the fan, so the cards swing
+    /// out at the top like a hand of cards rather than spinning in place.
+    private var pivot: UnitPoint { fansRight ? .bottomLeading : .bottomTrailing }
+
+    private func angle(at depth: Int) -> Angle {
+        .degrees(Double(depth) * Self.spread * (fansRight ? 1 : -1))
+    }
+
+    private func shift(at depth: Int) -> CGFloat {
+        CGFloat(depth) * Self.nudge * (fansRight ? 1 : -1)
+    }
+
+    /// Where the front card sits and how much room the whole fan needs: the
+    /// bounding box of every card's four corners after its turn and shift.
+    private var fan: (origin: CGPoint, size: CGSize) {
+        let box = front
+        let anchor = CGPoint(x: pivot.x * box.width, y: pivot.y * box.height)
+        var minX: CGFloat = 0, minY: CGFloat = 0, maxX = box.width, maxY = box.height
+        let corners = [
+            CGPoint.zero, CGPoint(x: box.width, y: 0),
+            CGPoint(x: 0, y: box.height), CGPoint(x: box.width, y: box.height),
+        ]
+        for depth in visible.indices {
+            let theta = angle(at: depth).radians
+            let sine = CGFloat(sin(theta)), cosine = CGFloat(cos(theta))
+            for corner in corners {
+                let dx = corner.x - anchor.x, dy = corner.y - anchor.y
+                let x = anchor.x + dx * cosine - dy * sine + shift(at: depth)
+                let y = anchor.y + dx * sine + dy * cosine
+                minX = min(minX, x); maxX = max(maxX, x)
+                minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        return (CGPoint(x: -minX, y: -minY),
+                CGSize(width: (maxX - minX).rounded(.up), height: (maxY - minY).rounded(.up)))
+    }
+
+    /// How tall any one photo here may draw. Only one card is ever seen whole,
+    /// so a pile gets nearly a lone photo's height. Overridden wherever the
+    /// message is being shown in a slot of somebody else's choosing.
     private var heightCap: CGFloat {
-        quotedHeight ?? (pictures.count > 1 ? 240 : 360)
+        quotedHeight ?? (pictures.count > 1 ? 300 : 360)
     }
 
-    /// Every picture's box, worked out once so the cascade can place them.
-    private var boxes: [CGSize] {
-        pictures.map { MediaThumbnail.reservedBox(for: $0, heightCap: heightCap) }
+    /// The most cards drawn. Past this a pile stops being legible and starts
+    /// being a thicker edge.
+    private static let visibleLimit = 3
+    /// Degrees each card behind turns past the one in front of it.
+    private static let spread: Double = 4
+    /// Points each card behind slides outward, so the edge still shows on a
+    /// short, wide photo where the turn alone barely clears the front.
+    private static let nudge: CGFloat = 4
+}
+
+/// Saves every photo in a pile at once.
+///
+/// A small round button beside the pile, the way Messages offers it. It turns
+/// into a check once the pictures are in the library and then gets out of the
+/// way; the job it existed for is done.
+private struct StackDownloadButton: View {
+    let pictures: [Message.Attachment]
+
+    static let size: CGFloat = 30
+
+    private enum Phase { case idle, saving, done, failed }
+    @State private var phase: Phase = .idle
+    @State private var isHidden = false
+
+    var body: some View {
+        // A pile already in the library offers nothing; the viewer is where a
+        // duplicate can be asked for.
+        if !isHidden, phase == .done || !PhotoLibrary.areAllSaved(pictures) {
+            Button(action: save) {
+                ZStack {
+                    switch phase {
+                    case .idle:
+                        Image(systemName: "square.and.arrow.down")
+                            .foregroundStyle(.tint)
+                    case .saving:
+                        ProgressView().controlSize(.mini)
+                    case .done:
+                        Image(systemName: "checkmark")
+                            .foregroundStyle(.green)
+                            .transition(.scale.combined(with: .opacity))
+                    case .failed:
+                        Image(systemName: "exclamationmark.arrow.circlepath")
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .font(.system(size: 13, weight: .semibold))
+                .frame(width: Self.size, height: Self.size)
+                .background(Color(.tertiarySystemFill), in: .circle)
+                .contentShape(.circle.inset(by: -8))
+            }
+            .buttonStyle(.plain)
+            .disabled(phase == .saving || phase == .done)
+            .sensoryFeedback(trigger: phase) { _, new in
+                switch new {
+                case .done: .success
+                case .failed: .error
+                default: nil
+                }
+            }
+            .transition(.opacity.combined(with: .scale(scale: 0.6)))
+            .accessibilityLabel(phase == .done ? "Saved" : pictures.count == 1 ? "Save photo" : "Save all \(pictures.count) photos")
+        }
     }
 
-    /// Where each photo's top edge sits: the one before it, less the overlap.
-    private func top(of index: Int) -> CGFloat {
-        boxes.prefix(index).reduce(0) { $0 + $1.height - Self.overlap }
+    private func save() {
+        guard phase == .idle || phase == .failed else { return }
+        phase = .saving
+        Task {
+            do {
+                try await PhotoLibrary.save(pictures)
+                withAnimation(.snappy) { phase = .done }
+                try? await Task.sleep(for: .seconds(1.2))
+                withAnimation(.easeOut(duration: 0.25)) { isHidden = true }
+            } catch {
+                withAnimation(.snappy) { phase = .failed }
+            }
+        }
     }
-
-    /// Alternating so the pile does not drift, and shifted into positive space
-    /// so the leftmost photo starts at the container's own edge.
-    private func lean(at index: Int) -> CGFloat {
-        let side = index.isMultiple(of: 2) ? -Self.stagger : Self.stagger
-        return Self.stagger + (isTrailing ? -side : side)
-    }
-
-    /// Exactly the rectangle the photos occupy: the widest of them plus the
-    /// room the stagger needs on both sides, and the foot of the last one.
-    private var stackSize: CGSize {
-        guard let last = boxes.indices.last else { return .zero }
-        return CGSize(
-            width: (boxes.map(\.width).max() ?? 0) + Self.stagger * 2,
-            height: top(of: last) + boxes[last].height)
-    }
-
-    /// How far each photo leans, alternating so the pile does not drift.
-    private static let stagger: CGFloat = 14
-    /// How much of the photo above stays covered.
-    private static let overlap: CGFloat = 22
 }
 
 /// One tapped attachment, given the identity `fullScreenCover(item:)` needs.

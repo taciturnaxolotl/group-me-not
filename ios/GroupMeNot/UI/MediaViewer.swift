@@ -14,15 +14,20 @@ struct MediaViewer: View {
     let attachments: [Message.Attachment]
     /// Which one was tapped.
     let initialIndex: Int
+    /// Starts a reply to the message the pictures came in. Nil hides the button.
+    var onReply: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
 
     @State private var index: Int = 0
-    /// Whether the bars are showing. Starts hidden: the picture is what was
-    /// asked for, and chrome that arrives uninvited is chrome that has to be
-    /// dismissed before the photo can be looked at. A tap brings it back, and a
-    /// downward drag closes the viewer without it.
-    @State private var isChromeVisible = false
+    /// Whether the bars are showing. Starts shown, the way Photos and Messages
+    /// open: the controls are how you learn what the viewer can do, and a tap
+    /// on the picture clears them when you only want to look.
+    @State private var isChromeVisible = true
+    /// Whether the run is laid out as a grid instead of one page at a time.
+    @State private var isShowingGrid = false
+    /// Asking whether to save a second copy of a photo already in the library.
+    @State private var isConfirmingDuplicate = false
     /// The loaded picture, held here rather than inside the zoom view so the
     /// share and save actions have something to hand over.
     @State private var image: UIImage?
@@ -30,6 +35,9 @@ struct MediaViewer: View {
     /// taken with it.
     @State private var dragOffset: CGSize = .zero
     @State private var saveResult: SaveResult?
+    /// Bumped on every successful save. A save that worked is confirmed with
+    /// a tap of the haptic engine rather than an alert to dismiss.
+    @State private var saveCount = 0
     /// The height of the top bar, measured, so the letterbox test below knows
     /// how far down the bar actually reaches.
     @State private var topBarHeight: CGFloat = 0
@@ -90,7 +98,22 @@ struct MediaViewer: View {
         }
         .overlay(alignment: .top) { topBar }
         .overlay(alignment: .bottom) { bottomBar }
-        .statusBarHidden()
+        .overlay {
+            if isShowingGrid {
+                MediaGrid(
+                    attachments: attachments,
+                    onOpen: { position in
+                        resetZoom()
+                        index = position
+                        withAnimation(.easeInOut(duration: 0.2)) { isShowingGrid = false }
+                    },
+                    onBack: { withAnimation(.easeInOut(duration: 0.2)) { isShowingGrid = false } },
+                    onReply: onReply.map { reply in { close(then: reply) } },
+                    onSave: save(_:))
+                    .transition(.opacity)
+            }
+        }
+        .statusBarHidden(!isChromeVisible && !isShowingGrid)
         .preferredColorScheme(.dark)
         // Without this the cover paints its own opaque ground behind everything,
         // and fading `backdropOpacity` would reveal nothing but another black
@@ -101,6 +124,7 @@ struct MediaViewer: View {
             Alert(title: Text(result.title), message: Text(result.message),
                   dismissButton: .default(Text("OK")))
         }
+        .sensoryFeedback(.success, trigger: saveCount)
     }
 
     /// One page per picture, laid out in a row and offset by hand.
@@ -322,8 +346,14 @@ struct MediaViewer: View {
             Spacer()
             titleMenu
             Spacer()
-            // Balances the close button so the title sits truly centred.
-            Color.clear.frame(width: 40, height: 40)
+            if attachments.count > 1 {
+                circleButton("square.grid.2x2", label: "All Photos") {
+                    withAnimation(.easeInOut(duration: 0.2)) { isShowingGrid = true }
+                }
+            } else {
+                // Balances the close button so the title sits truly centred.
+                Color.clear.frame(width: 40, height: 40)
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
@@ -352,8 +382,8 @@ struct MediaViewer: View {
 
     private var titleMenu: some View {
         Menu {
-            Button("Save to Photos", systemImage: "square.and.arrow.down", action: save)
-                .disabled(image == nil)
+            Button("Save to Photos", systemImage: "square.and.arrow.down", action: saveCurrent)
+                .disabled(attachment == nil)
             Button("Copy", systemImage: "doc.on.doc", action: copy)
                 .disabled(image == nil)
         } label: {
@@ -370,33 +400,35 @@ struct MediaViewer: View {
         .accessibilityLabel("Photo options")
     }
 
-    /// Share alone on the trailing edge, the way Messages puts it. Absent
-    /// entirely until there is something to share, because a share button that
-    /// does nothing is worse than none.
-    @ViewBuilder private var bottomBar: some View {
+    /// Two clusters, the way Photos lays it out: things you do *with* the
+    /// picture on the leading edge, and the ways it leaves the app on the
+    /// trailing one. Each cluster is one capsule of glass rather than a row of
+    /// separate buttons, so it reads as a toolbar instead of as scattered dots.
+    private var bottomBar: some View {
         HStack {
-            Spacer()
-            if let image {
-                ShareLink(
-                    item: Image(uiImage: image),
-                    preview: SharePreview("Photo", image: Image(uiImage: image))
-                ) {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 44, height: 44)
-                        .glassEffect(.regular.interactive(), in: .circle)
+            HStack(spacing: 4) {
+                toolbarButton(isZoomed ? "minus.magnifyingglass" : "plus.magnifyingglass",
+                              label: isZoomed ? "Zoom Out" : "Zoom In", action: toggleZoom)
+                if let onReply {
+                    toolbarButton("arrowshape.turn.up.left", label: "Reply") { close(then: onReply) }
                 }
-                .accessibilityLabel("Share")
             }
+            .glassEffect(.regular.interactive(), in: .capsule)
+
+            Spacer()
+
+            HStack(spacing: 4) {
+                toolbarButton(saveSymbol, label: "Save to Photos",
+                              action: saveCurrent)
+                    .disabled(attachment == nil)
+                    .duplicatePrompt(isPresented: $isConfirmingDuplicate, count: 1) { saveCurrent(force: true) }
+                shareButton
+            }
+            .glassEffect(.regular.interactive(), in: .capsule)
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 12)
+        .padding(.horizontal, 20)
+        .padding(.bottom, 8)
         .padding(.top, 24)
-        // A wash rather than a bar. There is one button down here and it is
-        // already glass, so it needs separation from the picture and nothing
-        // more; a second opaque band would frame the photo on two sides and
-        // make the screen feel smaller than it is.
         .background {
             LinearGradient(
                 colors: [.clear, .black.opacity(0.45)],
@@ -411,6 +443,38 @@ struct MediaViewer: View {
         .opacity(isChromeVisible ? backdropOpacity : 0)
         .animation(.easeInOut(duration: 0.2), value: isChromeVisible)
         .allowsHitTesting(isChromeVisible && dragOffset == .zero)
+    }
+
+    /// The decoded picture when there is one, so the share sheet shows a
+    /// preview; the file itself otherwise, which is what a video needs.
+    @ViewBuilder private var shareButton: some View {
+        if let image {
+            ShareLink(
+                item: Image(uiImage: image),
+                preview: SharePreview("Photo", image: Image(uiImage: image))
+            ) { toolbarGlyph("square.and.arrow.up") }
+                .accessibilityLabel("Share")
+        } else if let mediaURL {
+            ShareLink(item: mediaURL) { toolbarGlyph("square.and.arrow.up") }
+                .accessibilityLabel("Share")
+        }
+    }
+
+    private func toolbarButton(
+        _ symbol: String, label: String, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) { toolbarGlyph(symbol) }
+            .buttonStyle(.plain)
+            .accessibilityLabel(label)
+    }
+
+    private func toolbarGlyph(_ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 19, weight: .medium))
+            .foregroundStyle(.white)
+            .contentTransition(.symbolEffect(.replace))
+            .frame(width: 52, height: 48)
+            .contentShape(.rect)
     }
 
     private func circleButton(
@@ -483,24 +547,50 @@ struct MediaViewer: View {
 
     // MARK: Actions
 
-    /// Asks for add-only access, which is the narrowest permission that can
-    /// save a photo: it never lets this app read the library back.
-    private func save() {
-        guard let image else { return }
+    /// Saves the photo on screen, or, if this phone has saved it before, asks
+    /// first, the way Photos does when you save something it already has.
+    private func saveCurrent() { saveCurrent(force: false) }
+
+    /// Filled once the photo is in the library, and every time it is opened
+    /// after that. The change of icon is the confirmation; nothing else is.
+    private var saveSymbol: String {
+        guard let attachment, PhotoLibrary.isSaved(attachment) else { return "square.and.arrow.down" }
+        return "square.and.arrow.down.fill"
+    }
+
+    private func saveCurrent(force: Bool) {
+        guard let attachment else { return }
+        if !force, PhotoLibrary.isSaved(attachment) {
+            isConfirmingDuplicate = true
+            return
+        }
         Task {
-            let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-            guard status == .authorized || status == .limited else {
-                saveResult = .denied
-                return
-            }
-            do {
-                try await PHPhotoLibrary.shared().performChanges {
-                    PHAssetChangeRequest.creationRequestForAsset(from: image)
-                }
-                saveResult = .saved
-            } catch {
-                saveResult = .failed
-            }
+            _ = await save([attachment])
+        }
+    }
+
+    /// Saves the originals, not the decoded picture on screen, so a photo keeps
+    /// its resolution and a video is saved as a video. Only failures speak up.
+    private func save(_ items: [Message.Attachment]) async -> Bool {
+        do {
+            try await PhotoLibrary.save(items)
+            saveCount += 1
+            return true
+        } catch PhotoLibrary.SaveError.denied {
+            saveResult = .denied
+        } catch {
+            saveResult = .failed
+        }
+        return false
+    }
+
+    /// Takes the viewer down before acting, for actions that belong to the
+    /// conversation underneath rather than to the picture.
+    private func close(then action: @escaping () -> Void) {
+        dismiss()
+        Task {
+            try? await Task.sleep(for: .milliseconds(350))
+            action()
         }
     }
 
@@ -521,17 +611,16 @@ struct MediaViewer: View {
     }
 }
 
-/// What to say after a save attempt. An alert rather than a silent success,
-/// because the picture does not visibly change and the only feedback the system
-/// gives is the one we provide.
+/// What to say after a save that did not work. Success gets no alert, only a
+/// haptic: an alert asks to be dismissed, and a save that worked has nothing
+/// to say that needs answering.
 private enum SaveResult: String, Identifiable {
-    case saved, denied, failed
+    case denied, failed
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .saved: "Saved"
         case .denied: "No Access to Photos"
         case .failed: "Could Not Save"
         }
@@ -539,7 +628,6 @@ private enum SaveResult: String, Identifiable {
 
     var message: String {
         switch self {
-        case .saved: "The photo is in your library."
         case .denied: "Allow adding photos in Settings to save this one."
         case .failed: "Something went wrong writing to your photo library."
         }
@@ -630,6 +718,195 @@ private struct VideoPage: View {
             }
             guard player == nil else { return }
             player = AVPlayer(url: url)
+        }
+    }
+}
+
+/// Every picture in the run at once, two to a row.
+///
+/// Each photo sits in a square cell at its own shape, the way the Photos
+/// album view draws a burst: portraits stand tall, landscapes lie flat, and
+/// nothing is cropped to make the grid tidier than the pictures are.
+private struct MediaGrid: View {
+    let attachments: [Message.Attachment]
+    let onOpen: (Int) -> Void
+    let onBack: () -> Void
+    let onReply: (() -> Void)?
+    let onSave: ([Message.Attachment]) async -> Bool
+
+    @State private var isSelecting = false
+    @State private var selected: Set<Int> = []
+    @State private var isSaving = false
+    @State private var isConfirmingDuplicate = false
+
+    private let columns = [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)]
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: columns, spacing: 14) {
+                ForEach(Array(attachments.enumerated()), id: \.offset) { position, item in
+                    cell(item, at: position)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 24)
+        }
+        .safeAreaInset(edge: .top, spacing: 12) { topBar }
+        .background(Color(white: 0.11).ignoresSafeArea())
+        .sensoryFeedback(.selection, trigger: selected)
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 12) {
+            glassCircle("chevron.left", label: "Back", action: onBack)
+            Spacer()
+            glassCircle(saveSymbol, label: saveLabel, action: save)
+                .disabled(isSaving || (isSelecting && selected.isEmpty))
+                .duplicatePrompt(isPresented: $isConfirmingDuplicate, count: itemsToSave.count) {
+                    save(force: true)
+                }
+            if let onReply, !isSelecting {
+                glassCircle("arrowshape.turn.up.left", label: "Reply", action: onReply)
+            }
+            Button(isSelecting ? "Done" : "Select") {
+                withAnimation(.snappy(duration: 0.2)) {
+                    isSelecting.toggle()
+                    selected = []
+                }
+            }
+            .font(.body.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .frame(height: 44)
+            .glassEffect(.regular.interactive(), in: .capsule)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 4)
+    }
+
+    private var saveSymbol: String {
+        return PhotoLibrary.areAllSaved(itemsToSave) ? "square.and.arrow.down.fill" : "square.and.arrow.down"
+    }
+
+    private var saveLabel: String {
+        return isSelecting ? "Save \(selected.count) Selected" : "Save All"
+    }
+
+    private func cell(_ item: Message.Attachment, at position: Int) -> some View {
+        Color.clear
+            .aspectRatio(1, contentMode: .fit)
+            .overlay {
+                GeometryReader { proxy in
+                    let box = fitted(item, in: proxy.size)
+                    RemoteImage(
+                        url: GroupMeImage.variant(.inline, of: Self.stillURL(of: item)) ?? Self.stillURL(of: item),
+                        maxPixelSize: proxy.size.width * 3,
+                        blurHash: item.blurHash
+                    ) {
+                        Rectangle().fill(.white.opacity(0.08))
+                    }
+                    .frame(width: box.width, height: box.height)
+                    .clipShape(.rect(cornerRadius: 22, style: .continuous))
+                    .overlay {
+                        if item.type == "video" {
+                            Image(systemName: "play.circle.fill")
+                                .font(.largeTitle)
+                                .foregroundStyle(.white, .black.opacity(0.35))
+                        }
+                    }
+                    .overlay(alignment: .bottomTrailing) {
+                        if isSelecting { checkmark(selected.contains(position)) }
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                }
+            }
+            .contentShape(.rect)
+            .onTapGesture {
+                guard isSelecting else { return onOpen(position) }
+                if selected.contains(position) { selected.remove(position) } else { selected.insert(position) }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(item.type == "video" ? "Video" : "Photo")
+            .accessibilityAddTraits(selected.contains(position) ? [.isButton, .isSelected] : .isButton)
+    }
+
+    private func checkmark(_ isOn: Bool) -> some View {
+        Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+            .font(.system(size: 24))
+            .foregroundStyle(.white, isOn ? Color.accentColor : .clear)
+            .shadow(color: .black.opacity(0.4), radius: 2)
+            .padding(8)
+    }
+
+    /// The largest box of the picture's shape that fits the cell, or the whole
+    /// cell when the URL does not say what shape that is.
+    private func fitted(_ item: Message.Attachment, in cell: CGSize) -> CGSize {
+        guard let size = MediaDimensions.declared(in: Self.stillURL(of: item)),
+            size.width > 0, size.height > 0
+        else { return cell }
+        let fit = min(cell.width / size.width, cell.height / size.height)
+        return CGSize(width: size.width * fit, height: size.height * fit)
+    }
+
+    private static func stillURL(of item: Message.Attachment) -> URL? {
+        (item.previewUrl ?? item.url ?? item.sourceUrl).flatMap(URL.init(string:))
+    }
+
+    private var itemsToSave: [Message.Attachment] {
+        isSelecting ? selected.sorted().map { attachments[$0] } : attachments
+    }
+
+    private func save() { save(force: false) }
+
+    private func save(force: Bool) {
+        let items = itemsToSave
+        guard !items.isEmpty else { return }
+        if !force, PhotoLibrary.areAllSaved(items) {
+            isConfirmingDuplicate = true
+            return
+        }
+        isSaving = true
+        Task {
+            let worked = await onSave(items)
+            isSaving = false
+            guard worked else { return }
+            withAnimation(.snappy) {
+                isSelecting = false
+                selected = []
+            }
+        }
+    }
+
+    private func glassCircle(
+        _ symbol: String, label: String, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(.white)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 44, height: 44)
+                .glassEffect(.regular.interactive(), in: .circle)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+}
+
+extension View {
+    /// The question Photos asks when you save something it already has.
+    ///
+    /// A confirmation dialog anchored to the save button, which iOS draws as a
+    /// popover coming off the button rather than as a sheet across the screen.
+    func duplicatePrompt(
+        isPresented: Binding<Bool>, count: Int, saveAnyway: @escaping () -> Void
+    ) -> some View {
+        confirmationDialog("Already Saved", isPresented: isPresented, titleVisibility: .hidden) {
+            Button(count == 1 ? "Save Duplicate" : "Save Duplicates", action: saveAnyway)
+        } message: {
+            Text(count == 1
+                ? "This photo has already been saved to your photo library."
+                : "These photos have already been saved to your photo library.")
         }
     }
 }
