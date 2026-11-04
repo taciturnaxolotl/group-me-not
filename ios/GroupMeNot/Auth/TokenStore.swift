@@ -33,7 +33,11 @@ actor TokenStore {
 
     var isSignedIn: Bool { token() != nil }
 
-    func save(_ token: String) {
+    /// Whether the keychain took it. A refusal is rare and real: a session
+    /// built on a token only this process holds is a session that ends at
+    /// the next launch, with no way to say why.
+    @discardableResult
+    func save(_ token: String) -> Bool {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -43,12 +47,13 @@ actor TokenStore {
             kSecValueData as String: Data(token.utf8),
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
         ]
-        if SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess {
-            SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        } else {
-            SecItemAdd(query.merging(attributes) { $1 } as CFDictionary, nil)
+        var status = SecItemAdd(query.merging(attributes) { $1 } as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         }
+        guard status == errSecSuccess else { return false }
         cached = token
+        return true
     }
 
     func clear() {

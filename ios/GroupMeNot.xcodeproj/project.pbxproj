@@ -258,7 +258,6 @@
 				DEVELOPMENT_TEAM = M67B42LX8D;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "GroupMeNot-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = GroupMeNot;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
@@ -297,7 +296,6 @@
 				DEVELOPMENT_TEAM = M67B42LX8D;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "GroupMeNot-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = GroupMeNot;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";

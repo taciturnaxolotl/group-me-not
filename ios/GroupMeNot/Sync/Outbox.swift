@@ -259,6 +259,15 @@ actor Outbox {
         await drain()
     }
 
+    /// Stop a drain in flight and wait for it. For signing out: the queue is
+    /// about to be deleted, and a send that lands after that marks a row that
+    /// no longer exists.
+    func stop() async {
+        guard let draining else { return }
+        draining.cancel()
+        await draining.value
+    }
+
     /// Resolve entries the server accepted through a `409`.
     ///
     /// The 409 body is empty, so the entry knows it landed but not under which

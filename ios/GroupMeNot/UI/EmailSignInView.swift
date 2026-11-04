@@ -100,8 +100,12 @@ struct EmailSignInView: View {
                     code: challenge == nil ? nil : code)
                 switch outcome {
                 case .token(let token):
-                    await model.signIn(token: token)
-                    if model.isSignedIn { dismiss() } else { error = model.syncState.lastError }
+                    switch await model.signIn(token: token) {
+                    case .verified, .unverified:
+                        dismiss()
+                    case .refused(let reason):
+                        error = reason
+                    }
                 case .challenge(let next):
                     challenge = next
                     focus = .code

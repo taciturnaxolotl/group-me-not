@@ -50,6 +50,9 @@ nonisolated enum SyncChange: Sendable {
     case messages(ConversationID)
     /// The socket came back after a gap; the open transcript should refresh.
     case reactionsStale
+    /// The server refused the token outright. Whoever owns the session decides
+    /// what that means; the loop only reports it.
+    case credentialsRejected
 }
 
 /// The catch-up loop.
@@ -229,6 +232,20 @@ actor SyncEngine {
         running = nil
     }
 
+    /// Stop whatever is in flight and wait until it is gone.
+    ///
+    /// For signing out. A sync fetching under the old token keeps writing into
+    /// the store after the caller has emptied it, and a cancel on its own is
+    /// not enough: the task only notices at its next await, and the writes
+    /// before that one still land.
+    func stop() async {
+        guard let inFlight = running else { return }
+        inFlight.cancel()
+        await inFlight.value
+        running = nil
+        runningGeneration &+= 1
+    }
+
     private func perform(reason: SyncReason) async {
         let started = Date()
         state.phase = .syncing
@@ -290,11 +307,21 @@ actor SyncEngine {
             state.lastError = nil
             state.lastSyncedAt = Date()
             log.info("sync finished in \(Date().timeIntervalSince(started), format: .fixed(precision: 2))s, \(plans.count) conversations moved")
+        } catch where Task.isCancelled {
+            // Stopped on purpose. Nothing to report, and nothing to write into
+            // a state the sign-out is about to reset. Checked on the task
+            // rather than the error, because a cancelled request surfaces as
+            // whatever the network layer wrapped it in.
+            state.phase = .idle
+            log.info("sync cancelled")
         } catch {
             let message = failureText(error)
             state.phase = .failed
             state.lastError = message
             log.error("sync failed: \(message, privacy: .public)")
+            if let status = (error as? APIError)?.status, status == 401 || status == 403 {
+                continuation.yield(.credentialsRejected)
+            }
         }
     }
 

@@ -54,16 +54,23 @@ nonisolated enum PasswordLogin {
 
     enum Failure: LocalizedError {
         case rejected
+        case badCode
         case banned
+        case throttled
         case server(String)
-        case unreadable
+        case unreadable(status: Int)
 
         var errorDescription: String? {
             switch self {
             case .rejected: "That email or password was not accepted."
+            case .badCode: "That code was not accepted."
             case .banned: "This account has been suspended."
+            case .throttled: "Too many attempts. Wait a little and try again."
             case .server(let detail): detail
-            case .unreadable: "GroupMe answered in a shape this app does not understand."
+            case .unreadable(let status):
+                status >= 500
+                    ? "GroupMe is having trouble right now. Try again in a moment."
+                    : "GroupMe answered in a shape this app does not understand (\(status))."
             }
         }
     }
@@ -104,15 +111,22 @@ nonisolated enum PasswordLogin {
         }
 
         let (data, response) = try await URLSession.shared.data(for: request)
-        return try outcome(from: data, response: response)
+        return try outcome(from: data, response: response, answeringChallenge: code != nil)
     }
 
     // MARK: - Reading the answer
 
-    private static func outcome(from data: Data, response: URLResponse) throws -> Outcome {
+    /// A refusal on the code step is about the code: the credentials behind
+    /// it were accepted a moment ago, and telling the user their password is
+    /// wrong while they look at a code field sends them back to retype the
+    /// one thing that was right.
+    private static func outcome(
+        from data: Data, response: URLResponse, answeringChallenge: Bool
+    ) throws -> Outcome {
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard let envelope = try? JSONDecoder().decode(LoginEnvelope.self, from: data) else {
-            log.error("login response did not decode: \(data.count) bytes")
-            throw Failure.unreadable
+            log.error("login response \(status) did not decode: \(data.count) bytes")
+            throw status == 429 ? Failure.throttled : Failure.unreadable(status: status)
         }
         if let token = envelope.response?.accessToken, !token.isEmpty {
             return .token(token)
@@ -123,16 +137,23 @@ nonisolated enum PasswordLogin {
             return .challenge(Challenge(
                 methods: verification?.methods?.available ?? [],
                 destination: verification?.systemNumber))
+        case 40101:
+            throw Failure.badCode
         case 40121:
             throw Failure.banned
+        case 42901:
+            throw Failure.throttled
         default:
             break
         }
         if let message = envelope.meta?.errors?.first, !message.isEmpty {
             throw Failure.server(message)
         }
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        throw status == 401 || status == 404 ? Failure.rejected : Failure.unreadable
+        switch status {
+        case 401, 404: throw answeringChallenge ? Failure.badCode : Failure.rejected
+        case 429: throw Failure.throttled
+        default: throw Failure.unreadable(status: status)
+        }
     }
 
     private struct LoginEnvelope: Decodable {
@@ -223,9 +244,14 @@ nonisolated enum PasswordLogin {
     private static let userAgent =
         "GM-Android/16.10.4 (\(versionCode); M:Apple iPhone; O:34; D:ios) GroupMeNot/1.0"
 
+    /// The unreserved set and nothing else. `CharacterSet.alphanumerics` is
+    /// every letter in Unicode, which would put a password's accented letters
+    /// on the wire as raw bytes in a body that promises percent-encoding.
+    private static let formUnreserved = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+
     private static func formEncode(_ fields: [String: String]) -> String {
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "-._~")
+        let allowed = formUnreserved
         return fields
             .sorted { $0.key < $1.key }
             .map { key, value in

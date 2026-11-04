@@ -93,6 +93,9 @@ final class AppModel {
         .data(forKey: AppModel.currentUserKey) == nil ? .unknown : .signedIn
 
     var isSignedIn: Bool { session == .signedIn }
+    /// Why the app signed itself out, for the sign-in screen to say. Nil when
+    /// the user did it themselves, which needs no explaining.
+    private(set) var signedOutReason: String?
     private(set) var syncState = SyncState()
     private(set) var totalUnread = 0
     /// Who is typing in the open conversation, and when we last heard from them.
@@ -307,6 +310,9 @@ final class AppModel {
     /// it missed, so the whole loop runs again.
     func foregrounded() async {
         guard isSignedIn else { return }
+        // A sign-in that could not be checked has no identity yet, and
+        // without one the socket never opens and DMs cannot be addressed.
+        if currentUser == nil { await refreshIdentity() }
         if let user = currentUser { await bayeux.start(as: user.id) }
         // `start` is idempotent, which is exactly the problem: it is happy to
         // report success over a socket the system killed while we were
@@ -1869,33 +1875,58 @@ final class AppModel {
 
     // MARK: - Session
 
+    /// How a sign-in ended, for the screen that asked.
+    nonisolated enum SignInOutcome: Sendable, Hashable {
+        /// GroupMe confirmed who the token belongs to.
+        case verified
+        /// GroupMe could not be reached. The token is kept and the app is
+        /// signed in on the strength of it; the next request that lands
+        /// settles the question.
+        case unverified(String)
+        /// GroupMe refused the token. Nothing was kept.
+        case refused(String)
+    }
+
     /// Adopt a token and prove it works.
     ///
-    /// A rejected token is discarded and reported through `syncState.lastError`,
-    /// which is where every other network failure already shows up. A token that
-    /// simply could not be checked, because the phone is offline, is kept: the
-    /// user typed something plausible and the next successful request settles it.
-    func signIn(token: String) async {
-        await tokens.save(token)
-        session = .signedIn
-        syncState.lastError = nil
+    /// The session changes only once the answer is in. Flipping it first
+    /// replaced the sign-in screen, and the sheet on it, with the conversation
+    /// list while the check was still out, so a refusal arrived at a view that
+    /// no longer existed and the user was bounced back to sign-in with
+    /// nothing said. The screen that asked is told the outcome and decides
+    /// what to show.
+    func signIn(token: String) async -> SignInOutcome {
+        signedOutReason = nil
+        // Saved before the check, because the client reads its token from the
+        // store. Two sign-ins racing each other both save, so the refusal
+        // below only clears if the stored token is still the one it checked.
+        guard await tokens.save(token) else {
+            log.error("sign-in could not be stored")
+            return .refused("This device would not store the sign-in. Try again.")
+        }
 
         do {
             let user = try await api.me()
             remember(user)
+            session = .signedIn
+            syncState.lastError = nil
             await adopt(user)
             await sends.credentialsDidChange()
             await sync.sync(reason: .signIn)
+            return .verified
         } catch let error as APIError where error.status == 401 || error.status == 403 {
-            await tokens.clear()
-            session = .signedOut
-            syncState.phase = .failed
-            syncState.lastError = "That token was refused."
+            if await tokens.token() == token {
+                await tokens.clear()
+                session = .signedOut
+            }
             log.error("sign-in refused")
+            return .refused("GroupMe did not accept that sign-in.")
         } catch {
+            session = .signedIn
             syncState.phase = .failed
             syncState.lastError = "Could not reach GroupMe. Trying again shortly."
             log.error("sign-in could not be verified: \(error)")
+            return .unverified(syncState.lastError ?? "")
         }
     }
 
@@ -1907,6 +1938,11 @@ final class AppModel {
         await tokens.clear()
         typingSweep?.cancel()
         typingSweep = nil
+        // Before the store is emptied, not after. A sync or a send still in
+        // flight under the old token would otherwise write the old account
+        // back into the rows below once they are gone.
+        await sync.stop()
+        await sends.stop()
 
         try? await store.pendingReactions.removeAll()
         let rows = (try? await store.conversations.list(limit: 5000)) ?? []
@@ -1917,13 +1953,10 @@ final class AppModel {
         UserDefaults.standard.removeObject(forKey: Self.currentUserKey)
         await previews.clear()
         // The queue went with the conversations, so its files go too. An unsent
-        // photo belongs to the session that picked it.
+        // photo belongs to the session that picked it. And the pictures: a
+        // month of somebody else's photographs is not for the next account.
         await MediaVault.shared.removeAll()
-
-        // The auth sheet's cookies are the system's, not ours, and nothing here
-        // can delete them. What we can do is refuse to use them next time. See
-        // `OAuth.forgetsWebSession`.
-        OAuth.forgetsWebSession = true
+        await ImageLoader.shared.clear()
 
         session = .signedOut
         currentUser = nil
@@ -1935,6 +1968,8 @@ final class AppModel {
         typingUserIDs = [:]
         openConversationID = nil
         totalUnread = 0
+        pendingRequests = PendingRequests()
+        requestedGroups = []
         syncState = SyncState(isOnline: realtime.reachability != .offline)
         attemptedHeals = []
         await sync.forgetTips()
@@ -2049,6 +2084,7 @@ final class AppModel {
                 guard let self else { return }
                 self.syncState.isOnline = reachability != .offline
                 guard reachability == .online, self.isSignedIn else { continue }
+                if self.currentUser == nil { await self.refreshIdentity() }
                 // The queue first: a message the user wrote while offline should
                 // beat a refresh of things other people wrote.
                 await sends.connectivityDidReturn()
@@ -2071,6 +2107,27 @@ final class AppModel {
         case .reactionsStale:
             reactionsRequestedTo = nil
             refreshReactionsIfDeeper()
+        case .credentialsRejected:
+            await credentialsRejected()
+        }
+    }
+
+    /// The server said the token is no good. Confirmed once more against the
+    /// one endpoint that answers nothing else, because a single 401 from a
+    /// deep call can be about the thing asked for rather than about us; two
+    /// in a row is the token, and a token the server has revoked is not
+    /// coming back. Signing out is the only honest state, and the reason
+    /// goes on the screen that follows.
+    private func credentialsRejected() async {
+        guard isSignedIn else { return }
+        do {
+            _ = try await api.me()
+        } catch let error as APIError where error.status == 401 || error.status == 403 {
+            log.error("token revoked; signing out")
+            await signOut()
+            signedOutReason = "GroupMe signed this device out. Sign in again to continue."
+        } catch {
+            // Could not confirm. Leave it; the next sync will ask again.
         }
     }
 

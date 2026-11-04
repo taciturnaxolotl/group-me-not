@@ -3,74 +3,36 @@ import Foundation
 import UIKit
 import os
 
-/// Sign in through GroupMe's own OAuth page.
+/// Sign in through GroupMe's own web client.
 ///
-/// GroupMe offers two flows. The code flow needs a client secret, which a
-/// shipped app cannot keep, so this uses the implicit flow: the authorize page
-/// redirects straight back to our custom scheme with the token in the query.
-///
-/// The Android app does none of this. It posts a username and password to
-/// `/access_tokens` with a hardcoded salt, which means it handles the password
-/// itself. Handing that to GroupMe's own web page is both less code and less
-/// responsibility.
+/// Not OAuth proper, whatever the name says. GroupMe's code flow needs a client
+/// secret a shipped app cannot keep, and their implicit flow needs an app
+/// registration an Apple-registered account cannot obtain. What works is the
+/// hand-off their desktop app uses: the web client runs the normal sign-in and
+/// then redirects to `groupme://oauth/callback#access_token=…`, and an
+/// `ASWebAuthenticationSession` on that scheme catches it. No client id, no
+/// secret, no password seen by this app.
 nonisolated enum OAuth {
-    /// Fill this in after registering the app. See `isConfigured` below.
-    ///
-    /// 1. Sign in at https://dev.groupme.com/applications and choose "Create Application".
-    /// 2. Set the Callback URL to exactly `groupmenot://oauth`.
-    /// 3. Copy the Client ID it gives you into `clientID`.
-    ///
-    /// No secret is needed, and none should ever be embedded here.
-    static let clientID = ""
-
-    static let callbackScheme = "groupmenot"
-    private static let authorizeURL = "https://oauth.groupme.com/oauth/authorize"
-
-    /// False until a client id is filled in. The sign-in screen uses this to
-    /// hide the button rather than offer one that cannot work.
-    static var isConfigured: Bool { !clientID.isEmpty }
-
-    private static let forgetKey = "oauth.forgetsWebSession"
-
-    /// Whether the next sign-in should run in a browser that remembers nothing.
-    ///
-    /// The auth sheet shares Safari's cookies by design: that is what turns a
-    /// second sign-in into one tap instead of a password and a second factor.
-    /// It is also state this app cannot reach — the jar belongs to the system,
-    /// and there is no API that lets an app empty it — so a sign-out that only
-    /// clears our own keychain leaves GroupMe still signed in behind that
-    /// sheet, and the next sign-in walks straight back into the same account
-    /// with no way to choose another.
-    ///
-    /// So signing out sets this. The sheet that follows is ephemeral, keeps
-    /// nothing, and asks who you are. Sharing resumes once somebody has
-    /// answered, which is the point at which convenience is worth more than a
-    /// clean slate again.
-    static var forgetsWebSession: Bool {
-        get { UserDefaults.standard.bool(forKey: forgetKey) }
-        set { UserDefaults.standard.set(newValue, forKey: forgetKey) }
-    }
-
     nonisolated enum Failure: LocalizedError {
-        case notConfigured
         case cancelled
         case noToken
         /// The session ended on a `groupme://` link that was not the sign-in
         /// callback. See `signIn(with:)`.
         case divertedToApp
+        case noWindow
         case session(String)
         case stateMismatch
 
         var errorDescription: String? {
             switch self {
-            case .notConfigured:
-                "This build has no GroupMe client ID, so it cannot use OAuth. Paste a token instead."
             case .cancelled:
                 nil  // The user closed the sheet; not worth a message.
             case .noToken:
                 "GroupMe finished sign-in without returning a token."
             case .divertedToApp:
                 "That was GroupMe's own \"Open app\" link, which cannot finish signing in here. Use Continue instead."
+            case .noWindow:
+                "There is no window to present sign-in in."
             case .stateMismatch:
                 "That sign-in response did not match this request."
             case .session(let detail):
@@ -78,47 +40,6 @@ nonisolated enum OAuth {
             }
         }
     }
-
-    /// Presents the GroupMe sign-in page and resolves to an access token.
-    ///
-    /// Not ephemeral on purpose: if the user is already signed in to GroupMe in
-    /// Safari, this is a single tap rather than another password prompt.
-    @MainActor
-    static func signIn() async throws -> String {
-        guard isConfigured else { throw Failure.notConfigured }
-
-        var components = URLComponents(string: authorizeURL)!
-        components.queryItems = [URLQueryItem(name: "client_id", value: clientID)]
-        let url = components.url!
-
-        guard let anchor = PresentationAnchor.resolve() else {
-            throw Failure.session("There is no window to present sign-in in.")
-        }
-        return try await withCheckedThrowingContinuation { continuation in
-            let session = ASWebAuthenticationSession(
-                url: url,
-                callbackURLScheme: callbackScheme
-            ) { callback, error in
-                if let error {
-                    let isCancel = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
-                    continuation.resume(throwing: isCancel ? Failure.cancelled
-                                                           : Failure.session(error.localizedDescription))
-                    return
-                }
-                guard let callback, let token = token(from: callback) else {
-                    continuation.resume(throwing: Failure.noToken)
-                    return
-                }
-                continuation.resume(returning: token)
-            }
-            session.presentationContextProvider = anchor
-            session.prefersEphemeralWebBrowserSession = forgetsWebSession
-            if !session.start() {
-                continuation.resume(throwing: Failure.session("Could not open the GroupMe sign-in page."))
-            }
-        }
-    }
-
 
     // MARK: - Desktop handoff
 
@@ -153,9 +74,6 @@ nonisolated enum OAuth {
     /// This matters because it is the only route an Apple-registered account has.
     /// The Android app offers Google and Microsoft only, and dev.groupme.com
     /// takes an email and password, so neither can authenticate one. This can.
-    ///
-    /// No client id and no app registration: the mechanism is GroupMe's, and we
-    /// are asking their page to do what it already does.
     @MainActor
     static func signIn(with provider: Provider) async throws -> String {
         // Echoed back untouched, so it is worth checking. A response carrying
@@ -170,48 +88,16 @@ nonisolated enum OAuth {
             URLQueryItem(name: "intent", value: "signin"),
         ]
 
-        guard let anchor = PresentationAnchor.resolve() else {
-            throw Failure.session("There is no window to present sign-in in.")
-        }
+        guard let anchor = PresentationAnchor.resolve() else { throw Failure.noWindow }
+        let callback = try await present(components.url!, from: anchor)
 
-        let callback: URL = try await withCheckedThrowingContinuation { continuation in
-            let session = ASWebAuthenticationSession(
-                url: components.url!,
-                callbackURLScheme: handoffScheme
-            ) { callback, error in
-                if let error {
-                    let isCancel = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
-                    continuation.resume(throwing: isCancel ? Failure.cancelled
-                                                           : Failure.session(error.localizedDescription))
-                    return
-                }
-                guard let callback else {
-                    continuation.resume(throwing: Failure.noToken)
-                    return
-                }
-                continuation.resume(returning: callback)
-            }
-            session.presentationContextProvider = anchor
-            // Not ephemeral on purpose, unless a sign-out asked for it: if the
-            // user is already signed in to GroupMe in Safari this is a single
-            // tap rather than another password prompt.
-            session.prefersEphemeralWebBrowserSession = forgetsWebSession
-            if !session.start() {
-                continuation.resume(throwing: Failure.session("Could not open the GroupMe sign-in page."))
-            }
-        }
-
-        // Reject a state that came back *different*, but tolerate one that did
-        // not come back at all. The web client only echoes it when it captured
-        // it on the way in, and a missing echo is not evidence of anything:
-        // ASWebAuthenticationSession already guarantees this callback belongs to
-        // the session we started. A wrong one is worth refusing; a silent one is
-        // worth noting.
-        if let returned = value(named: "state", in: callback) {
-            guard returned == state else { throw Failure.stateMismatch }
-        } else {
+        // A callback with the wrong state is somebody else's; one with no
+        // state is one the page never armed, and the armed page is the only
+        // one that ends in a token worth having. Either way, refused.
+        guard value(named: "state", in: callback) == state else {
             Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "auth")
-                .notice("sign-in callback carried no state; parameters were \(parameterNames(of: callback).joined(separator: ", "), privacy: .public)")
+                .notice("sign-in callback state mismatch; parameters were \(parameterNames(of: callback).joined(separator: ", "), privacy: .public)")
+            throw Failure.stateMismatch
         }
         // Every `groupme://` link on that page ends the session, not just the
         // one we are waiting for, because the callback scheme is what
@@ -227,10 +113,90 @@ nonisolated enum OAuth {
         guard let token = token(from: callback) else {
             throw isOAuthCallback(callback) ? Failure.noToken : Failure.divertedToApp
         }
-        // Somebody has now said who they are, so the next sheet may remember
-        // them again.
-        forgetsWebSession = false
         return token
+    }
+
+    /// The sheet on screen, if any, so a second tap can take it down.
+    @MainActor private static var current: ASWebAuthenticationSession?
+
+    /// Give up on the sign-in in progress. The session's completion handler
+    /// reports the cancel, which is what resumes whoever was waiting.
+    @MainActor
+    static func cancel() {
+        current?.cancel()
+    }
+
+    /// Run the page in a system sheet and return the `groupme://` URL it ended
+    /// on.
+    ///
+    /// Always a private session. The shared one would let a second sign-in be
+    /// one tap, by reusing Safari's cookies, but those cookies belong to
+    /// whoever signed in last and nothing in this app can clear them; after a
+    /// sign-out every shared sheet walked straight back into the account that
+    /// had just left. A sheet that remembers nothing asks who you are, every
+    /// time, which is the only answer that is always right.
+    @MainActor
+    private static func present(_ url: URL, from anchor: PresentationAnchor) async throws -> URL {
+        try await withCheckedThrowingContinuation { continuation in
+            // The framework reports a session that cannot start through its
+            // completion handler as well as through `start()`, so either
+            // arrival may be the second one. One of them resumes; the other
+            // is dropped.
+            let once = ResumeOnce(continuation)
+            let session = ASWebAuthenticationSession(url: url, callbackURLScheme: handoffScheme) { callback, error in
+                current = nil
+                if let error {
+                    once.resume(throwing: failure(from: error))
+                } else if let callback {
+                    once.resume(returning: callback)
+                } else {
+                    once.resume(throwing: Failure.noToken)
+                }
+            }
+            session.presentationContextProvider = anchor
+            session.prefersEphemeralWebBrowserSession = true
+            current = session
+            if !session.start() {
+                current = nil
+                once.resume(throwing: Failure.session("Could not open the GroupMe sign-in page."))
+            }
+        }
+    }
+
+    private static func failure(from error: Error) -> Failure {
+        switch (error as? ASWebAuthenticationSessionError)?.code {
+        case .canceledLogin: .cancelled
+        case .presentationContextNotProvided, .presentationContextInvalid: .noWindow
+        default: .session(error.localizedDescription)
+        }
+    }
+
+    /// A continuation that resumes at most once. The checked kind traps on a
+    /// second resume, and the two places that might do it cannot see each
+    /// other.
+    private final class ResumeOnce: @unchecked Sendable {
+        private var continuation: CheckedContinuation<URL, Error>?
+        private let lock = NSLock()
+
+        init(_ continuation: CheckedContinuation<URL, Error>) {
+            self.continuation = continuation
+        }
+
+        func resume(returning value: URL) {
+            take()?.resume(returning: value)
+        }
+
+        func resume(throwing error: Error) {
+            take()?.resume(throwing: error)
+        }
+
+        private func take() -> CheckedContinuation<URL, Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            let taken = continuation
+            continuation = nil
+            return taken
+        }
     }
 
     /// The parameter names a callback carried, for diagnosing a flow that came
@@ -265,8 +231,8 @@ nonisolated enum OAuth {
         return parsed.queryItems?.first(where: { $0.name == name })?.value.flatMap { $0.isEmpty ? nil : $0 }
     }
 
-    /// GroupMe returns `groupmenot://oauth?access_token=…`. Some OAuth servers
-    /// use the fragment instead, so check both rather than assume.
+    /// The handoff puts the token in the fragment. The query is checked too,
+    /// since reading both costs nothing and the page is not ours.
     static func token(from url: URL) -> String? { value(named: "access_token", in: url) }
 
     /// Whether a callback is the one the handoff promises, rather than some

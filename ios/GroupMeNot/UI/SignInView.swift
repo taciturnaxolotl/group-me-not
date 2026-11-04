@@ -16,7 +16,7 @@ struct SignInView: View {
     @State private var authorising: OAuth.Provider?
     @State private var isChoosingProvider = false
     @State private var isEmailPresented = false
-    @State private var oauthError: String?
+    @State private var signInError: String?
 
     var body: some View {
         ZStack {
@@ -36,6 +36,7 @@ struct SignInView: View {
                 Button(provider.title) { signIn(with: provider) }
             }
             Button("Email & Password") { isEmailPresented = true }
+            Button("Cancel", role: .cancel) {}
         }
         .sheet(isPresented: $isEmailPresented) { EmailSignInView() }
     }
@@ -67,10 +68,14 @@ struct SignInView: View {
     /// So the page asks only whether you want in, and every way — the four
     /// providers and email and password — arrives in one list once you have
     /// said yes, none of them launching until it is chosen.
+    ///
+    /// Never disabled. While a provider is being waited on the same button
+    /// gives up on it, because a sheet the system dropped would otherwise
+    /// leave the only control on the screen dead until relaunch.
     private var actions: some View {
         VStack(spacing: 12) {
             Button {
-                isChoosingProvider = true
+                if isBusy { OAuth.cancel() } else { isChoosingProvider = true }
             } label: {
                 HStack(spacing: 8) {
                     if isBusy {
@@ -83,7 +88,6 @@ struct SignInView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(isBusy)
 
             if let provider = authorising {
                 Label("Waiting for \(provider.rawValue.capitalized)…", systemImage: "hourglass")
@@ -91,7 +95,7 @@ struct SignInView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let error = oauthError {
+            if let error = signInError ?? model.signedOutReason {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.footnote)
                     .foregroundStyle(.orange)
@@ -111,15 +115,17 @@ struct SignInView: View {
     private func signIn(with provider: OAuth.Provider) {
         guard !isBusy else { return }
         authorising = provider
-        oauthError = nil
+        signInError = nil
         Task {
             do {
                 let token = try await OAuth.signIn(with: provider)
-                await model.signIn(token: token)
+                if case .refused(let reason) = await model.signIn(token: token) {
+                    signInError = reason
+                }
             } catch OAuth.Failure.cancelled {
                 // They closed the sheet. Say nothing.
             } catch {
-                oauthError = error.localizedDescription
+                signInError = error.localizedDescription
             }
             authorising = nil
         }
