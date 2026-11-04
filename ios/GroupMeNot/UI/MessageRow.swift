@@ -140,6 +140,20 @@ nonisolated struct MessageDisplay: Identifiable, Hashable, Sendable {
     var isEmojiOnly: Bool {
         text.isEmojiOnly && (message.attachments ?? []).allSatisfy { $0.type == "mentions" }
     }
+
+    /// This message as it is drawn away from the transcript: in a chain, or
+    /// hovering over the composer while it is answered.
+    ///
+    /// The quote and the reply count are about where the message sits among
+    /// the others. Lifted out, it answers the one above it or is the one being
+    /// answered, and saying so on it is the furniture the lifting was meant to
+    /// remove.
+    func liftedOutOfTranscript() -> MessageDisplay {
+        var lifted = self
+        lifted.reply = nil
+        lifted.replyCount = 0
+        return lifted
+    }
 }
 
 // MARK: - Row
@@ -152,8 +166,6 @@ nonisolated struct MessageDisplay: Identifiable, Hashable, Sendable {
 /// everything else is a bubble.
 struct MessageRow: View {
     let item: MessageDisplay
-    /// The glyphs the long-press bar offers.
-    var catalog: ReactionCatalog = .default
     /// Link previews, or nil where there is no model to ask.
     var previews: LinkPreviewService?
     /// Called with the tapped glyph. The model decides whether that adds,
@@ -204,7 +216,6 @@ struct MessageRow: View {
         } else {
             BubbleRow(
                 item: item,
-                catalog: catalog,
                 previews: previews,
                 onReact: onReact,
                 onRetry: onRetry,
@@ -264,7 +275,6 @@ nonisolated struct ReplyPreview: Hashable, Sendable {
 
 private struct BubbleRow: View {
     let item: MessageDisplay
-    let catalog: ReactionCatalog
     let previews: LinkPreviewService?
     let onReact: (String) -> Void
     let onRetry: () -> Void

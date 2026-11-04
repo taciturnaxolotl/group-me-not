@@ -395,36 +395,8 @@ struct ChatView: View {
     /// See ``shownRows``.
     @State private var isSettled = false
 
-    /// How tall the hovering reply bubble is; see ``replyHover(_:)``.
-    @State private var replyHoverHeight: CGFloat = 0
-
-    /// Past this a hovering reply scrolls instead of climbing the screen. The
-    /// point is recognising what was tapped, and a third of the view is about
-    /// what the keyboard leaves free for it.
-    ///
-    /// Measured off the whole view rather than off the room above the composer,
-    /// because the hover is *part* of that room: sized against what is left it
-    /// would shrink the very thing it was measured from, and settle somewhere
-    /// smaller than either answer.
-    private var replyHoverLimit: CGFloat {
-        viewHeight > 0 ? viewHeight * 0.34 : Self.replyHoverBeforeMeasuring
-    }
-
-    /// What the slot is worth for the frame before the view has been measured.
-    /// Not a floor: a landscape phone has a third of very little, and holding
-    /// the portrait number there would stand the hover over the conversation it
-    /// came from.
-    private static let replyHoverBeforeMeasuring: CGFloat = 190
-
-    /// And the photograph inside it, leaving room for a name above and a
-    /// caption below. A picture drawn at transcript height is most of a screen,
-    /// and the slot would show the reader half of it.
-    ///
-    /// Floored, because a slot too short to hold a picture and its chrome is
-    /// better scrolled than filled with a stamp.
-    private var replyHoverPicture: CGFloat { max(80, replyHoverLimit - 90) }
-
-    /// The height of the whole view, which the hover is measured against.
+    /// The height of the whole view, which a hovering reply is sized against;
+    /// see ``ReplyHover``.
     @State private var viewHeight: CGFloat = 0
 
     /// How much of the window the first frames draw.
@@ -525,8 +497,10 @@ struct ChatView: View {
     /// The message a Delete is being confirmed for.
     @State private var deleteTarget: MessagePress?
     @State private var editDraft = ""
-    /// The message being answered, if the composer is in reply mode.
-    @State private var replyingTo: Message?
+    /// The message being answered, if the composer is in reply mode. The row
+    /// as the transcript drew it, so the hover is that bubble and not a second
+    /// drawing of one.
+    @State private var replyingTo: MessageDisplay?
 
     @State private var isAttachmentPickerPresented = false
     @State private var isNewPollPresented = false
@@ -632,7 +606,6 @@ struct ChatView: View {
                     items: threadItems(rootedAt: focus.rootID),
                     anchorY: focus.anchorY,
                     conversation: current,
-                    catalog: model.reactionCatalog,
                     canPost: model.canPostInOpenConversation,
                     onReact: { item, glyph in react(glyph, on: item) },
                     quickGlyphs: model.reactionCatalog.quick,
@@ -954,7 +927,6 @@ struct ChatView: View {
     private func messageRow(_ item: MessageDisplay) -> some View {
         MessageRow(
             item: item,
-            catalog: model.reactionCatalog,
             previews: model.previews,
             onReact: { glyph in react(glyph, on: item) },
             onRetry: { retry(item) },
@@ -979,7 +951,7 @@ struct ChatView: View {
             isHeld: pressed?.item.id == item.id,
             onOpenConversation: onOpenConversation,
             onReply: {
-                replyingTo = item.message
+                replyingTo = item
                 composerFocused = true
             },
             onOpenThread: { frame in
@@ -1028,10 +1000,8 @@ struct ChatView: View {
             currentUser: model.currentUser,
             quoted: model.quotedParents, members: model.members
         ).compactMap { row in
-            guard case .message(var item) = row else { return nil }
-            item.reply = nil
-            item.replyCount = 0
-            return item
+            guard case .message(let item) = row else { return nil }
+            return item.liftedOutOfTranscript()
         }
     }
 
@@ -1081,7 +1051,7 @@ struct ChatView: View {
             actions.append(.init("Reply", symbol: "arrowshape.turn.up.left") {
                 pressed = nil
                 thread = nil
-                replyingTo = item.message
+                replyingTo = item
                 composerFocused = true
             })
         }
@@ -1294,7 +1264,10 @@ struct ChatView: View {
     private var composer: some View {
         VStack(alignment: .leading, spacing: 0) {
             SwiftUI.Group {
-                if let replyingTo { replyHover(replyingTo) }
+                if let replyingTo {
+                    ReplyHover(item: replyingTo, viewHeight: viewHeight, previews: model.previews)
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                }
             }
             // Scoped to the hover. An implicit animation here would reach the
             // `TextField` below and animate the words away after a send; see
@@ -1583,74 +1556,6 @@ struct ChatView: View {
         .animation(.easeOut(duration: 0.18), value: replyingTo == nil)
     }
 
-    /// The message being answered, hovering over the transcript just above the
-    /// bar, drawn as the message it is.
-    ///
-    /// Messages does this and it is plainly right: a reply is aimed at
-    /// something the reader can already see, so showing them a *smaller,
-    /// greyer, differently-shaped* copy of it is asking them to match two
-    /// pictures of the same thing. The bubble they tapped comes down to the
-    /// composer unchanged instead.
-    ///
-    /// Outside the field rather than inside it. In the field it was another row
-    /// of the same control, which is what made a quote need furniture to be
-    /// told apart from the words answering it; up here it is a message sitting
-    /// over the transcript, and nothing has to say so.
-    @ViewBuilder private func replyHover(_ message: Message) -> some View {
-        if let item = replyHoverItem(message) {
-            SwiftUI.Group {
-                ScrollView {
-                    MessageRow(item: item, catalog: model.reactionCatalog,
-                               previews: model.previews, showsFace: false)
-                        // A picture of the message, not the message. Every
-                        // gesture it carries belongs to the transcript.
-                        .allowsHitTesting(false)
-                        // Small enough that the whole message fits the slot
-                        // below. At transcript height a photo is twice what the
-                        // hover can show, so the reader answers the top half of
-                        // a picture with the rest of it cut off.
-                        .environment(\.quotedPictureHeight, replyHoverPicture)
-                        .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) {
-                            replyHoverHeight = $0
-                        }
-                }
-                .scrollBounceBehavior(.basedOnSize)
-                // Exactly as tall as the bubble, up to the cap. A scroll view
-                // takes every point it is offered, so left to itself it stood
-                // the message a screenful above the field it belongs to.
-                .frame(height: min(max(replyHoverHeight, 1), replyHoverLimit))
-            }
-            .padding(.horizontal, 2)
-            // Close, but not touching. The bubble and the field it is about to
-            // be answered in are one arrangement; a hair of air keeps them from
-            // reading as one object.
-            .padding(.bottom, 12)
-            .transition(.opacity.combined(with: .move(edge: .bottom)))
-            .accessibilityElement(children: .contain)
-        }
-    }
-
-    /// The message run through the same builder the transcript uses, so the
-    /// bubble above the composer is the bubble from the conversation rather
-    /// than a second drawing of one.
-    private func replyHoverItem(_ message: Message) -> MessageDisplay? {
-        Transcript.rows(
-            messages: [message], outbox: [], currentUser: model.currentUser,
-            quoted: model.quotedParents, members: model.members
-        ).compactMap { row -> MessageDisplay? in
-            guard case .message(var item) = row else { return nil }
-            // Its own quote and its own reply count belong to the transcript;
-            // here they are a message inside a message.
-            item.reply = nil
-            item.replyCount = 0
-            // No timestamp either: the footer only draws on the tail of a run,
-            // and a clock under a message being answered is answering a
-            // question nobody asked while standing on the composer.
-            item.isRunTail = false
-            return item
-        }.first
-    }
-
     /// The photos and videos waiting to go with this message.
     ///
     /// Horizontal and scrolling, so picking eight makes the row longer rather
@@ -1751,7 +1656,7 @@ struct ChatView: View {
         // Cleared before the await, like the text: the queued row is what the
         // transcript draws from here on, and leaving the tray populated would
         // show the same photo twice.
-        let parent = replyingTo
+        let parent = replyingTo?.message
         // Located against the trimmed text, which is what actually goes out. A
         // locus measured against the untrimmed draft would be off by however
         // much leading whitespace was typed.

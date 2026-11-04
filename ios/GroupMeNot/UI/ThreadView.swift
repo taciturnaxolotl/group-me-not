@@ -34,7 +34,6 @@ struct ThreadView: View {
     /// so a chain that named nothing left the reader in a room with no sign on
     /// the door.
     var conversation: ConversationRow?
-    var catalog: ReactionCatalog = .default
     /// Whether this conversation takes messages at all.
     var canPost: Bool = true
     var onReact: (MessageDisplay, String) -> Void = { _, _ in }
@@ -63,9 +62,6 @@ struct ThreadView: View {
     /// Drives the only thing that animates on the way in: the scrim and the
     /// chain. See ``body``.
     @State private var shown = false
-    /// How tall the chain actually is, so the scroll view can be exactly that
-    /// and no taller. See ``chain(in:)``.
-    @State private var chainHeight: CGFloat = 0
     @State private var pressed: MessagePress?
     @State private var emojiTarget: MessagePress?
     @State private var rosterTarget: MessageDisplay?
@@ -161,17 +157,25 @@ struct ThreadView: View {
     /// after it arrives from just above where it belongs, so the replies read
     /// as collecting around the message they answer rather than as a list that
     /// was always there.
-    /// The scroll view is sized to its content and the gap above it is a
-    /// non-hit-testing spacer, which is what keeps the background tappable. A
-    /// scroll view takes every touch inside its frame, empty or not, so one
-    /// stretched over the screen is a lid on the scrim: the way out stops
-    /// working everywhere except the few points the chain does not cover.
+    ///
+    /// Unless it does not fit there. A chain too long for the room under the
+    /// tapped row climbs until it does, as far as the top of the screen, and
+    /// only a chain too long for the whole screen scrolls. The alternative was
+    /// a conversation scrolling inside the bottom half of the screen with
+    /// nothing in the top half, which read as the chain being cut in two.
+    ///
+    /// The gap above is a spacer the chain outranks: it takes what the chain
+    /// leaves, up to where the tap was and never less than the floor. It does
+    /// not hit-test, which keeps the scrim under it tappable; the chain is
+    /// exactly as tall as itself for the same reason, since a scroll view takes
+    /// every touch inside its frame and one stretched over the screen would be
+    /// a lid on the way out.
     private func chain(in geo: GeometryProxy) -> some View {
         VStack(spacing: 0) {
-            Color.clear
-                .frame(height: topInset(in: geo))
+            Spacer(minLength: Self.floor)
+                .frame(maxHeight: topInset(in: geo))
                 .allowsHitTesting(false)
-            ScrollView {
+            ScrollsWhenTall {
                 VStack(spacing: 0) {
                     ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                         row(item)
@@ -185,13 +189,10 @@ struct ThreadView: View {
                 // read as a different screen rather than the same messages.
                 .padding(.horizontal, 10)
                 .padding(.bottom, 8)
-                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { chainHeight = $0 }
             }
-            .frame(maxHeight: chainHeight > 0 ? chainHeight : nil, alignment: .top)
-            .scrollBounceBehavior(.basedOnSize)
-            .defaultScrollAnchor(.top)
-            Spacer(minLength: 0)
+            .layoutPriority(1)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     /// The chat's title, and a way out where the chat keeps its bar buttons.
@@ -219,7 +220,6 @@ struct ThreadView: View {
     private func row(_ item: MessageDisplay) -> some View {
         MessageRow(
             item: item,
-            catalog: catalog,
             onReact: { onReact(item, $0) },
             onRetry: { onRetry(item) },
             onDiscard: { onDiscard(item) },
@@ -279,19 +279,21 @@ struct ThreadView: View {
         .animation(.easeOut(duration: 0.16), value: pressed == nil)
     }
 
-    /// Where the first message goes: where it already was, kept off the
-    /// toolbar and out of the bottom half of the screen, since a chain that
-    /// opens below the fold has nowhere to put its replies.
+    /// Where the first message goes when the chain fits under it: where it
+    /// already was, kept off the toolbar and out of the bottom half of the
+    /// screen, since a chain that opens below the fold has nowhere to put its
+    /// replies.
     private func topInset(in geo: GeometryProxy) -> CGFloat {
         // `anchorY` was measured in the window; this stack begins wherever it
         // begins, and asking is safer than assuming a status bar's worth.
         let wanted = anchorY - geo.frame(in: .global).minY
-        // The bar is the navigation stack's now, and this space already starts
-        // underneath it.
-        let floor: CGFloat = 8
-        let ceiling = max(floor, geo.size.height * 0.42)
-        return min(max(wanted, floor), ceiling)
+        let ceiling = max(Self.floor, geo.size.height * 0.42)
+        return min(max(wanted, Self.floor), ceiling)
     }
+
+    /// The least room left above the chain. Small: the bar is the navigation
+    /// stack's now, and this space already starts underneath it.
+    private static let floor: CGFloat = 8
 
     /// Its own, rather than borrowing the chat's. Pointing the composer
     /// downstairs at a chain it could not see meant typing in one place and
