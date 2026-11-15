@@ -65,26 +65,28 @@ enum PhotoLibrary {
         remember(attachments)
     }
 
-    /// A private copy of the asset with an extension Photos recognises.
-    ///
-    /// Always a copy, even for a `file://` URL into the vault, because the
-    /// library is told to move the file it is given and the vault's copy is
-    /// not ours to give away.
+    /// A private copy of the asset, streamed to disk so a long video never sits in memory.
+    /// Also copies `file://` vault URLs, which Photos must not be allowed to move.
     private static func download(_ url: URL, as kind: PHAssetResourceType) async throws -> URL {
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let (file, response) = try await URLSession.shared.download(from: url)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            try? FileManager.default.removeItem(at: file)
             throw SaveError.download
         }
-        // From the MIME type, not the path: a GroupMe URL ends in a hash
-        // (`1024x768.jpeg.3f9a...`), and Photos would read that as the type.
-        let fallback = kind == .video ? "mp4" : "jpeg"
-        let ext = response.mimeType
-            .flatMap { UTType(mimeType: $0)?.preferredFilenameExtension } ?? fallback
         let destination = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension(ext)
-        try data.write(to: destination)
+            .appendingPathExtension(fileExtension(for: response.mimeType, as: kind))
+        try FileManager.default.moveItem(at: file, to: destination)
         return destination
+    }
+
+    /// From the MIME type, since GroupMe paths end in a hash; non-media types fall back.
+    private static func fileExtension(for mimeType: String?, as kind: PHAssetResourceType) -> String {
+        let expected: UTType = kind == .video ? .movie : .image
+        guard let type = mimeType.flatMap({ UTType(mimeType: $0) }), type.conforms(to: expected),
+              let ext = type.preferredFilenameExtension
+        else { return kind == .video ? "mp4" : "jpeg" }
+        return ext
     }
 }
 

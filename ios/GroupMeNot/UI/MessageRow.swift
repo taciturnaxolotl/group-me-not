@@ -496,7 +496,7 @@ private struct BubbleRow: View {
             // draws them bare, and a caption underneath becomes its own bubble.
             if !pictureAttachments.isEmpty, !item.message.isDeleted {
                 PhotoCascade(pictures: pictureAttachments, isTrailing: isTrailing,
-                             allowsDownload: !item.isPending,
+                             allowsSaving: !item.isOwn,
                              onReply: item.isPending ? nil : onReply)
                     .opacity(item.isPending ? 0.55 : 1)
                     .animation(.easeOut(duration: 0.2), value: item.isPending)
@@ -877,9 +877,8 @@ struct PhotoCascade: View {
     let pictures: [Message.Attachment]
     /// Which edge the message hangs off, which decides which way the pile fans.
     let isTrailing: Bool
-    /// Whether the pile offers to save itself. Off for a message still on its
-    /// way out, whose pictures are only on this phone anyway.
-    var allowsDownload = true
+    /// Off for your own messages, whose pictures you already have.
+    var allowsSaving = true
     /// Starts a reply to the message these came in. Nil where replying makes
     /// no sense, and the viewer leaves the button out.
     var onReply: (() -> Void)?
@@ -900,7 +899,8 @@ struct PhotoCascade: View {
             .fullScreenCover(item: $viewing) { item in
                 // The whole run, not the one that was tapped, so a swipe inside
                 // the viewer reaches the others.
-                MediaViewer(attachments: pictures, initialIndex: item.id, onReply: onReply)
+                MediaViewer(attachments: pictures, initialIndex: item.id,
+                            allowsSaving: allowsSaving, onReply: onReply)
             }
     }
 
@@ -952,7 +952,7 @@ struct PhotoCascade: View {
     }
 
     @ViewBuilder private var downloadButton: some View {
-        if allowsDownload, quotedHeight == nil {
+        if allowsSaving, quotedHeight == nil {
             StackDownloadButton(pictures: pictures)
         }
     }

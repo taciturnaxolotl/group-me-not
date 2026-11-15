@@ -14,6 +14,8 @@ struct MediaViewer: View {
     let attachments: [Message.Attachment]
     /// Which one was tapped.
     let initialIndex: Int
+    /// Off for your own pictures, which hides every save action.
+    var allowsSaving = true
     /// Starts a reply to the message the pictures came in. Nil hides the button.
     var onReply: (() -> Void)?
 
@@ -109,7 +111,7 @@ struct MediaViewer: View {
                     },
                     onBack: { withAnimation(.easeInOut(duration: 0.2)) { isShowingGrid = false } },
                     onReply: onReply.map { reply in { close(then: reply) } },
-                    onSave: save(_:))
+                    onSave: gridSave)
                     .transition(.opacity)
             }
         }
@@ -382,8 +384,10 @@ struct MediaViewer: View {
 
     private var titleMenu: some View {
         Menu {
-            Button("Save to Photos", systemImage: "square.and.arrow.down", action: saveCurrent)
-                .disabled(attachment == nil)
+            if allowsSaving {
+                Button("Save to Photos", systemImage: "square.and.arrow.down", action: saveCurrent)
+                    .disabled(attachment == nil)
+            }
             Button("Copy", systemImage: "doc.on.doc", action: copy)
                 .disabled(image == nil)
         } label: {
@@ -418,10 +422,11 @@ struct MediaViewer: View {
             Spacer()
 
             HStack(spacing: 4) {
-                toolbarButton(saveSymbol, label: "Save to Photos",
-                              action: saveCurrent)
-                    .disabled(attachment == nil)
-                    .duplicatePrompt(isPresented: $isConfirmingDuplicate, count: 1) { saveCurrent(force: true) }
+                if allowsSaving {
+                    toolbarButton(saveSymbol, label: "Save to Photos", action: saveCurrent)
+                        .disabled(attachment == nil)
+                        .duplicatePrompt(isPresented: $isConfirmingDuplicate, count: 1) { saveCurrent(force: true) }
+                }
                 shareButton
             }
             .glassEffect(.regular.interactive(), in: .capsule)
@@ -584,6 +589,10 @@ struct MediaViewer: View {
         return false
     }
 
+    private var gridSave: (([Message.Attachment]) async -> Bool)? {
+        allowsSaving ? { await save($0) } : nil
+    }
+
     /// Takes the viewer down before acting, for actions that belong to the
     /// conversation underneath rather than to the picture.
     private func close(then action: @escaping () -> Void) {
@@ -732,7 +741,8 @@ private struct MediaGrid: View {
     let onOpen: (Int) -> Void
     let onBack: () -> Void
     let onReply: (() -> Void)?
-    let onSave: ([Message.Attachment]) async -> Bool
+    /// Nil hides saving, and with it selection, which exists only to save.
+    let onSave: (([Message.Attachment]) async -> Bool)?
 
     @State private var isSelecting = false
     @State private var selected: Set<Int> = []
@@ -760,25 +770,29 @@ private struct MediaGrid: View {
         HStack(spacing: 12) {
             glassCircle("chevron.left", label: "Back", action: onBack)
             Spacer()
-            glassCircle(saveSymbol, label: saveLabel, action: save)
-                .disabled(isSaving || (isSelecting && selected.isEmpty))
-                .duplicatePrompt(isPresented: $isConfirmingDuplicate, count: itemsToSave.count) {
-                    save(force: true)
-                }
+            if onSave != nil {
+                glassCircle(saveSymbol, label: saveLabel, action: save)
+                    .disabled(isSaving || (isSelecting && selected.isEmpty))
+                    .duplicatePrompt(isPresented: $isConfirmingDuplicate, count: itemsToSave.count) {
+                        save(force: true)
+                    }
+            }
             if let onReply, !isSelecting {
                 glassCircle("arrowshape.turn.up.left", label: "Reply", action: onReply)
             }
-            Button(isSelecting ? "Done" : "Select") {
-                withAnimation(.snappy(duration: 0.2)) {
-                    isSelecting.toggle()
-                    selected = []
+            if onSave != nil {
+                Button(isSelecting ? "Done" : "Select") {
+                    withAnimation(.snappy(duration: 0.2)) {
+                        isSelecting.toggle()
+                        selected = []
+                    }
                 }
+                .font(.body.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .frame(height: 44)
+                .glassEffect(.regular.interactive(), in: .capsule)
             }
-            .font(.body.weight(.semibold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 16)
-            .frame(height: 44)
-            .glassEffect(.regular.interactive(), in: .capsule)
         }
         .padding(.horizontal, 16)
         .padding(.top, 4)
@@ -860,7 +874,7 @@ private struct MediaGrid: View {
 
     private func save(force: Bool) {
         let items = itemsToSave
-        guard !items.isEmpty else { return }
+        guard let onSave, !items.isEmpty else { return }
         if !force, PhotoLibrary.areAllSaved(items) {
             isConfirmingDuplicate = true
             return
