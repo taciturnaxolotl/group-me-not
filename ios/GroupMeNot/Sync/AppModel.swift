@@ -355,6 +355,7 @@ final class AppModel {
     func backgrounded() {
         heartbeat?.cancel()
         heartbeat = nil
+        Task { [sync] in await sync.cancelInFlight() }
         // The last thing said before going quiet. Without it the status decays
         // to offline on its own, which takes longer and reads as having left
         // rather than as having put the phone down.

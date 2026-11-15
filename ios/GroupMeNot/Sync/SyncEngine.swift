@@ -232,6 +232,14 @@ actor SyncEngine {
         running = nil
     }
 
+    /// Abandon the sync in flight without waiting for it, so the next one starts fresh instead of joining it.
+    ///
+    /// For going into the background: a sync suspended mid-request comes back to dead sockets and
+    /// minutes of retry backoff, and the foreground sync would otherwise sit waiting on it.
+    func cancelInFlight() {
+        running?.cancel()
+    }
+
     /// Stop whatever is in flight and wait until it is gone.
     ///
     /// For signing out. A sync fetching under the old token keeps writing into
