@@ -1,5 +1,6 @@
 import AVFoundation
 import MapKit
+import QuickLook
 import SwiftUI
 
 // MARK: - Location
@@ -657,4 +658,53 @@ struct EventCard: View {
     }
 
     private var ink: Color { isOwn ? .white : .primary }
+}
+
+// MARK: - File
+
+/// A document chip that opens in Quick Look, whose share button is how it reaches Files.
+struct FileCard: View {
+    let attachment: Message.Attachment
+    let isOwn: Bool
+
+    @Environment(AppModel.self) private var model
+    @State private var phase: Phase = .idle
+    @State private var preview: URL?
+
+    private enum Phase { case idle, loading, failed }
+
+    var body: some View {
+        Button(action: open) {
+            AttachmentChip(symbol: symbol, title: title, isOwn: isOwn)
+                .symbolEffect(.pulse, isActive: phase == .loading)
+        }
+        .buttonStyle(.plain)
+        .disabled(phase == .loading || attachment.fileId == nil)
+        .quickLookPreview($preview)
+        .sensoryFeedback(.error, trigger: phase) { _, new in new == .failed }
+        .accessibilityHint("Opens the file")
+    }
+
+    private var symbol: String {
+        phase == .failed ? "exclamationmark.arrow.circlepath" : "doc.fill"
+    }
+
+    private var title: String {
+        if phase == .failed { return "Could not download. Tap to retry." }
+        let name = attachment.fileName ?? attachment.name ?? "File"
+        guard let size = attachment.fileSize else { return name }
+        return "\(name) · \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))"
+    }
+
+    private func open() {
+        phase = .loading
+        Task {
+            do {
+                preview = try await model.downloadFile(attachment)
+                phase = .idle
+            } catch {
+                phase = .failed
+            }
+        }
+    }
 }

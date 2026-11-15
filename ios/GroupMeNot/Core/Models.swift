@@ -625,6 +625,9 @@ nonisolated struct Message: Codable, Identifiable, Hashable, Sendable {
         var previewUrl: String?
         var blurHash: String?
         var fileId: String?
+        /// On a `file`, when the sender's client included it; older messages may not.
+        var fileName: String?
+        var fileSize: Int?
         var name: String?
         var lat: String?
         var lng: String?

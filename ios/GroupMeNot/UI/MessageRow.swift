@@ -1255,7 +1255,7 @@ struct AttachmentChipFor: View {
         case "location":
             LocationCard(attachment: attachment, isOwn: isOwn)
         case "file":
-            AttachmentChip(symbol: "doc.fill", title: attachment.name ?? "File", isOwn: isOwn)
+            FileCard(attachment: attachment, isOwn: isOwn)
         case "audio":
             VoiceNote(attachment: attachment, isOwn: isOwn)
         case "poll":

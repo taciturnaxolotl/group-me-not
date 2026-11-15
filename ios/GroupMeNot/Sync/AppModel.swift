@@ -152,6 +152,9 @@ final class AppModel {
     /// the UI may talk to directly.
     let previews: LinkPreviewService
 
+    /// Documents opened from the transcript, kept until sign-out or the OS purges them.
+    private let files: FileService
+
     // MARK: - The machinery
 
     let store: Store
@@ -234,6 +237,7 @@ final class AppModel {
         self.store = resolved
         self.tokens = tokens
         self.previews = LinkPreviewService(tokenProvider: provider)
+        self.files = FileService(tokenProvider: provider)
         self.client = client
         self.api = api
         self.sends = outbox
@@ -1014,6 +1018,16 @@ final class AppModel {
             optionIDs, in: pollID, groupID: groupID, multiple: multiple)
         else { return }
         polls[pollID] = updated
+    }
+
+    // MARK: - Files
+
+    /// A local copy of a `file` attachment in the open conversation, for Quick Look.
+    func downloadFile(_ attachment: Message.Attachment) async throws -> URL {
+        guard let fileID = attachment.fileId, let conversation = openConversationID
+        else { throw FileService.Failure.unavailable }
+        let restID = try await api.conversationRestID(conversation)
+        return try await files.download(fileID, in: restID, named: attachment.fileName)
     }
 
     // MARK: - Pinned messages
@@ -1952,6 +1966,7 @@ final class AppModel {
         }
         UserDefaults.standard.removeObject(forKey: Self.currentUserKey)
         await previews.clear()
+        files.clear()
         // The queue went with the conversations, so its files go too. An unsent
         // photo belongs to the session that picked it. And the pictures: a
         // month of somebody else's photographs is not for the next account.
