@@ -64,6 +64,10 @@ struct ConversationListView: View {
                         // row with its state and tasks still pointed at the last.
                         ChatView(conversation: row) { path = [.chat($0)] }
                             .id(row.id)
+                    case .message(let row, let messageID):
+                        ChatView(conversation: row, onOpenConversation: { path = [.chat($0)] },
+                                 openingMessageID: messageID)
+                            .id(row.id)
                     case .topics(let group):
                         TopicChooserView(group: group) { path.append(.chat($0)) }
                     }
@@ -129,7 +133,12 @@ struct ConversationListView: View {
                     pinButton(for: entry.row).tint(.orange)
                 }
             }
-            if entries.isEmpty, !query.isEmpty { noMatches }
+            if !query.isEmpty {
+                MessageSearchSection(query: query) { hit in
+                    guard let row = model.conversations.first(where: { $0.id == hit.conversation }) else { return }
+                    path.append(.message(row, hit.message.id))
+                }
+            }
         }
         .listStyle(.plain)
         // The list is small and entirely local, so the animation is honest:
@@ -137,25 +146,6 @@ struct ConversationListView: View {
         .animation(.default, value: entries)
         .animation(.snappy(duration: 0.25), value: settings.pinned)
     }
-
-    /// A local, case- and diacritic-insensitive filter.
-    ///
-    /// Deliberately not a database query. The list tops out in the low
-    /// hundreds, so filtering it in memory is a fraction of a millisecond and
-    /// spares us a round trip to an actor on every keystroke.
-    /// A search that found nothing, drawn *inside* the list rather than instead
-    /// of it.
-    ///
-    /// The title and the search field are rows of this list, and they are the
-    /// only way back out of a search: the field holds the text to clear and the
-    /// button that clears it. Replacing the list on a miss took both off screen
-    /// and left the reader on a page with no exits.
-    private var noMatches: some View {
-        ContentUnavailableView.search(text: query)
-            .listRowSeparator(.hidden)
-            .listRowBackground(Color.clear)
-    }
-
 
     /// Only when there is something in it.
     ///
@@ -628,6 +618,7 @@ struct ConversationListView: View {
 enum Route: Hashable {
     case chat(ConversationRow)
     case topics(ConversationRow)
+    case message(ConversationRow, String)
 }
 
 // MARK: - Row

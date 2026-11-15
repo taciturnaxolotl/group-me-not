@@ -10,7 +10,7 @@ import OSLog
 /// `Message` never needs a migration.
 nonisolated enum Schema {
     /// Bump this and add a `case` to `apply(step:)` for every change.
-    static let version: Int32 = 12
+    static let version: Int32 = 14
 
     private static let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "schema")
 
@@ -59,6 +59,8 @@ nonisolated enum Schema {
         case 10: try db.execute(addGroupProfile)
         case 11: try db.execute(addReadCursorSync)
         case 12: try db.execute(addReactionsAt)
+        case 13: try db.execute(addMessageSearch)
+        case 14: try db.execute(addHistoryComplete)
         default:
             throw SQLError(code: 1, message: "no migration defined for schema \(step)", sql: nil)
         }
@@ -157,6 +159,40 @@ nonisolated enum Schema {
     /// A server page requested before then must not overwrite them.
     private static let addReactionsAt = """
     ALTER TABLE messages ADD COLUMN reactions_at INTEGER NOT NULL DEFAULT 0;
+    """
+
+    // MARK: - Version 13
+
+    /// Full-text search over stored message text, kept in step with `messages` by triggers.
+    private static let addMessageSearch = """
+    CREATE VIRTUAL TABLE messages_fts USING fts5(
+        text, content = 'messages', content_rowid = 'rowid',
+        tokenize = 'unicode61 remove_diacritics 2'
+    );
+
+    CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages WHEN new.text IS NOT NULL BEGIN
+        INSERT INTO messages_fts(rowid, text) VALUES (new.rowid, new.text);
+    END;
+
+    CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages WHEN old.text IS NOT NULL BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
+    END;
+
+    CREATE TRIGGER messages_fts_update AFTER UPDATE OF text ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, text)
+            SELECT 'delete', old.rowid, old.text WHERE old.text IS NOT NULL;
+        INSERT INTO messages_fts(rowid, text)
+            SELECT new.rowid, new.text WHERE new.text IS NOT NULL;
+    END;
+
+    INSERT INTO messages_fts(messages_fts) VALUES ('rebuild');
+    """
+
+    // MARK: - Version 14
+
+    /// Set once a backfill has paged a conversation back to its first message.
+    private static let addHistoryComplete = """
+    ALTER TABLE conversations ADD COLUMN history_complete INTEGER NOT NULL DEFAULT 0;
     """
 
     // MARK: - Version 1

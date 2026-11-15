@@ -215,6 +215,21 @@ actor ConversationStore {
         ) { $0.stringOrNil(0) } ?? nil
     }
 
+    /// Whether this conversation's whole history is stored, back to its first message.
+    func historyComplete(_ conversation: ConversationID) throws -> Bool {
+        try db.queryOne(
+            "SELECT history_complete FROM conversations WHERE key = ?",
+            [SQLValue(conversation.storageKey)]
+        ) { $0.int(0) != 0 } ?? false
+    }
+
+    func markHistoryComplete(_ conversation: ConversationID) throws {
+        try db.run(
+            "UPDATE conversations SET history_complete = 1 WHERE key = ?",
+            [SQLValue(conversation.storageKey)]
+        )
+    }
+
     /// Records that history is now contiguous up to `messageID`.
     ///
     /// Only ever called by the code that did the paging, and only forwards: two

@@ -34,6 +34,8 @@ struct PersonView: View {
     /// shared-groups line names first. You are looking at somebody *here*, so
     /// here is the group worth naming.
     var openedFrom: ConversationID?
+    /// Offers search of the DM with this person; called with the picked message, after the sheet closes.
+    var onOpenMessage: ((String) -> Void)?
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -42,6 +44,7 @@ struct PersonView: View {
     @State private var isAddingToGroup = false
     @State private var isShowingShared = false
     @State private var viewing: PhotoTap?
+    @State private var isSearching = false
 
     private var isMe: Bool { userID == model.currentUser?.id }
 
@@ -81,6 +84,14 @@ struct PersonView: View {
         .scrollBounceBehavior(.basedOnSize)
         .task {
             person = await model.person(userID, named: name, avatarURL: avatarURL)
+        }
+        .sheet(isPresented: $isSearching) {
+            NavigationStack {
+                MessageSearchView(conversation: .direct(otherUserID: userID)) { id in
+                    onOpenMessage?(id)
+                    dismiss()
+                }
+            }
         }
         .sheet(isPresented: $isAddingToGroup) {
             AddToGroupView(userID: userID, name: displayName)
@@ -361,7 +372,18 @@ struct PersonView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.large)
 
-                if let onOpenDirect {
+                if onOpenMessage != nil {
+                    Button {
+                        isSearching = true
+                    } label: {
+                        Label("Search", systemImage: "magnifyingglass")
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                } else if let onOpenDirect {
                     Button {
                         let id = ConversationID.direct(otherUserID: userID)
                         let row = model.conversations.first { $0.id == id }

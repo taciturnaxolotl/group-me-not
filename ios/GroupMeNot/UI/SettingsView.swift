@@ -146,6 +146,9 @@ struct SettingsView: View {
     /// the only part a person needs to be sure of before tapping a red button.
     private var storage: some View {
         Section {
+            @Bindable var settings = settings
+            Toggle("Download Full History", isOn: $settings.downloadsFullHistory)
+
             LabeledContent("On This Phone") {
                 if let cacheSize {
                     Text(cacheSize.formatted(.byteCount(style: .file)))
@@ -170,8 +173,9 @@ struct SettingsView: View {
         } header: {
             Text("Storage")
         } footer: {
-            Text("Removes downloaded messages and previews from this phone. "
-                 + "Your account, and any message still waiting to send, are untouched.")
+            Text("Full history downloads each conversation's older messages while it is open, "
+                 + "so search and old replies work offline. Clearing removes downloaded messages "
+                 + "and previews; your account, and any message still waiting to send, are untouched.")
         }
     }
 

@@ -52,6 +52,7 @@ final class AppSettings {
         static let ownMessageAlignment = "sh.dunkirk.GroupMeNot.settings.ownMessageAlignment"
         static let pinned = "sh.dunkirk.GroupMeNot.settings.pinnedConversations"
         static let sharesPresence = "sh.dunkirk.GroupMeNot.settings.sharesPresence"
+        static let downloadsFullHistory = "sh.dunkirk.GroupMeNot.settings.downloadsFullHistory"
     }
 
     /// Conversations kept at the top of the list, by storage key.
@@ -96,6 +97,14 @@ final class AppSettings {
         }
     }
 
+    /// Whether an open conversation downloads its whole history for search and old replies. On by default.
+    var downloadsFullHistory: Bool {
+        didSet {
+            guard downloadsFullHistory != oldValue else { return }
+            defaults.set(downloadsFullHistory, forKey: Key.downloadsFullHistory)
+        }
+    }
+
     var ownMessageAlignment: OwnMessageAlignment {
         didSet {
             guard ownMessageAlignment != oldValue else { return }
@@ -113,5 +122,6 @@ final class AppSettings {
             .flatMap(OwnMessageAlignment.init(rawValue:)) ?? .sided
         self.pinned = defaults.stringArray(forKey: Key.pinned) ?? []
         self.sharesPresence = defaults.bool(forKey: Key.sharesPresence)
+        self.downloadsFullHistory = defaults.object(forKey: Key.downloadsFullHistory) as? Bool ?? true
     }
 }

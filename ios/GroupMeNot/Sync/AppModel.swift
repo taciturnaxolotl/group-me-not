@@ -123,6 +123,14 @@ final class AppModel {
         }
     }
 
+    /// Whether opening a conversation downloads the rest of its history in the background.
+    var downloadsFullHistory = true {
+        didSet {
+            guard downloadsFullHistory != oldValue, let open = openConversationID else { return }
+            if downloadsFullHistory { startBackfill(open) } else { Task { await backfill.stop() } }
+        }
+    }
+
     /// Network and socket state, for the offline banner.
     let realtime = RealtimeMonitor()
 
@@ -166,6 +174,7 @@ final class AppModel {
     /// photo does, and for the same reasons.
     private let uploads: MediaUploadService
     private let sync: SyncEngine
+    private let backfill: HistoryBackfill
     private let bayeux: BayeuxClient
     private let log = Logger(subsystem: "sh.dunkirk.GroupMeNot", category: "app")
 
@@ -242,6 +251,7 @@ final class AppModel {
         self.api = api
         self.sends = outbox
         self.sync = SyncEngine(api: api, store: resolved, outbox: outbox)
+        self.backfill = HistoryBackfill(api: api, store: resolved)
         self.bayeux = BayeuxClient(tokenProvider: provider)
     }
 
@@ -533,7 +543,16 @@ final class AppModel {
         // caller is a view's `.task`.
         let channels = focusChannels(for: conversation)
         Task { [bayeux] in await bayeux.focus(on: channels) }
-        Task { await self.sync.catchUp(conversation) }
+        Task {
+            await self.sync.catchUp(conversation)
+            self.startBackfill(conversation)
+        }
+    }
+
+    /// After the catch-up, so the backfill pages back from history that is already contiguous.
+    private func startBackfill(_ conversation: ConversationID) {
+        guard downloadsFullHistory, conversation == openConversationID else { return }
+        Task { [backfill] in await backfill.start(conversation) }
     }
 
     /// Leave a conversation. Synchronous, because it runs from `onDisappear` and
@@ -554,6 +573,7 @@ final class AppModel {
         if let closing = openConversationID {
             Task { [sync] in await sync.reactions.stop(closing) }
         }
+        Task { [backfill] in await backfill.stop() }
         openConversationID = nil
         reactionsRequestedTo = nil
         messages = []
@@ -578,6 +598,9 @@ final class AppModel {
     /// worth keeping, shallow enough that a miss does not spend the afternoon.
     private static let revealPageLimit = 10
 
+    /// Older messages loaded above a revealed one, so it does not land at the very top of the history.
+    private static let revealContext = 50
+
     /// Whether a jump is currently digging for its message.
     private(set) var revealing = false
 
@@ -597,6 +620,12 @@ final class AppModel {
         if messages.contains(where: { $0.id == messageID }) { return true }
         revealing = true
         defer { revealing = false }
+        if let conversation = openConversationID,
+           let depth = try? await store.messages.depth(of: messageID, in: conversation) {
+            window = max(window, depth + Self.revealContext)
+            if let stored = await transcript(conversation) { messages = stored }
+            if messages.contains(where: { $0.id == messageID }) { return true }
+        }
         for _ in 0..<Self.revealPageLimit {
             await loadOlder()
             if messages.contains(where: { $0.id == messageID }) { return true }
@@ -1018,6 +1047,22 @@ final class AppModel {
             optionIDs, in: pollID, groupID: groupID, multiple: multiple)
         else { return }
         polls[pollID] = updated
+    }
+
+    // MARK: - Search
+
+    /// Stored messages matching `query`, in one conversation or across all of them.
+    func search(_ query: String, in conversation: ConversationID? = nil) async -> [SearchHit] {
+        (try? await store.messages.search(query, in: conversation)) ?? []
+    }
+
+    /// How far back a conversation's stored history reaches, or nil once it is complete.
+    func searchedBackTo(_ conversation: ConversationID) async -> Date? {
+        guard (try? await store.conversations.historyComplete(conversation)) == false,
+              let oldest = try? await store.messages.oldestID(in: conversation),
+              let message = try? await store.messages.message(id: oldest, in: conversation)
+        else { return nil }
+        return message.date
     }
 
     // MARK: - Files
@@ -1967,6 +2012,7 @@ final class AppModel {
         UserDefaults.standard.removeObject(forKey: Self.currentUserKey)
         await previews.clear()
         files.clear()
+        await backfill.stop()
         // The queue went with the conversations, so its files go too. An unsent
         // photo belongs to the session that picked it. And the pictures: a
         // month of somebody else's photographs is not for the next account.
@@ -2003,6 +2049,7 @@ final class AppModel {
     /// to say every row whose only author is the server. The list comes back on
     /// the sync that follows; the open transcript comes back on its catch-up.
     func clearCache() async {
+        await backfill.stop()
         let rows = (try? await store.conversations.list(limit: 5000)) ?? []
         for row in rows { try? await store.conversations.delete(row.id) }
         await previews.clear()
@@ -2312,9 +2359,10 @@ final class AppModel {
 
         let batch = Array(wanted.prefix(Self.maxQuoteFetches))
         attemptedQuotes.formUnion(batch)
-        Task { [api] in
+        Task { [api, store] in
             for id in batch {
-                let parent = try? await api.message(id: id, in: conversation)
+                let stored = try? await store.messages.message(id: id, in: conversation)
+                let parent = if let stored { stored } else { try? await api.message(id: id, in: conversation) }
                 guard conversation == self.openConversationID else { return }
                 if let parent {
                     self.quotedParents[id] = parent

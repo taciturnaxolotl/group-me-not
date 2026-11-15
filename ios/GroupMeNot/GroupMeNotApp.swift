@@ -60,6 +60,9 @@ struct GroupMeNotApp: App {
                 .onChange(of: settings.sharesPresence, initial: true) { _, shares in
                     model.sharesPresence = shares
                 }
+                .onChange(of: settings.downloadsFullHistory, initial: true) { _, downloads in
+                    model.downloadsFullHistory = downloads
+                }
                 .onChange(of: scenePhase) { _, phase in
                     // Faye replays nothing it missed, so coming back from the
                     // background means running the whole catch-up loop again.

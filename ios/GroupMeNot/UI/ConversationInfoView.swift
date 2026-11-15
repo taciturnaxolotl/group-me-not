@@ -13,6 +13,8 @@ struct ConversationInfoView: View {
     /// nowhere to open it — a chain, say, which is already presented over the
     /// conversation this would leave.
     var onOpenDirect: ((ConversationRow) -> Void)?
+    /// Scroll the transcript to a message picked from search, after this sheet closes.
+    var onOpenMessage: ((String) -> Void)?
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -124,6 +126,18 @@ struct ConversationInfoView: View {
             // is in the way.
             if !isSearching {
                 Section { header.listRowSeparator(.hidden) }
+                if let onOpenMessage {
+                    Section {
+                        NavigationLink {
+                            MessageSearchView(conversation: conversation.id) { id in
+                                onOpenMessage(id)
+                                dismiss()
+                            }
+                        } label: {
+                            Label("Search Messages", systemImage: "magnifyingglass")
+                        }
+                    }
+                }
                 if let summary = conversation.summary, !summary.isEmpty {
                     Section("About") {
                         Text(summary)

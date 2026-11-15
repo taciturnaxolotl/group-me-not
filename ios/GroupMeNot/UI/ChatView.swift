@@ -338,6 +338,8 @@ struct ChatView: View {
     /// link in the transcript, which is the one thing in here that can lead to
     /// a different conversation.
     var onOpenConversation: (ConversationRow) -> Void = { _ in }
+    /// A message to open on instead of the foot, such as a search result picked from the list.
+    var openingMessageID: String?
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -348,6 +350,8 @@ struct ChatView: View {
     @State private var isLoadingOlder = false
     @State private var isInfoPresented = false
     @State private var isPinnedPresented = false
+    /// A search result to scroll to once the sheet it was picked in has closed.
+    @State private var searchTarget: String?
     /// The message whose reactions are being looked at.
     ///
     /// A box rather than a plain `@State`, and read by nobody in this body.
@@ -547,6 +551,10 @@ struct ChatView: View {
     /// with nothing above it reads as the top of the conversation.
     private static let openingAnchor = UnitPoint(x: 0.5, y: 0.25)
 
+    /// A jumped-to message sits near the middle, with context on both sides.
+    private static let jumpAnchor = UnitPoint(x: 0.5, y: 0.45)
+    private static let jumpSettleDelays: [Duration] = [.milliseconds(120), .milliseconds(350), .milliseconds(800)]
+
     var body: some View {
         lifecycle
     }
@@ -604,7 +612,7 @@ struct ChatView: View {
             // inside this view's navigation bar and safe-area bar while
             // ignoring the safe area across both, and what it did to the layout
             // outlived its own dismissal.
-            .fullScreenCover(item: $thread, onDismiss: leaveIfAsked) { focus in
+            .fullScreenCover(item: $thread, onDismiss: afterSheet) { focus in
                 ThreadView(
                     items: threadItems(rootedAt: focus.rootID),
                     anchorY: focus.anchorY,
@@ -694,28 +702,41 @@ struct ChatView: View {
                         Task { await model.setPinned(false, message: message) }
                     })
             }
-            .sheet(isPresented: $isInfoPresented, onDismiss: leaveIfAsked) {
+            .sheet(isPresented: $isInfoPresented, onDismiss: afterSheet) {
                 ConversationInfoView(
                     conversation: current, members: model.members,
-                    onOpenDirect: { leavingFor = $0 })
+                    onOpenDirect: { leavingFor = $0 },
+                    onOpenMessage: { searchTarget = $0 })
             }
-            .sheet(item: $viewingPerson, onDismiss: leaveIfAsked) { person in
+            .sheet(item: $viewingPerson, onDismiss: afterSheet) { person in
                 PersonView(
                     userID: person.id, name: person.name, avatarURL: person.avatarURL,
-                    onOpenDirect: { leavingFor = $0 }, openedFrom: current.id)
+                    onOpenDirect: { leavingFor = $0 }, openedFrom: current.id,
+                    onOpenMessage: current.id == .direct(otherUserID: person.id) ? { searchTarget = $0 } : nil)
             }
     }
 
-    private func leaveIfAsked() {
+    /// Acts on what a closing sheet asked for, once it is out of the way of the transcript.
+    private func afterSheet() {
+        if let id = searchTarget {
+            searchTarget = nil
+            jump(to: id)
+        }
         guard let row = leavingFor else { return }
         leavingFor = nil
         onOpenConversation(row)
+    }
+
+    private func jump(to id: String) {
+        Task { if await model.reveal(id) { focus(on: id) } }
     }
 
     /// Scroll to a message, waiting for its row if the rebuild has not caught
     /// up. Paging back changes `model.messages`; the rows follow a beat later,
     /// and scrolling to an id that does not exist yet is a silent no-op.
     private func focus(on id: String) {
+        // Otherwise content settling under the jump drags the view back to the foot.
+        pinsFoot = false
         if rows.contains(where: { $0.id == id }) {
             openingTarget = id
         } else {
@@ -735,6 +756,7 @@ struct ChatView: View {
                 // creates on its way past.
                 await model.remember(conversation)
                 await model.openConversation(conversation.id)
+                if let openingMessageID { jump(to: openingMessageID) }
             }
             // Long enough for a push to finish, short enough that a
             // conversation whose history is already on disk still feels
@@ -892,8 +914,17 @@ struct ChatView: View {
             // movement the reader should see happen.
             .onChange(of: openingTarget) { _, target in
                 guard let target else { return }
-                proxy.scrollTo(target, anchor: Self.openingAnchor)
                 openingTarget = nil
+                let anchor = target == TranscriptRow.unreadMarkerID ? Self.openingAnchor : Self.jumpAnchor
+                proxy.scrollTo(target, anchor: anchor)
+                // Far rows land on estimated heights; scrolling again once they are measured corrects the drift.
+                Task {
+                    for delay in Self.jumpSettleDelays {
+                        try? await Task.sleep(for: delay)
+                        guard !isUserScrolling else { return }
+                        proxy.scrollTo(target, anchor: anchor)
+                    }
+                }
             }
         }
     }

@@ -409,6 +409,53 @@ actor MessageStore {
         )
     }
 
+    // MARK: - History and search
+
+    /// The oldest stored message, which is where a backfill pages back from.
+    func oldestID(in conversation: ConversationID) throws -> String? {
+        try db.queryOne(
+            "SELECT id FROM messages WHERE conversation_key = ? ORDER BY sort_key ASC, id ASC LIMIT 1",
+            [SQLValue(conversation.storageKey)]
+        ) { $0.string(0) }
+    }
+
+    /// How many stored messages are this one or newer, which is the transcript window that reaches it.
+    func depth(of messageID: String, in conversation: ConversationID) throws -> Int? {
+        try db.queryOne(
+            """
+            SELECT COUNT(*) FROM messages
+             WHERE conversation_key = ?1
+               AND sort_key >= (SELECT sort_key FROM messages WHERE conversation_key = ?1 AND id = ?2)
+            """,
+            [SQLValue(conversation.storageKey), SQLValue(messageID)]
+        ) { $0.int(0) }.flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    /// Stored messages matching every word of `query` as a prefix, newest first.
+    func search(_ query: String, in conversation: ConversationID? = nil, limit: Int = 200) throws -> [SearchHit] {
+        guard let match = SearchHit.ftsQuery(query) else { return [] }
+        var sql = """
+            SELECT c.kind, m.conversation_key, m.payload,
+                   snippet(messages_fts, 0, char(2), char(3), '…', 16)
+              FROM messages_fts
+              JOIN messages m ON m.rowid = messages_fts.rowid
+              JOIN conversations c ON c.key = m.conversation_key
+             WHERE messages_fts MATCH ?1 AND m.system = 0 AND m.deleted_at IS NULL
+            """
+        var bindings = [SQLValue(match), SQLValue(limit)]
+        if let conversation {
+            sql += " AND m.conversation_key = ?3"
+            bindings.append(SQLValue(conversation.storageKey))
+        }
+        sql += " ORDER BY m.sort_key DESC LIMIT ?2"
+        return try db.query(sql, bindings) { row -> SearchHit? in
+            guard let id = ConversationID(storageKind: row.int64(0), storageKey: row.string(1)),
+                  let message = try? decodeMessage(at: 2, of: row)
+            else { return nil }
+            return SearchHit(conversation: id, message: message, snippet: row.string(3))
+        }.compactMap { $0 }
+    }
+
     // MARK: - Internals
 
     /// Writes an already-merged message straight over the stored row.
@@ -470,7 +517,11 @@ actor MessageStore {
     }
 
     private func decodeMessage(_ row: Row) throws -> Message {
-        guard let data = row.dataOrNil(0),
+        try decodeMessage(at: 0, of: row)
+    }
+
+    private func decodeMessage(at column: Int32, of row: Row) throws -> Message {
+        guard let data = row.dataOrNil(column),
               let message = try? StoreCoding.decode(Message.self, from: data)
         else {
             throw StoreError.corruptRow(table: "messages", key: "payload")
