@@ -463,6 +463,9 @@ struct ChatView: View {
     /// the foot comes back into view.
     @State private var pinsFoot = true
 
+    /// The lowest row on screen, kept by `scrollPosition` as content above it changes height.
+    @State private var visibleRowID: String?
+
     /// Which end of the content holds still, given both reasons to hold the
     /// end: a page spliced in above, and a reader standing at the foot.
     private var contentAnchor: UnitPoint? {
@@ -837,6 +840,7 @@ struct ChatView: View {
                         messageRows
                         typingRow
                     }
+                    .scrollTargetLayout()
                     bottomSpacer
                 }
                 .padding(.horizontal, 10)
@@ -851,6 +855,8 @@ struct ChatView: View {
             // Deliberately optional, and `nil` nearly all the time. See
             // `sizeChangeAnchor`.
             .defaultScrollAnchor(contentAnchor, for: .sizeChanges)
+            // Pins the lowest visible row, so rows spliced or resized above it cannot move the reader.
+            .scrollPosition(id: $visibleRowID, anchor: .bottom)
             .scrollDismissesKeyboard(.interactively)
             // Content fades out under the composer rather than sliding beneath
             // a hard edge. This is the other half of `safeAreaBar`; without it
