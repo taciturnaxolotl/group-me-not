@@ -348,6 +348,7 @@ struct ChatView: View {
     @State private var rebuildTask: Task<Void, Never>?
     @State private var draft = ""
     @State private var isLoadingOlder = false
+    @State private var isLoadingNewer = false
     @State private var isInfoPresented = false
     @State private var isPinnedPresented = false
     /// A search result to scroll to once the sheet it was picked in has closed.
@@ -470,11 +471,20 @@ struct ChatView: View {
     /// The lowest row on screen, kept by `scrollPosition` as content above it changes height.
     @State private var visibleRowID: String?
 
+    private var heldRow: Binding<String?> {
+        Binding(get: { pinsFoot || contentFits ? nil : visibleRowID }, set: { visibleRowID = $0 })
+    }
+
     /// Which end of the content holds still, given both reasons to hold the
     /// end: a page spliced in above, and a reader standing at the foot.
     private var contentAnchor: UnitPoint? {
-        sizeChangeAnchor ?? (pinsFoot ? .bottom : nil)
+        if contentFits { return .bottom }
+        return sizeChangeAnchor ?? (pinsFoot ? .bottom : nil)
     }
+
+    /// Whether the whole transcript fits on screen. Such a chat sits at the foot and never needs scrolling,
+    /// and a scroll asked of it overshoots and bounces back.
+    @State private var contentFits = true
 
     /// Bumped whenever something has happened that should put the newest
     /// message on screen. Cheaper and more reliable than watching row counts,
@@ -561,6 +571,7 @@ struct ChatView: View {
 
     private var chrome: some View {
         transcript
+            .overlay(alignment: .bottom) { jumpToLatest }
             .background(Color(.systemBackground))
             // A share link is tappable twice over: as the card under the
             // bubble and as the URL inside it. Both should do the same thing,
@@ -878,7 +889,8 @@ struct ChatView: View {
             // `sizeChangeAnchor`.
             .defaultScrollAnchor(contentAnchor, for: .sizeChanges)
             // Pins the lowest visible row, so rows spliced or resized above it cannot move the reader.
-            .scrollPosition(id: $visibleRowID, anchor: .bottom)
+            // Only up in the history; at the foot, `contentAnchor` holds the end and the two would fight.
+            .scrollPosition(id: heldRow, anchor: .bottom)
             .scrollDismissesKeyboard(.interactively)
             // Content fades out under the composer rather than sliding beneath
             // a hard edge. This is the other half of `safeAreaBar`; without it
@@ -905,7 +917,14 @@ struct ChatView: View {
             // Short and flat rather than springy. A bouncing settle at the
             // foot is what reads as the transcript overshooting, and several of
             // these can overlap during a catch-up.
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentSize.height + geometry.contentInsets.top + geometry.contentInsets.bottom
+                    <= geometry.containerSize.height + 1
+            } action: { _, fits in
+                contentFits = fits
+            }
             .onChange(of: bottomRequest) {
+                guard !contentFits else { return }
                 withAnimation(.easeOut(duration: 0.22)) {
                     proxy.scrollTo(bottomAnchor, anchor: .bottom)
                 }
@@ -915,7 +934,11 @@ struct ChatView: View {
             .onChange(of: openingTarget) { _, target in
                 guard let target else { return }
                 openingTarget = nil
-                let anchor = target == TranscriptRow.unreadMarkerID ? Self.openingAnchor : Self.jumpAnchor
+                guard target != TranscriptRow.unreadMarkerID else {
+                    proxy.scrollTo(target, anchor: Self.openingAnchor)
+                    return
+                }
+                let anchor = Self.jumpAnchor
                 proxy.scrollTo(target, anchor: anchor)
                 // Far rows land on estimated heights; scrolling again once they are measured corrects the drift.
                 Task {
@@ -1140,7 +1163,7 @@ struct ChatView: View {
     }
 
     @ViewBuilder private var typingRow: some View {
-        if model.isAnyoneTyping {
+        if model.isAnyoneTyping, !model.isDetached {
             TypingIndicator(people: model.typingPeople, names: model.typingNames)
                 // Quick in, slow out. Somebody starting to type is news and
                 // should arrive promptly; somebody stopping is a guess made by a
@@ -1196,6 +1219,12 @@ struct ChatView: View {
     /// alone. There is no longer a button to reveal, so there is nothing here to
     /// settle or delay.
     private func footVisibilityChanged(_ visible: Bool) {
+        // The foot of a slice of old history is not the present: page forwards instead.
+        if model.isDetached {
+            isAtFoot = false
+            if visible { requestNewer() }
+            return
+        }
         isAtFoot = visible
         // Standing at the foot is the whole condition for following it.
         pinsFoot = visible
@@ -1265,6 +1294,37 @@ struct ChatView: View {
         // the conversation on every open.
         guard isSettled, hasScrolled, index < Self.prefetchDistance else { return }
         requestOlder()
+    }
+
+    private func requestNewer() {
+        guard !isLoadingNewer else { return }
+        isLoadingNewer = true
+        Task {
+            await model.loadNewer()
+            isLoadingNewer = false
+        }
+    }
+
+    /// Shown while the transcript holds a slice of old history, since scrolling back down would take a page at a time.
+    @ViewBuilder private var jumpToLatest: some View {
+        if model.isDetached {
+            Button {
+                Task {
+                    await model.returnToPresent()
+                    pinsFoot = true
+                    bottomRequest += 1
+                }
+            } label: {
+                Label("Jump to Latest", systemImage: "arrow.down")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+            }
+            .buttonStyle(.plain)
+            .glassEffect(.regular.interactive(), in: .capsule)
+            .padding(.bottom, 10)
+            .transition(.opacity.combined(with: .scale(scale: 0.8)))
+        }
     }
 
     /// Idempotent by construction: a request in flight is never joined by a
@@ -1706,6 +1766,8 @@ struct ChatView: View {
         replyingTo = nil
         named = []
         selection = NSRange(location: 0, length: 0)
+        // Sending returns a detached transcript to the present, which must land at the foot.
+        pinsFoot = true
         bottomRequest += 1
         Task {
             await model.send(text, media: media, replyingTo: parent, mentioning: mentions)

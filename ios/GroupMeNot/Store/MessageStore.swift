@@ -326,7 +326,44 @@ actor MessageStore {
             """,
             [SQLValue(key), SQLValue(limit)]
         ) { row in (id: row.string(0), payload: row.dataOrNil(1)) }
+        return decoding(rows, in: key).reversed()
+    }
 
+    /// Every stored message from `oldestID` through `newestID`, oldest first: a slice of history away from the present.
+    func span(_ conversation: ConversationID, from oldestID: String, through newestID: String) throws -> [Message] {
+        let key = conversation.storageKey
+        let rows = try db.query(
+            """
+            SELECT id, payload FROM messages
+             WHERE conversation_key = ?1
+               AND sort_key >= (SELECT sort_key FROM messages WHERE conversation_key = ?1 AND id = ?2)
+               AND sort_key <= (SELECT sort_key FROM messages WHERE conversation_key = ?1 AND id = ?3)
+             ORDER BY sort_key ASC, id ASC
+            """,
+            [SQLValue(key), SQLValue(oldestID), SQLValue(newestID)]
+        ) { row in (id: row.string(0), payload: row.dataOrNil(1)) }
+        return decoding(rows, in: key)
+    }
+
+    /// The message `steps` away from `messageID` in one direction, or the furthest one short of that; nil if there are none.
+    func stepping(_ steps: Int, from messageID: String, older: Bool, in conversation: ConversationID) throws -> String? {
+        let comparison = older ? "<" : ">"
+        let order = older ? "DESC" : "ASC"
+        let ids = try db.query(
+            """
+            SELECT id FROM messages
+             WHERE conversation_key = ?1
+               AND sort_key \(comparison) (SELECT sort_key FROM messages WHERE conversation_key = ?1 AND id = ?2)
+             ORDER BY sort_key \(order), id \(order)
+             LIMIT ?3
+            """,
+            [SQLValue(conversation.storageKey), SQLValue(messageID), SQLValue(steps)]
+        ) { $0.string(0) }
+        return ids.last
+    }
+
+    /// Decodes in the order given, reusing cached copies and skipping (and logging) unreadable rows.
+    private func decoding(_ rows: [(id: String, payload: Data?)], in key: String) -> [Message] {
         var messages: [Message] = []
         messages.reserveCapacity(rows.count)
         for row in rows {
@@ -338,18 +375,13 @@ actor MessageStore {
             guard let payload = row.payload,
                   let message = try? StoreCoding.decode(Message.self, from: payload)
             else {
-                // Skipped rather than thrown, which is a change from what this
-                // read used to do: one unreadable row used to fail the whole
-                // query and blank the transcript. Dropping it keeps the other
-                // two hundred messages on screen, but silently dropping one is
-                // its own kind of wrong, so it says so.
                 log.error("unreadable message \(row.id, privacy: .public) in \(key, privacy: .public); left out of the transcript")
                 continue
             }
             remember(message, at: cacheKey)
             messages.append(message)
         }
-        return messages.reversed()
+        return messages
     }
 
     private func remember(_ message: Message, at key: MessageKey) {
@@ -410,6 +442,17 @@ actor MessageStore {
     }
 
     // MARK: - History and search
+
+    /// How many messages a conversation has stored, and roughly how many bytes they take.
+    func footprint(of conversation: ConversationID) throws -> (count: Int, bytes: Int) {
+        try db.queryOne(
+            """
+            SELECT COUNT(*), COALESCE(SUM(LENGTH(payload) + COALESCE(LENGTH(text), 0)), 0)
+              FROM messages WHERE conversation_key = ?
+            """,
+            [SQLValue(conversation.storageKey)]
+        ) { (count: $0.int(0), bytes: $0.int(1)) } ?? (0, 0)
+    }
 
     /// The oldest stored message, which is where a backfill pages back from.
     func oldestID(in conversation: ConversationID) throws -> String? {

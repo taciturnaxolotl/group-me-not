@@ -204,6 +204,17 @@ final class AppModel {
     /// pretending it is still loading.
     private(set) var olderPageFailed = false
 
+    /// The newest message of a slice of history away from the present, after a deep jump; nil while live.
+    private(set) var detachedThrough: String?
+    /// The oldest message of that slice.
+    @ObservationIgnored private var detachedFrom: String?
+
+    /// Whether the transcript shows a slice of old history rather than the latest messages.
+    var isDetached: Bool { detachedThrough != nil }
+
+    /// Past this many messages back, a jump loads a slice around its target instead of everything since.
+    private static let detachDepth = 600
+
     /// Placeholder ids we have already asked the server to resolve, so a row the
     /// server never replaces cannot spin the catch-up forever.
     @ObservationIgnored private var attemptedHeals: Set<String> = []
@@ -517,6 +528,8 @@ final class AppModel {
         openConversationID = conversation
         reactionsRequestedTo = nil
         window = Self.transcriptPage
+        detachedFrom = nil
+        detachedThrough = nil
         typingSweep?.cancel()
         typingUserIDs = [:]
 
@@ -576,6 +589,8 @@ final class AppModel {
         Task { [backfill] in await backfill.stop() }
         openConversationID = nil
         reactionsRequestedTo = nil
+        detachedFrom = nil
+        detachedThrough = nil
         messages = []
         outbox = []
         members = []
@@ -622,8 +637,12 @@ final class AppModel {
         defer { revealing = false }
         if let conversation = openConversationID,
            let depth = try? await store.messages.depth(of: messageID, in: conversation) {
-            window = max(window, depth + Self.revealContext)
-            if let stored = await transcript(conversation) { messages = stored }
+            if depth > Self.detachDepth {
+                await detach(around: messageID, in: conversation)
+            } else {
+                window = max(window, depth + Self.revealContext)
+                if let stored = await transcript(conversation) { messages = stored }
+            }
             if messages.contains(where: { $0.id == messageID }) { return true }
         }
         for _ in 0..<Self.revealPageLimit {
@@ -640,6 +659,12 @@ final class AppModel {
         guard let conversation = openConversationID, !reachedBeginning else { return }
         let oldest = messages.first?.id
         olderPageFailed = false
+        if let from = detachedFrom,
+           let next = try? await store.messages.stepping(Self.transcriptPage, from: from, older: true, in: conversation) {
+            detachedFrom = next
+            messages = await transcript(conversation) ?? messages
+            return
+        }
         window += Self.transcriptPage
 
         if let stored = await transcript(conversation), stored.count > messages.count {
@@ -674,6 +699,49 @@ final class AppModel {
             return
         }
         _ = try? await store.messages.upsert(page, in: conversation, asOf: asOf)
+        if detachedFrom != nil { detachedFrom = page.first?.id ?? detachedFrom }
+        messages = await transcript(conversation) ?? messages
+    }
+
+    /// Load a slice of history around a message far from the present.
+    private func detach(around messageID: String, in conversation: ConversationID) async {
+        let older = try? await store.messages.stepping(Self.revealContext, from: messageID, older: true, in: conversation)
+        let newer = try? await store.messages.stepping(Self.transcriptPage, from: messageID, older: false, in: conversation)
+        detachedFrom = older ?? messageID
+        detachedThrough = newer ?? messageID
+        reachedBeginning = false
+        messages = await transcript(conversation) ?? messages
+    }
+
+    /// Page a detached slice forwards, going live again once it meets the present.
+    func loadNewer() async {
+        guard let conversation = openConversationID, let through = detachedThrough else { return }
+        let next = try? await store.messages.stepping(Self.transcriptPage, from: through, older: false, in: conversation)
+        var beyond: String?
+        if let next {
+            beyond = try? await store.messages.stepping(1, from: next, older: false, in: conversation)
+        }
+        if beyond == nil {
+            // Keep everything already loaded, so going live moves nothing on screen.
+            if let from = detachedFrom,
+               let depth = try? await store.messages.depth(of: from, in: conversation) {
+                window = max(Self.transcriptPage, depth)
+            }
+            detachedFrom = nil
+            detachedThrough = nil
+        } else {
+            detachedThrough = next
+        }
+        messages = await transcript(conversation) ?? messages
+    }
+
+    /// Back to the latest messages from a detached slice.
+    func returnToPresent() async {
+        guard let conversation = openConversationID, isDetached else { return }
+        detachedFrom = nil
+        detachedThrough = nil
+        window = Self.transcriptPage
+        reachedBeginning = false
         messages = await transcript(conversation) ?? messages
     }
 
@@ -695,7 +763,7 @@ final class AppModel {
     /// Idempotent and cheap when there is nothing to do, which matters because
     /// the transcript calls it whenever the reader is standing at the foot.
     func markRead(_ conversation: ConversationID) async {
-        let head = conversation == openConversationID
+        let head = conversation == openConversationID && !isDetached
             ? messages.last?.id
             : conversations.first { $0.id == conversation }?.lastMessageID
         // Nothing to say, and saying it anyway is a read receipt per arriving
@@ -765,6 +833,7 @@ final class AppModel {
         mentioning mentions: Message.Attachment? = nil
     ) async {
         guard let conversation = openConversationID else { return }
+        await returnToPresent()
         await send(
             text: text, media: media, to: conversation,
             replyingTo: parent, mentioning: mentions)
@@ -1063,6 +1132,13 @@ final class AppModel {
               let message = try? await store.messages.message(id: oldest, in: conversation)
         else { return nil }
         return message.date
+    }
+
+    /// What one conversation's history costs on this phone, and whether all of it is here.
+    func storage(of conversation: ConversationID) async -> ConversationStorage? {
+        guard let footprint = try? await store.messages.footprint(of: conversation) else { return nil }
+        let complete = (try? await store.conversations.historyComplete(conversation)) ?? false
+        return ConversationStorage(messages: footprint.count, bytes: footprint.bytes, isComplete: complete)
     }
 
     // MARK: - Files
@@ -1877,9 +1953,13 @@ final class AppModel {
     /// still queued laid over it. Every read of the open conversation goes
     /// through here, so there is one answer to "what does this look like".
     private func transcript(_ conversation: ConversationID) async -> [Message]? {
-        guard let stored = try? await store.messages.recent(conversation, limit: window) else {
-            return nil
+        let read: [Message]?
+        if let from = detachedFrom, let through = detachedThrough {
+            read = try? await store.messages.span(conversation, from: from, through: through)
+        } else {
+            read = try? await store.messages.recent(conversation, limit: window)
         }
+        guard let stored = read else { return nil }
         return await overlayingPendingReactions(stored, in: conversation)
     }
 
@@ -2068,6 +2148,8 @@ final class AppModel {
         members = []
         totalUnread = 0
         window = Self.transcriptPage
+        detachedFrom = nil
+        detachedThrough = nil
         reachedBeginning = false
         olderPageFailed = false
         attemptedHeals = []

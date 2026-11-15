@@ -19,3 +19,11 @@ nonisolated struct SearchHit: Identifiable, Hashable, Sendable {
         return terms.isEmpty ? nil : terms.joined(separator: " ")
     }
 }
+
+/// One conversation's stored history, for the info sheet.
+nonisolated struct ConversationStorage: Hashable, Sendable {
+    var messages: Int
+    /// Message rows plus their search index text; images live in the shared cache and are not counted.
+    var bytes: Int
+    var isComplete: Bool
+}

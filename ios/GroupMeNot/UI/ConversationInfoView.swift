@@ -26,6 +26,7 @@ struct ConversationInfoView: View {
     @State private var memberQuery = ""
     /// Whose profile is open, if anybody's.
     @State private var viewing: PersonRef?
+    @State private var storage: ConversationStorage?
 
     private var isSearching: Bool {
         !memberQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -54,6 +55,7 @@ struct ConversationInfoView: View {
     private var decorated: some View {
         content
             .listStyle(.insetGrouped)
+            .task { storage = await model.storage(of: conversation.id) }
             .navigationTitle("Info")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -146,12 +148,13 @@ struct ConversationInfoView: View {
                     }
                 }
                 if let invite { share(invite) }
-                if let created = conversation.createdAt {
-                    Section {
+                Section {
+                    if let created = conversation.createdAt {
                         LabeledContent(
                             "Created",
                             value: created.formatted(date: .abbreviated, time: .omitted))
                     }
+                    if let storage { storageRow(storage) }
                 }
                 if conversation.isGroup { settingsSection }
                 // Above the roster, not below it. A group of forty puts forty
@@ -167,6 +170,17 @@ struct ConversationInfoView: View {
                 roster
             } else if isSearching {
                 ContentUnavailableView.search(text: memberQuery)
+            }
+        }
+    }
+
+    private func storageRow(_ storage: ConversationStorage) -> some View {
+        LabeledContent("On This Phone") {
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(storage.bytes.formatted(.byteCount(style: .file)))
+                    .monospacedDigit()
+                Text("\(storage.messages.formatted()) messages\(storage.isComplete ? "" : ", still downloading")")
+                    .font(.caption)
             }
         }
     }
